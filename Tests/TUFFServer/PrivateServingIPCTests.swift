@@ -70,6 +70,36 @@ func servingTestRoot(_ name: String) throws -> URL {
         releasePublication.signal()
     }
 
+    @Test func aServerDirectoryLeftBy9xIsTightenedNotRefused() throws {
+        let root = try servingTestRoot("upgrade")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let server = root.appendingPathComponent("TUFF/Server", isDirectory: true)
+        try FileManager.default.createDirectory(at: server, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o755])
+        try Data("{}".utf8).write(to: server.appendingPathComponent("background-server.json"))
+        let profile = try ServingHostProfile(applicationSupportURL: root, bundleIdentifier: "test.upgrade")
+        _ = try profile.token()
+        let mode = try FileManager.default.attributesOfItem(atPath: server.path)[.posixPermissions] as? Int
+        #expect(mode == 0o700)
+        #expect(FileManager.default.fileExists(atPath: server.appendingPathComponent("background-server.json").path))
+    }
+
+    @Test func aSymlinkedServerDirectoryIsStillRefused() throws {
+        let root = try servingTestRoot("symlink")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let elsewhere = root.appendingPathComponent("elsewhere", isDirectory: true)
+        try FileManager.default.createDirectory(at: elsewhere, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o755])
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("TUFF"),
+                                                withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("TUFF/Server"),
+                                                   withDestinationURL: elsewhere)
+        let profile = try ServingHostProfile(applicationSupportURL: root, bundleIdentifier: "test.symlink")
+        #expect(throws: ServingHostProfileError.self) { try profile.prepare() }
+        let mode = try FileManager.default.attributesOfItem(atPath: elsewhere.path)[.posixPermissions] as? Int
+        #expect(mode == 0o755)
+    }
+
     @Test func privateSocketTokenIsSeparateFromHTTPControlToken() throws {
         let root = try servingTestRoot("tokens")
         defer { try? FileManager.default.removeItem(at: root) }

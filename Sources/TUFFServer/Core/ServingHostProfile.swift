@@ -188,11 +188,27 @@ public struct ServingHostProfile: Sendable, Equatable {
         }
     }
 
+    /// TUFF 9.x created `TUFF/Server` with the default 0755 for its control
+    /// token and Background API settings, so an updated profile already has
+    /// it. A real directory this user owns is tightened to 0700 in place
+    /// (through a descriptor, so a swapped-in symlink is never followed);
+    /// anything else is still refused.
     fileprivate static func verifyPrivateDirectory(_ url: URL) throws {
         var info = stat()
         guard url.path.withCString({ lstat($0, &info) }) == 0,
               (info.st_mode & S_IFMT) == S_IFDIR,
-              info.st_uid == getuid(), (info.st_mode & 0o077) == 0 else {
+              info.st_uid == getuid() else {
+            throw ServingHostProfileError.unsafeDirectory(url.lastPathComponent)
+        }
+        if (info.st_mode & 0o077) == 0 { return }
+        let fd = url.path.withCString { open($0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) }
+        guard fd >= 0 else { throw ServingHostProfileError.unsafeDirectory(url.lastPathComponent) }
+        defer { close(fd) }
+        var opened = stat()
+        guard fstat(fd, &opened) == 0,
+              opened.st_dev == info.st_dev, opened.st_ino == info.st_ino,
+              opened.st_uid == getuid(), fchmod(fd, 0o700) == 0,
+              fstat(fd, &opened) == 0, (opened.st_mode & 0o077) == 0 else {
             throw ServingHostProfileError.unsafeDirectory(url.lastPathComponent)
         }
     }
