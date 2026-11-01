@@ -82,11 +82,11 @@ struct PromptComposerView: View {
             newlineShortcut: model.newlineShortcut,
             canRun: model.canSubmit,
             canAcceptImages: model.isImageInputAvailable
-                && !model.isRunning
+                && !model.isSelectedConversationRunning
                 && !model.isAddingImages,
             // Every model reads text, so a file needs no companion pack — only
             // that a run is not already in flight.
-            canAcceptDocuments: !model.isRunning,
+            canAcceptDocuments: !model.isSelectedConversationRunning,
             onSubmit: model.submit,
             onImagesDropped: { model.addImages($0) },
             onDocumentsDropped: { model.attachDocuments($0) },
@@ -223,7 +223,7 @@ struct PromptComposerView: View {
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .fixedSize()
-        .disabled(model.isRunning || !(canAddImages || canAddDocuments))
+        .disabled(model.isSelectedConversationRunning || !(canAddImages || canAddDocuments))
         .help("Attach an image or a file")
         .accessibilityLabel("Add an attachment")
     }
@@ -256,12 +256,12 @@ struct PromptComposerView: View {
     }
 
     private var canAddImages: Bool {
-        model.isImageInputAvailable && !model.isRunning && !model.isAddingImages
+        model.isImageInputAvailable && !model.isSelectedConversationRunning && !model.isAddingImages
             && model.imageAttachments.count < model.maximumImageAttachments
     }
 
     private var canAddDocuments: Bool {
-        !model.isRunning
+        !model.isSelectedConversationRunning
             && model.documentAttachments.count < AppModel.maximumDocumentAttachments
     }
 
@@ -296,7 +296,7 @@ struct PromptComposerView: View {
 
     @ViewBuilder
     private var clearAction: some View {
-        if !model.isRunning && model.hasComposedInput {
+        if !model.isSelectedConversationRunning && model.hasComposedInput {
             Button {
                 model.promptText = ""
                 model.clearImages()
@@ -311,7 +311,7 @@ struct PromptComposerView: View {
             }
             .buttonStyle(.borderless)
             .help("Clear the message and its attachments")
-        } else if !model.isRunning && model.hasOutputTranscript {
+        } else if !model.isSelectedConversationRunning && model.hasOutputTranscript {
             Button {
                 model.clearOutput()
             } label: {

@@ -23,6 +23,7 @@ public enum WriterCore {
         var dstOff = dstOffset
         let tile = WriterCore.tileBytes
         while remaining > 0 {
+            try Task.checkCancellation()
             let n = min(remaining, tile)
             let p = srcShard.base.advanced(by: Int(srcOff))
             try Posix.pwriteAll(fd: dstFd, path: dstPath, buf: p, count: n, offset: dstOff)
@@ -93,6 +94,7 @@ public enum WriterCore {
         var source = srcAbsoluteOffset
         var destination = dstOffset
         while remaining > 0 {
+            try Task.checkCancellation()
             let count = min(Int(remaining), scratch.count) & ~3
             let sourcePointer = srcShard.base.advanced(by: Int(source))
             memcpy(scratch.baseAddress!, sourcePointer, count)

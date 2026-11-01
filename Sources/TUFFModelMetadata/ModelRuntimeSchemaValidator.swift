@@ -24,6 +24,7 @@ public enum ModelRuntimeSchemaValidator {
             throw ModelError.indexCorrupt(
                 detail: "manifest.quant is required by the executable runtime schema")
         }
+        let isPrism = config.variant == .bonsai2_2B || config.variant == .bonsai2_27B
 
         func checkedMultiply(_ lhs: UInt64, _ rhs: UInt64, field: String) throws -> UInt64 {
             let (value, overflow) = lhs.multipliedReportingOverflow(by: rhs)
@@ -115,7 +116,7 @@ public enum ModelRuntimeSchemaValidator {
                          slot: ManifestQuantSlot,
                          field: String) throws -> (shape: (UInt32, UInt32), weight: UInt64, aux: UInt64) {
             let shape = try dimensions(rows, columns, field: field)
-            guard slot.weightBits == 4 || slot.weightBits == 8,
+            guard slot.weightBits == 4 || slot.weightBits == 8 || (isPrism && slot.weightBits == 2),
                   slot.effectiveGroupSize > 0,
                   columns % slot.effectiveGroupSize == 0 else {
                 throw ModelError.indexCorrupt(detail: "\(field) has unsupported affine quantization")
@@ -139,11 +140,19 @@ public enum ModelRuntimeSchemaValidator {
             guard let entry = residentIndex.entries[name] else {
                 throw ModelError.indexCorrupt(detail: "missing required resident tensor \(name)")
             }
+            let effectiveSlot: ManifestQuantSlot
+            if config.family == .flint {
+                let elements = try checkedMultiply(UInt64(rows), UInt64(columns), field: name)
+                let bits = entry.sizeBytes == elements ? 8 : 4
+                effectiveSlot = ManifestQuantSlot(weightBits: bits, scheme: slot.scheme,
+                    scaleType: slot.scaleType, biasType: slot.biasType, groupSize: slot.groupSize)
+            } else {
+                effectiveSlot = slot
+            }
             let expected = try affineSizes(
-                rows: rows, columns: columns, slot: slot, field: name)
-            let primaryAlignment: UInt64 = slot.weightBits == 4
-                ? UInt64(MemoryLayout<UInt16>.alignment)
-                : 1
+                rows: rows, columns: columns, slot: effectiveSlot, field: name)
+            let primaryAlignment: UInt64 = effectiveSlot.weightBits == 2 ? 4 :
+                (effectiveSlot.weightBits == 4 ? UInt64(MemoryLayout<UInt16>.alignment) : 1)
             guard entry.dtype == GTurboFormatV1.DType.u32.rawValue,
                   entry.shape.0 == expected.shape.0,
                   entry.shape.1 == expected.shape.1,
@@ -156,6 +165,30 @@ public enum ModelRuntimeSchemaValidator {
                   entry.biasOffset % UInt64(MemoryLayout<UInt16>.alignment) == 0 else {
                 throw ModelError.indexCorrupt(
                     detail: "\(name) affine metadata mismatch: dtype=\(entry.dtype), shape=[\(entry.shape.0),\(entry.shape.1),\(entry.shape.2),\(entry.shape.3)], bytes=\(entry.sizeBytes), scales=\(entry.scaleSize), biases=\(entry.biasSize), expected shape=[\(expected.shape.0),\(expected.shape.1),0,0], bytes=\(expected.weight), aux=\(expected.aux)")
+            }
+            if isPrism {
+                guard name.hasSuffix(".weight") else {
+                    throw ModelError.indexCorrupt(detail: "invalid Prism projection name")
+                }
+                try requireFP32(String(name.dropLast(".weight".count)) + ".signs", count: columns)
+            }
+        }
+
+        func requireFP32Shaped(_ name: String, shape: [UInt32]) throws {
+            guard shape.count <= 4, !shape.isEmpty, shape.allSatisfy({ $0 > 0 }),
+                  let entry = residentIndex.entries[name] else {
+                throw ModelError.indexCorrupt(detail: "missing or invalid FP32 tensor \(name)")
+            }
+            let padded = shape + Array(repeating: UInt32(0), count: 4 - shape.count)
+            var elements: UInt64 = 1
+            for dimension in shape { elements = try checkedMultiply(elements, UInt64(dimension), field: name) }
+            let bytes = try checkedMultiply(elements, 4, field: name)
+            guard entry.dtype == GTurboFormatV1.DType.fp32.rawValue,
+                  entry.shape.0 == padded[0], entry.shape.1 == padded[1],
+                  entry.shape.2 == padded[2], entry.shape.3 == padded[3],
+                  entry.sizeBytes == bytes, entry.scaleOffset == 0, entry.scaleSize == 0,
+                  entry.biasOffset == 0, entry.biasSize == 0, entry.fileOffset % 4 == 0 else {
+                throw ModelError.indexCorrupt(detail: "\(name) does not match the required FP32 schema")
             }
         }
 
@@ -208,6 +241,8 @@ public enum ModelRuntimeSchemaValidator {
                               rows: stacked,
                               columns: config.hyperConnection.lowRank,
                               slot: quant.attention)
+        } else if isPrism {
+            try requireFP32("language_model.model.norm.weight", count: config.hiddenSize)
         } else {
             try requireBF16("language_model.model.norm.weight",
                             count: config.hiddenSize)
@@ -222,7 +257,7 @@ public enum ModelRuntimeSchemaValidator {
                 try requireAffine("language_model.lm_head.weight",
                                   rows: config.vocabSize,
                                   columns: config.hiddenSize,
-                                  slot: quant.embedding)
+                                  slot: config.family == .flint ? quant.attention : quant.embedding)
             }
         }
 
@@ -268,6 +303,84 @@ public enum ModelRuntimeSchemaValidator {
                     shape: [UInt32(config.numExperts), UInt32(config.hiddenSize)])
                 try requireBF16("\(prefix).mlp.router.bias",
                                 count: config.numExperts)
+            }
+        } else if config.family == .flint {
+            for layer in 0..<config.numLayers {
+                let prefix = "language_model.model.layers.\(layer)"
+                try requireBF16("\(prefix).input_layernorm.weight", count: config.hiddenSize)
+                try requireBF16("\(prefix).post_attention_layernorm.weight", count: config.hiddenSize)
+                try requireBF16("\(prefix).self_attn.q_norm.weight", count: config.headDim)
+                try requireBF16("\(prefix).self_attn.k_norm.weight", count: config.headDim)
+                try requireBF16("\(prefix).self_attn.sinks", count: config.numHeads)
+                for (name, rows) in [("q_proj", config.numHeads * config.headDim),
+                                     ("k_proj", config.numKVHeads * config.headDim),
+                                     ("v_proj", config.numKVHeads * config.headDim)] {
+                    try requireAffine("\(prefix).self_attn.\(name).weight", rows: rows,
+                                      columns: config.hiddenSize, slot: quant.attention)
+                }
+                try requireAffine("\(prefix).self_attn.o_proj.weight", rows: config.hiddenSize,
+                                  columns: config.numHeads * config.headDim, slot: quant.attention)
+                let stem = layer < 2 ? "\(prefix).mlp" : "\(prefix).mlp.shared_expert"
+                let width = config.ffnIntermediateSize(layer: layer)
+                for name in ["gate_proj", "up_proj"] {
+                    try requireAffine("\(stem).\(name).weight", rows: width,
+                                      columns: config.hiddenSize, slot: quant.sharedExpert)
+                }
+                try requireAffine("\(stem).down_proj.weight", rows: config.hiddenSize,
+                                  columns: width, slot: quant.sharedExpert)
+                if layer >= 2 {
+                    let name = "\(prefix).mlp.gate.weight"
+                    if residentIndex.entries[name]?.dtype == GTurboFormatV1.DType.bf16.rawValue {
+                        try requireBF16Shaped(name,
+                            shape: [UInt32(config.numExperts), UInt32(config.hiddenSize)])
+                    } else {
+                        try requireAffine(name, rows: config.numExperts,
+                                          columns: config.hiddenSize, slot: quant.router)
+                    }
+                }
+            }
+        } else if isPrism {
+            let linear = config.linearAttention
+            for layer in 0..<config.numLayers {
+                let p = "language_model.model.layers.\(layer)"
+                try requireFP32("\(p).input_layernorm.weight", count: config.hiddenSize)
+                try requireFP32("\(p).post_attention_layernorm.weight", count: config.hiddenSize)
+                for name in ["gate_proj", "up_proj"] {
+                    try requireAffine("\(p).mlp.\(name).weight", rows: config.intermediateSize,
+                                      columns: config.hiddenSize, slot: quant.sharedExpert)
+                }
+                try requireAffine("\(p).mlp.down_proj.weight", rows: config.hiddenSize,
+                                  columns: config.intermediateSize, slot: quant.sharedExpert)
+                if config.layerIsLinear(layer) {
+                    try requireAffine("\(p).linear_attn.in_proj_qkv.weight", rows: linear.qkvDim,
+                                      columns: config.hiddenSize, slot: quant.attention)
+                    try requireAffine("\(p).linear_attn.in_proj_z.weight", rows: linear.valueDim,
+                                      columns: config.hiddenSize, slot: quant.attention)
+                    try requireAffine("\(p).linear_attn.out_proj.weight", rows: config.hiddenSize,
+                                      columns: linear.valueDim, slot: quant.attention)
+                    for name in ["in_proj_a", "in_proj_b"] {
+                        try requireFP32Shaped("\(p).linear_attn.\(name).weight",
+                            shape: [UInt32(linear.numVHeads), UInt32(config.hiddenSize)])
+                    }
+                    try requireFP32Shaped("\(p).linear_attn.conv1d.weight",
+                        shape: [UInt32(linear.qkvDim), UInt32(linear.convKernelSize), 1])
+                    try requireFP32("\(p).linear_attn.A_log", count: linear.numVHeads)
+                    try requireFP32("\(p).linear_attn.dt_bias", count: linear.numVHeads)
+                    try requireFP32("\(p).linear_attn.norm.weight", count: linear.valueHeadDim)
+                } else {
+                    let q = config.numHeads * config.fullHeadDim
+                    let kv = config.numFullKVHeads * config.fullHeadDim
+                    try requireAffine("\(p).self_attn.q_proj.weight", rows: 2 * q,
+                                      columns: config.hiddenSize, slot: quant.attention)
+                    for name in ["k_proj", "v_proj"] {
+                        try requireAffine("\(p).self_attn.\(name).weight", rows: kv,
+                                          columns: config.hiddenSize, slot: quant.attention)
+                    }
+                    try requireAffine("\(p).self_attn.o_proj.weight", rows: config.hiddenSize,
+                                      columns: q, slot: quant.attention)
+                    try requireFP32("\(p).self_attn.q_norm.weight", count: config.fullHeadDim)
+                    try requireFP32("\(p).self_attn.k_norm.weight", count: config.fullHeadDim)
+                }
             }
         } else if config.family == .qwen36 || config.family == .qwen4Exp {
             // Qwen4-Exp shares Qwen3.6's per-layer tensor contract; what it
@@ -366,18 +479,29 @@ public enum ModelRuntimeSchemaValidator {
             ("down", config.hiddenSize, config.moeIntermediateSize),
         ]
         for layer in layout.layers {
+            if config.family == .flint && layer.layer < 2 {
+                guard layer.experts.isEmpty else {
+                    throw ModelError.indexCorrupt(detail: "Flint dense layer has routed experts")
+                }
+                continue
+            }
             guard let reference = layer.experts.first else {
                 throw ModelError.indexCorrupt(
                     detail: "routed layer \(layer.layer) has no experts")
             }
             for (role, rows, columns) in routedShapes {
+                let bits = config.family == .flint
+                    ? reference.subTensors[role]?.bits ?? quant.routedExpert.weightBits
+                    : quant.routedExpert.weightBits
+                let routedSlot = ManifestQuantSlot(weightBits: bits,
+                    scheme: quant.routedExpert.scheme, scaleType: quant.routedExpert.scaleType,
+                    biasType: quant.routedExpert.biasType, groupSize: quant.routedExpert.groupSize)
                 let sizes = try affineSizes(
-                    rows: rows, columns: columns,
-                    slot: quant.routedExpert,
+                    rows: rows, columns: columns, slot: routedSlot,
                     field: "routed layer \(layer.layer) \(role)")
                 let expectedRoles: [(String, String, [UInt32], Int?, UInt64, UInt64)] = [
                     (role, "U32", [sizes.shape.0, sizes.shape.1],
-                     quant.routedExpert.weightBits, sizes.weight,
+                     bits, sizes.weight,
                      UInt64(MemoryLayout<UInt32>.alignment)),
                     ("\(role)_scales", "BF16",
                      [sizes.shape.0, UInt32(columns / quant.routedExpert.groupSize)],

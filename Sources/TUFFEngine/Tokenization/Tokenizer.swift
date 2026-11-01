@@ -281,7 +281,11 @@ public struct GFTokenizer: @unchecked Sendable {
 
         let dialect: ChatDialect
         let resolved: ResolvedSpecialTokens
-        if Self.specialTokenID(tokenizer, Self.harmonyStartMark) != nil {
+        if Self.specialTokenID(tokenizer, "<|begin_of_text|>") != nil,
+           Self.specialTokenID(tokenizer, "<|observation|>") != nil {
+            dialect = .flint
+            resolved = try Self.resolveFlintTokens(tokenizer)
+        } else if Self.specialTokenID(tokenizer, Self.harmonyStartMark) != nil {
             dialect = .harmony
             resolved = try Self.resolveHarmonyTokens(tokenizer)
         } else if Self.specialTokenID(tokenizer, Self.minimaxBOSMark) != nil {
@@ -331,6 +335,21 @@ public struct GFTokenizer: @unchecked Sendable {
         let harmonyTokenIDs: HarmonySpecialTokenIDs?
         let stopTokenIDs: Set<Int32>
         let vocabSize: Int
+    }
+
+    private static func resolveFlintTokens(_ tokenizer: any Tokenizer) throws -> ResolvedSpecialTokens {
+        func id(_ value: String) throws -> Int32 { try requireTokenID(tokenizer, value) }
+        let bos = try id("<|begin_of_text|>"), eos = try id("<|end_of_text|>")
+        let user = try id("<|user|>"), observation = try id("<|observation|>")
+        let developer = try id("<|developer|>")
+        _ = try id("<|system|>"); _ = try id("<|assistant|>")
+        let think = try id("<think>"), endThink = try id("</think>")
+        return ResolvedSpecialTokens(bosID: bos, bosPrefixID: nil, eosID: eos, padID: eos,
+            endOfTurnID: user, toolCallStartID: try id("<tool_call>"),
+            toolCallEndID: try id("</tool_call>"), toolResponseID: try id("<tool_response>"),
+            toolResponseEndID: try id("</tool_response>"), channelStartID: think, channelEndID: endThink,
+            thinkStartID: think, thinkEndID: endThink, harmonyTokenIDs: nil,
+            stopTokenIDs: [eos, user, observation, developer], vocabSize: 150144)
     }
 
     private static func resolveGemmaTokens(
@@ -615,6 +634,9 @@ public struct GFTokenizer: @unchecked Sendable {
         case .minimax:
             return try minimaxChatTemplate(
                 messages, preserveThinking: preserveThinking)
+        case .flint:
+            return try FlintPrompt.render(messages: messages, tools: [],
+                preserveThinking: preserveThinking, addGenerationPrompt: true)
         }
     }
 
@@ -797,6 +819,11 @@ public struct GFTokenizer: @unchecked Sendable {
                                reasoning: ChatReasoning = .off,
                                preserveThinking: Bool,
                                addGenerationPrompt: Bool = true) throws -> [Int32] {
+        if dialect == .flint {
+            let prompt = try FlintPrompt.render(messages: messages, tools: tools,
+                preserveThinking: preserveThinking, addGenerationPrompt: addGenerationPrompt)
+            return encode(prompt, addBOS: false)
+        }
         guard dialect != .harmony else {
             throw GFTokenizerError.unsupportedForDialect(
                 "binary reasoning control for Harmony tool chat")
@@ -886,6 +913,8 @@ public struct GFTokenizer: @unchecked Sendable {
                         ? Self.chatMLThinkingOnSuffix
                         : Self.chatMLThinkingOffSuffix),
                 addBOS: false)
+        case .flint:
+            return [endOfTurnID] + encode(FlintPrompt.safe(content) + "<|assistant|>", addBOS: false)
         case .harmony:
             return [eosID] + encode(
                 "\(Self.harmonyStartMark)user<|message|>\(content)<|end|>"
@@ -1028,6 +1057,10 @@ public struct GFTokenizer: @unchecked Sendable {
         switch dialect {
         case .gemma:
             break
+        case .flint:
+            // No assistant end marker is rendered before an observation;
+            // rebuild rather than assume a potentially incorrect KV boundary.
+            throw GFTokenizerError.unsupportedForDialect("Flint tool-result KV continuation")
         case .chatml, .minimax:
             return try encodeTaggedToolResultContinuation(
                 cachedMessages: cachedMessages, assistant: assistant,

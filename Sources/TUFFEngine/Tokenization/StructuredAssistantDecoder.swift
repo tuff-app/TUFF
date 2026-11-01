@@ -82,7 +82,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
             reasoning == .on
         case .minimax:
             true
-        case .gemma, .harmony:
+        case .gemma, .harmony, .flint:
             false
         }
     }
@@ -112,7 +112,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         guard !failed else { throw ToolCallParserError.malformed }
         if let harmonyDecoder {
             return try harmonyDecoder.consume(tokenID: tokenID, delta: delta)
-        } else if tokenizer.dialect == .chatml || tokenizer.dialect == .minimax {
+        } else if tokenizer.dialect == .chatml || tokenizer.dialect == .minimax || tokenizer.dialect == .flint {
             return try consumeTaggedDialect(tokenID: tokenID, delta: delta)
         }
 
@@ -240,6 +240,8 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
                 if tokenizer.dialect == .minimax {
                     calls = try MiniMaxToolCallParser().parse(text, allowedTools: allowedTools,
                         parameterSchemas: parameterSchemas, idGenerator: idGenerator)
+                } else if tokenizer.dialect == .flint {
+                    calls = [try FlintToolCallParser().parse(text, allowedTools: allowedTools, id: idGenerator())]
                 } else {
                     calls = [try QwenToolCallParser().parse(
                         text, allowedTools: allowedTools, id: idGenerator())]

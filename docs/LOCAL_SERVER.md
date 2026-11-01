@@ -37,8 +37,26 @@ uses the Context you chose, as long as that fits this Mac's memory budget;
 otherwise it falls back to Balanced. A model you haven't set up gets
 Balanced. Changes apply the next time the server loads the model.
 
-Chat and the API share one memory budget. If Chat has a model with image
-support loaded, the API answers 503 instead of loading a second model.
+The API and Chat share one inference host per user, and with it one loaded
+copy of each model. If Chat already has a model loaded, an API request uses it
+as it is: the request runs with Chat's context and memory settings, and
+answers `context_length_exceeded` if it does not fit. The one difference that
+forces a reload is greedy (`temperature` 0) versus sampled generation; the API
+then reloads the model with Chat's context kept, but only while the host is
+idle, and answers 503 `model_busy` otherwise. A model the API loaded itself is
+unloaded again after the idle time you chose.
+Image processing needs exclusive model memory. The host releases idle sessions
+and idle models when possible, without interrupting active turns. If memory is
+still held, the API answers 503 `model_memory_busy`; retry after the other work
+finishes or its model is unloaded.
+
+The conversation must alternate the way a chat does: system or developer
+messages first (merged into one system prompt), then user and assistant
+messages, with each assistant tool call followed by a result for every call.
+Consecutive user messages, a user message straight after tool results, and an
+assistant message with tool calls and no results are refused with
+`unsupported_value`. A final assistant message is continued rather than
+answered. `stop` strings are applied by the server and end the reply.
 
 ## Endpoints
 
@@ -77,8 +95,8 @@ setups, which send options these subsets refuse.
 ## Reasoning
 
 Models that reason return it separately from the answer, as
-`reasoning_content` (or `delta.reasoning_content` when streaming), with a
-count in `usage.completion_tokens_details.reasoning_tokens`.
+`reasoning_content` (or `delta.reasoning_content` when streaming). The usage
+block does not split out reasoning tokens.
 
 ## Prompt reuse
 

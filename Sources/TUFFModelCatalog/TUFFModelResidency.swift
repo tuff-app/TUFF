@@ -92,6 +92,24 @@ public struct TUFFResidencyRegistry: Sendable {
         return try acquire(record)
     }
 
+    /// Grants a temporary exclusive workspace only when every other live
+    /// reservation belongs to the caller. The full-budget record prevents
+    /// new model/session reservations until the workspace lease is released.
+    public func reserveExclusive(_ record: TUFFResidencyRecord,
+                                 allowing own: [TUFFResidencyLease]) throws -> TUFFResidencyLease {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        let fd = open(directory.appendingPathComponent("admission.lock").path,
+                      O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
+        defer { close(fd) }
+        guard flock(fd, LOCK_EX) == 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
+        defer { flock(fd, LOCK_UN) }
+        let others = activeRecords(excluding: own)
+        guard others.isEmpty else { throw MemoryBusy(holders: others) }
+        return try acquire(record)
+    }
+
     /// Writes and locks a record for this process.
     public func acquire(_ record: TUFFResidencyRecord) throws -> TUFFResidencyLease {
         try FileManager.default.createDirectory(

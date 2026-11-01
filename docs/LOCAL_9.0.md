@@ -30,7 +30,7 @@ Background API login item during isolated qualification.
 
 Release maintainers can add a fourth argument to `package_engines.sh`: the
 GitHub HTTPS download directory for that release. This produces a public catalog
-with no local file root. Upload the four `.tar` archives and their four signed
+with no local file root. Upload the five `.tar` archives and their five signed
 `.json` manifests beside the app archive; the app embeds the catalog and public
 verification key. Private keys stay outside every distribution directory.
 A release build must pass the existing release signing key as the second
@@ -68,6 +68,16 @@ swap-outs; that is a conservative test limit, not an SSD damage threshold.
 Flash Next defaults to 16 expert slots after repeated 16 GB tests showed no
 swap-outs, while 32-slot trials exceeded that limit. Larger caches remain
 available for measured tuning and manual control.
+
+An isolated 16 GB M2 Air Gemma 4 E2B Q4 text run with the current local
+10.0.0 CLI, a 36-token prompt and greedy decoding measured 47.06 decode
+tokens/s over 116 generated tokens and 36-token prefill in 0.36 s. The
+matching MLX checkpoint measured 44.14 decode tokens/s over 124 generated
+tokens and 24.10 prefill tokens/s; the generated text differed, so these are
+performance measurements, not an equivalence test. Swap in use before the
+TUFF run was approximately 2.49 GiB. These are single observations, not
+throughput guarantees. Logs: `scratch/v10-local-review/speed-existing-e2b-current.log`
+and `speed-existing-e2b-mlx.log`.
 
 The API's disk prefix cache is bounded and saves a previously unseen instruction
 prefix once, rather than writing generated-token state continuously. Set

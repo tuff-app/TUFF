@@ -21,6 +21,9 @@ constant bool FC_INT8_USE_FC [[function_constant(72)]];
 constant uint FC_SHARED_INT8_ROWS_PER_TG [[function_constant(73)]];
 // Unset/false = gelu_pytorch_tanh (Gemma), true = silu (Qwen 3.6 SwiGLU).
 constant bool FC_SHARED_INT8_ACT_SILU [[function_constant(74)]];
+// Flint: each lane reads four consecutive weight bytes per 128 elements (one
+// 128-byte line per simdgroup load) instead of two bytes per 64.
+constant bool FC_INT8_WIDE [[function_constant(75)]];
 constant constexpr float kInt8GeluSqrt2OverPi = 0.7978845608028654f;
 constant constexpr float kInt8GeluCubicCoeff  = 0.044715f;
 
@@ -39,6 +42,24 @@ static inline uint shared_int8_rows_per_tg() {
     return is_function_constant_defined(FC_SHARED_INT8_ROWS_PER_TG)
         ? FC_SHARED_INT8_ROWS_PER_TG
         : kRowsPerTGInt8;
+}
+
+static inline bool int8_wide(uint n) {
+    return is_function_constant_defined(FC_INT8_WIDE) && FC_INT8_WIDE && (n & 127u) == 0u;
+}
+
+// One lane's share of a row's dot product over a 128-element span.
+static inline float int8_wide_span(device const uint8_t* W_row, device const bfloat* s_row,
+                                   device const bfloat* b_row, device const half* x,
+                                   uint base, uint lane, float acc) {
+    const uint element = base + lane * 4u;
+    const uint g = element / kInt8GroupSize;
+    const uchar4 q = *reinterpret_cast<device const uchar4*>(W_row + element);
+    const half4 xv = *reinterpret_cast<device const half4*>(x + element);
+    const float x0 = float(xv.x), x1 = float(xv.y), x2 = float(xv.z), x3 = float(xv.w);
+    const float dot = fma(float(q.x), x0, fma(float(q.y), x1, fma(float(q.z), x2, float(q.w) * x3)));
+    acc = fma(float(s_row[g]), dot, acc);
+    return fma(float(b_row[g]), (x0 + x1) + (x2 + x3), acc);
 }
 
 inline float int8_gelu_pytorch_tanh(float x) {
@@ -86,6 +107,14 @@ kernel void dequant_int8_gemv_simd(
     device const bfloat*  b_row = biases + uint(row) * n_groups;
 
     float acc = 0.0f;
+    if (int8_wide(NN)) {
+        for (uint base = 0; base < NN; base += 128u) {
+            acc = int8_wide_span(W_row, s_row, b_row, x, base, lane, acc);
+        }
+        acc = simd_sum(acc);
+        if (lane == 0) y[row] = half(acc);
+        return;
+    }
     for (uint g = 0; g < n_groups; ++g) {
         float s = float(s_row[g]);
         float b = float(b_row[g]);
@@ -136,6 +165,20 @@ kernel void shared_int8_gate_up_act_simd(
 
     float gate_acc = 0.0f;
     float up_acc = 0.0f;
+    if (int8_wide(NN)) {
+        for (uint base = 0; base < NN; base += 128u) {
+            gate_acc = int8_wide_span(gate_row, gate_s_row, gate_b_row, x, base, lane, gate_acc);
+            up_acc = int8_wide_span(up_row, up_s_row, up_b_row, x, base, lane, up_acc);
+        }
+        gate_acc = simd_sum(gate_acc);
+        up_acc = simd_sum(up_acc);
+        if (lane == 0) {
+            float gate_half = float(half(gate_acc));
+            float up_half = float(half(up_acc));
+            act[row] = half(int8_hidden_activation(gate_half) * up_half);
+        }
+        return;
+    }
     for (uint g = 0; g < n_groups; ++g) {
         uint i0 = g * kInt8GroupSize + lane * 2u;
         uint i1 = i0 + 1u;

@@ -219,7 +219,7 @@ public enum ManifestReader {
             try validateQuant(
                 quant,
                 mxfp4Weights: m.flags["mxfp4Weights"] == true,
-                int4GroupSize: expected.int4GroupSize)
+                int4GroupSize: expected.int4GroupSize, family: expected.family, variant: expected.variant)
         } else if isProductionArch(expected) {
             throw ModelError.indexCorrupt(detail: "manifest.quant is required for the production architecture")
         }
@@ -249,8 +249,21 @@ public enum ManifestReader {
     private static func validateQuant(
         _ quant: ManifestQuant,
         mxfp4Weights: Bool,
-        int4GroupSize: Int
+        int4GroupSize: Int,
+        family: ModelFamily,
+        variant: ModelVariant
     ) throws {
+        if variant == .bonsai2_2B || variant == .bonsai2_27B {
+            for (name, slot) in [("embedding", quant.embedding), ("attention", quant.attention),
+                                 ("sharedExpert", quant.sharedExpert)] {
+                guard slot.weightBits == 2, slot.groupSize == 128,
+                      slot.scheme.lowercased() == "affine", slot.scaleType.lowercased() == "fp16",
+                      slot.biasType.lowercased() == "fp16" else {
+                    throw ModelError.indexCorrupt(detail: "unsupported Prism quantization for \(name)")
+                }
+            }
+            return
+        }
         if mxfp4Weights {
             for (name, slot) in [
                 ("embedding", quant.embedding),
@@ -278,13 +291,24 @@ public enum ManifestReader {
             }
             return
         }
+        if family == .flint {
+            let router = quant.router
+            if router.weightBits == 16 {
+                guard router.scheme.lowercased() == "bf16",
+                      router.scaleType.lowercased() == "none", router.biasType.lowercased() == "none",
+                      router.groupSize == 1 else {
+                    throw ModelError.indexCorrupt(detail: "unsupported Flint router quantization")
+                }
+            }
+        }
         let slots: [(String, ManifestQuantSlot, Set<Int>)] = [
-            ("embedding", quant.embedding, [4]),
-            ("attention", quant.attention, [4]),
+            ("embedding", quant.embedding, family == .flint ? [8] : [4]),
+            ("attention", quant.attention, family == .flint ? [4, 8] : [4]),
             ("router", quant.router, [8]),
             ("sharedExpert", quant.sharedExpert, [4, 8]),
         ]
         for (name, slot, allowedBits) in slots {
+            if family == .flint && name == "router" && slot.weightBits == 16 { continue }
             // The group size is only checked for 4-bit slots. The INT8 kernels
             // take no group-size parameter — they are compiled at 64 — so for
             // an 8-bit slot the manifest's value describes nothing the runtime
@@ -303,7 +327,7 @@ public enum ManifestReader {
             }
         }
         let routed = quant.routedExpert
-        guard routed.weightBits == 4,
+        guard (routed.weightBits == 4 || (family == .flint && routed.weightBits == 8)),
               routed.scheme.lowercased() == "affine",
               routed.scaleType.lowercased() == "bf16",
               routed.biasType.lowercased() == "bf16",

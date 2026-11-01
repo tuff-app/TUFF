@@ -6,13 +6,16 @@ public struct AppToolbox: Sendable {
     public var webSearch: @Sendable (_ query: String, _ count: Int) async throws -> AppWebSearchResponse
     public var readWebpage: @Sendable (_ url: URL) async throws -> AppWebPage
     public var searchFiles: @Sendable (_ query: String, _ count: Int) async throws -> [AppFilePassage]
+    public var coding: @Sendable (AppValidatedToolCall) async throws -> String
 
     public init(webSearch: @escaping @Sendable (String, Int) async throws -> AppWebSearchResponse,
                 readWebpage: @escaping @Sendable (URL) async throws -> AppWebPage,
-                searchFiles: @escaping @Sendable (String, Int) async throws -> [AppFilePassage]) {
+                searchFiles: @escaping @Sendable (String, Int) async throws -> [AppFilePassage],
+                coding: @escaping @Sendable (AppValidatedToolCall) async throws -> String = { _ in throw AppToolValidationError("Workspace tools are unavailable.") }) {
         self.webSearch = webSearch
         self.readWebpage = readWebpage
         self.searchFiles = searchFiles
+        self.coding = coding
     }
 }
 
@@ -25,12 +28,19 @@ public struct AppToolActivity: Equatable, Sendable, Identifiable {
     public let detail: String
     public var state: State
     public var summary: String
+    /// Bounded text returned to the model, available on demand in the UI.
+    public var resultText: String = ""
 
     public static func title(for name: String) -> String {
         switch AppToolName(rawValue: name) {
         case .webSearch?: "Searching the web"
         case .readWebpage?: "Reading a web page"
         case .searchFiles?: "Searching your files"
+        case .listFiles?: "Listing files"
+        case .readFile?: "Reading a file"
+        case .writeFile?: "Writing a file"
+        case .editFile?: "Editing a file"
+        case .runCommand?: "Running a command"
         case nil: "Using a tool"
         }
     }
@@ -52,6 +62,7 @@ public final class AppToolAnswerSession: @unchecked Sendable {
     private var webRequests = 0
     private var fileSearches = 0
     private var consecutiveRefusedRounds = 0
+    private var failedCodingCalls: [AppToolCall] = []
     /// URLs the model may read: those search returned and those the user
     /// wrote. A page's own links are not added, so retrieved text cannot send
     /// the reader somewhere new.
@@ -62,6 +73,10 @@ public final class AppToolAnswerSession: @unchecked Sendable {
     private var localTexts: [String] = []
     private var hasLocalContext: Bool
     private let userText: String
+    /// Search texts the user wrote as the whole message, a whole line or a
+    /// quoted phrase. Each may be sent once after local context exists.
+    private var userQueryCandidates: Set<String>
+    private static let minimumUserQueryCharacters = 4
 
     public init(capabilities: AppChatCapabilities, limits: AppToolLimits = .standard,
                 toolbox: AppToolbox, firstSourceID: Int = 1, userText: String,
@@ -71,6 +86,7 @@ public final class AppToolAnswerSession: @unchecked Sendable {
         self.toolbox = toolbox
         self.hasLocalContext = hasLocalContext
         self.userText = userText
+        self.userQueryCandidates = Self.userQueryCandidates(in: userText)
         self.nextSourceID = max(1, firstSourceID)
         readableURLs = Set(Self.urls(in: userText).map(Self.normalized))
     }
@@ -131,6 +147,7 @@ public final class AppToolAnswerSession: @unchecked Sendable {
             case .cancelled: .cancelled
             }
             activity.summary = result.summary
+            activity.resultText = result.modelText
             await onActivity(activity)
             round.results.append(result)
         }
@@ -156,6 +173,16 @@ public final class AppToolAnswerSession: @unchecked Sendable {
         if elapsedSeconds >= limits.maximumToolSeconds {
             return refused(call, "The time allowed for tools in one answer is used up.")
         }
+        let isCoding: Bool
+        switch validated {
+        case .listFiles, .readFile, .writeFile, .editFile, .runCommand: isCoding = true
+        default: isCoding = false
+        }
+        if isCoding, failedCodingCalls.contains(where: {
+            $0.name == call.name && $0.arguments == call.arguments
+        }) {
+            return refused(call, "This identical workspace call already failed. Inspect the error and change the approach before retrying.")
+        }
         do {
             switch validated {
             case .webSearch(let query, let count):
@@ -163,11 +190,15 @@ public final class AppToolAnswerSession: @unchecked Sendable {
                     return refused(call, "The web request limit for this answer is reached.")
                 }
                 // A substring detector cannot stop short, paraphrased or
-                // encoded secrets. After local material enters the context,
-                // permit only search text explicitly present in this turn's
-                // user message, never a model-derived query.
-                if hasLocalContext && !userText.contains(query) {
-                    return refused(call, "This chat contains local files or images. To search the web, write the exact search terms in your message. TUFF does not send model-derived queries from local material.")
+                // encoded secrets, and arbitrary substrings of the user's
+                // message would leak bits by choice. After local material
+                // enters the context, permit only the whole message, a whole
+                // line or a quoted phrase of this turn's user message, at
+                // least a few characters long and once each.
+                if hasLocalContext {
+                    guard userQueryCandidates.remove(query) != nil else {
+                        return refused(call, "This chat contains local files or images. To search the web, write the exact search terms as your whole message, on a line of their own, or in double quotes. Each phrase can be used once. TUFF does not send model-derived queries from local material.")
+                    }
                 }
                 if let copied = copiedLocalText(in: query) {
                     return refused(call, "The query repeats text from the user's files (\"\(copied)...\"). File contents are not sent to search providers.")
@@ -195,6 +226,20 @@ public final class AppToolAnswerSession: @unchecked Sendable {
                 if !passages.isEmpty { hasLocalContext = true }
                 return fileResult(call, query: query, passages: passages,
                                   characterLimit: characterLimit)
+            case .listFiles, .readFile, .writeFile, .editFile, .runCommand:
+                let text = try await toolbox.coding(validated)
+                // A successful write/edit/command may have changed the
+                // workspace, so previously failing calls can be useful again.
+                switch validated {
+                case .writeFile, .editFile, .runCommand: failedCodingCalls.removeAll()
+                default: break
+                }
+                hasLocalContext = true
+                localTexts.append(text)
+                let limited = String(text.prefix(characterLimit))
+                return .init(callID: call.id, name: call.name, status: .succeeded,
+                             modelText: limited + (text.count > characterLimit ? "\n[Output truncated.]" : ""),
+                             summary: "Completed")
             }
         } catch is CancellationError {
             return .init(callID: call.id, name: call.name, status: .cancelled,
@@ -203,7 +248,26 @@ public final class AppToolAnswerSession: @unchecked Sendable {
                 AppWebPageError.transport(.cancelled) {
             return .init(callID: call.id, name: call.name, status: .cancelled,
                          modelText: "Stopped by the user.", summary: "Stopped")
+        } catch let failure as AppCommandFailure {
+            failedCodingCalls.append(call)
+            // A non-zero command can still print private workspace contents.
+            // Treat captured output just like successful file/command output
+            // before deciding whether a later call may send a query online.
+            hasLocalContext = true
+            let text = failure.description
+            localTexts.append(text)
+            let limited = String(text.prefix(characterLimit))
+            return .init(callID: call.id, name: call.name, status: .failed,
+                         modelText: limited + (text.count > characterLimit ? "\n[Output truncated.]" : ""),
+                         summary: failure.summary)
         } catch {
+            // The error may quote a file name or path from the workspace.
+            switch validated {
+            case .listFiles, .readFile, .writeFile, .editFile, .runCommand:
+                failedCodingCalls.append(call)
+                hasLocalContext = true
+            case .webSearch, .readWebpage, .searchFiles: break
+            }
             let message = "\(error)"
             return .init(callID: call.id, name: call.name, status: .failed,
                          modelText: "Failed: \(message) No information was retrieved; do not invent any.",
@@ -337,6 +401,31 @@ public final class AppToolAnswerSession: @unchecked Sendable {
         return components.string ?? url.absoluteString
     }
 
+    /// The whole message, each whole line and each double-quoted phrase that
+    /// is long enough to be a deliberate search.
+    static func userQueryCandidates(in text: String) -> Set<String> {
+        var found: Set<String> = []
+        func add(_ raw: String) {
+            let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if value.count >= minimumUserQueryCharacters, value.count <= AppToolCatalog.maximumQueryCharacters {
+                found.insert(value)
+            }
+        }
+        add(text)
+        for line in text.split(whereSeparator: \.isNewline) { add(String(line)) }
+        let quoted = [("\"", "\""), ("\u{201C}", "\u{201D}")]
+        for (open, close) in quoted {
+            var rest = Substring(text)
+            while let start = rest.range(of: open) {
+                let after = rest[start.upperBound...]
+                guard let end = after.range(of: close) else { break }
+                add(String(after[..<end.lowerBound]))
+                rest = after[end.upperBound...]
+            }
+        }
+        return found
+    }
+
     static func urls(in text: String) -> [URL] {
         guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
         else { return [] }
@@ -348,7 +437,7 @@ public final class AppToolAnswerSession: @unchecked Sendable {
     public static func detail(for call: AppToolCall) -> String {
         guard case .object(let arguments) = call.arguments else { return "" }
         let value: String?
-        switch arguments["query"] ?? arguments["url"] {
+        switch arguments["query"] ?? arguments["url"] ?? arguments["path"] ?? arguments["command"] {
         case .string(let text)?: value = text
         default: value = nil
         }

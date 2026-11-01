@@ -111,7 +111,6 @@ public final class AppModel {
     #endif
     public let deviceCapabilities: TUFFDeviceCapabilities
     private var runsAfterCurrentLoad = false
-    private var autoObservationStart: AppAutoObservationWindow?
     private var autoWorkloadKey = "text-cold-short-t0"
 
 
@@ -392,8 +391,16 @@ public final class AppModel {
         set { inferenceStore.visionTowerMappedBytes = newValue }
     }
     public private(set) var isCancellationPending: Bool {
-        get { inferenceStore.isCancellationPending }
-        set { inferenceStore.isCancellationPending = newValue }
+        get {
+            guard let id = conversationStore.selectedConversationID else { return false }
+            return activeAnswerRuns[id]?.cancellationPending ?? false
+        }
+        set {
+            guard let id = conversationStore.selectedConversationID,
+                  let run = activeAnswerRuns[id] else { return }
+            run.cancellationPending = newValue
+            inferenceStore.isCancellationPending = newValue
+        }
     }
     /// Increments when a generation starts. The transcript watches it to put
     /// the newest turn on screen: with several images attached, the prompt and
@@ -410,13 +417,38 @@ public final class AppModel {
     private let deletionCleanup: AppModelDeletionCleanup
     /// Models being deleted, so a second click cannot start another delete.
     public private(set) var deletingModelIDs: Set<String> = []
-    private var runTask: Task<Void, Never>?
-    /// Stops the answer in progress, generation and tools alike.
-    private var answerCancellation: AppAnswerCancellation?
-    /// Reasoning from the generation in progress only. `outputThinkingText`
-    /// shows every round's; the turn keeps the final generation's, and each
-    /// round keeps its own.
-    private var currentGenerationThinking = ""
+    private final class ActiveAnswerRun {
+        let conversationID: UUID
+        let runtimeKey: AppLoadedRuntimeKey
+        let modelProfileKey: String
+        let scopedClient: any AppInferenceClient
+        let cancellation = AppAnswerCancellation()
+        var task: Task<Void, Never>?
+        var currentGenerationThinking = ""
+        var hasHandledTerminalEvent = false
+        var cancellationPending = false
+        var observationStart: AppAutoObservationWindow?
+        var phase: AppGenerationPhase = .prefill
+        var tokenCount = 0
+        var elapsedDecodeSeconds = 0.0
+        var prefillDone = 0
+        var prefillTotal = 0
+
+        init(conversationID: UUID, runtimeKey: AppLoadedRuntimeKey,
+             modelProfileKey: String, scopedClient: any AppInferenceClient) {
+            self.conversationID = conversationID
+            self.runtimeKey = runtimeKey
+            self.modelProfileKey = modelProfileKey
+            self.scopedClient = scopedClient
+        }
+    }
+    private var activeAnswerRuns: [UUID: ActiveAnswerRun] = [:]
+    private var sessionCleanups: [UUID: Task<Void, Never>] = [:]
+    #if os(macOS)
+    private var sessionPressureSource: DispatchSourceMemoryPressure?
+    #endif
+    /// Set only while one answer event is synchronously applied on MainActor.
+    private var handlingAnswerConversationID: UUID?
     private var loadTask: Task<Void, Never>?
     private var visionInstallTask: Task<Void, Never>?
     private var unloadTask: Task<Void, Never>?
@@ -440,8 +472,6 @@ public final class AppModel {
     }
     private var visionInstallTargetDirectory: URL?
     private var pendingExplicitLoadRuntimeKey: AppLoadedRuntimeKey?
-    private var activeRunRuntimeKey: AppLoadedRuntimeKey?
-    private var hasHandledTerminalEvent = false
     private let memorySampler: AppMemorySampler
     private let settingsPersistenceEnabled: Bool
     /// The debounced settings write. See `persistSettingsSoon`.
@@ -568,6 +598,10 @@ public final class AppModel {
         self.settingsStore.runFilesInSandbox = settings.runFilesInSandbox
         self.toolStore.indexInSandbox = settings.runFilesInSandbox
         self.settingsStore.fileSearchEnabled = settings.fileSearchEnabled
+        self.settingsStore.codingWriteEnabled = settings.codingWriteEnabled
+        self.settingsStore.codingCommandEnabled = settings.codingCommandEnabled
+        self.settingsStore.codingNetworkEnabled = settings.codingNetworkEnabled
+        self.settingsStore.codingFolderID = settings.codingFolderID
         self.settingsStore.searchProvider = settings.searchProvider
         self.visionInstallationStatus = AppVisionPackInstallationProbe.status(at: directory)
 
@@ -637,6 +671,16 @@ public final class AppModel {
         AppImageAttachmentStore.sweepAbandoned(
             in: AppImageAttachmentStore.legacyRoot)
         refreshVisionInstallReadiness()
+        #if os(macOS)
+        if client is any AppSessionInferenceClient {
+            let source = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
+            source.setEventHandler { [weak self] in
+                Task { @MainActor [weak self] in self?.reclaimIdleConversationSessions() }
+            }
+            sessionPressureSource = source
+            source.resume()
+        }
+        #endif
     }
 
     // MARK: - Model catalog
@@ -681,7 +725,10 @@ public final class AppModel {
     public var isInstallingAnyModel: Bool { installs.contains { $0.isInstalling } }
 
     public func canSelectModel(_ coordinator: ModelInstallCoordinator) -> Bool {
-        guard !isRunning, !loadState.isLoading,
+        // With a shared serving pool, other chats keep generating on their own
+        // models while the selection moves. The selected chat itself is the
+        // exception: rebinding it would change the model it is answering on.
+        guard !runsBlockSelectionChange, !loadState.isLoading,
               coordinator.id != selectedModelID,
               hardwareRequirementsSatisfied(for: coordinator) else { return false }
         // A transfer keeps writing beside its original text model. Wait for it
@@ -717,6 +764,7 @@ public final class AppModel {
         // Capture edits to the current model before `selectedModelID` changes
         // which profile key persistence resolves.
         persistSettings()
+        if let id = conversationStore.selectedConversationID { endConversationSession(id) }
         selectedModelID = coordinator.id
         conversationStore.rebindConversation(
             to: coordinator.descriptor.settingsProfileKey)
@@ -748,7 +796,7 @@ public final class AppModel {
     /// question with a PDF on it still reads as a two-line question and the
     /// file can be taken back off.
     public func attachDocuments(_ urls: [URL]) {
-        guard !isRunning else { return }
+        guard !isSelectedConversationRunning else { return }
         var added: [AppDocumentAttachment] = []
         var refusedForCapacity = false
         for url in urls {
@@ -772,7 +820,7 @@ public final class AppModel {
     }
 
     public func removeDocument(id: UUID) {
-        guard !isRunning else { return }
+        guard !isSelectedConversationRunning else { return }
         documentAttachments.removeAll { $0.id == id }
         updateDocumentAttachmentNotice()
     }
@@ -797,13 +845,16 @@ public final class AppModel {
     }
 
     public func clearDocuments() {
-        guard !isRunning else { return }
+        guard !isSelectedConversationRunning else { return }
         documentAttachments.removeAll()
         documentAttachmentNotice = nil
     }
 
-    /// Set after a document is attached, so the size is visible before sending.
-    public var documentAttachmentNotice: String?
+    /// Set after a document is attached, so the size stays with its draft chat.
+    public var documentAttachmentNotice: String? {
+        get { conversationStore.documentAttachmentNotice }
+        set { conversationStore.documentAttachmentNotice = newValue }
+    }
 
     /// Whether the selected chat holds any image attachment, in a completed
     /// turn or in the draft being composed.
@@ -824,14 +875,16 @@ public final class AppModel {
     /// enabled — so during a load, clicking a chat did nothing and said
     /// nothing. The view reads this, so the row it offers is a row that works.
     public func canSelectConversation(_ record: AppConversationRecord) -> Bool {
-        !isRunning && !loadState.isLoading
+        guard !loadState.isLoading else { return false }
+        // A single-model client cannot switch models under a running chat; a
+        // pooled client serves every model concurrently.
+        return client is any AppPooledInferenceClient || !isRunning
+            || activeAnswerRuns.values.allSatisfy { $0.modelProfileKey == record.modelID }
     }
 
     public func selectConversation(_ record: AppConversationRecord) {
         guard canSelectConversation(record) else { return }
-        releaseTranscriptImages()
-        clearImages()
-        clearDocuments()
+        if !isRunning { releaseTranscriptImages() }
         conversationStore.selectConversation(id: record.id)
         if let coordinator = installs.first(where: {
             $0.descriptor.settingsProfileKey == record.modelID
@@ -840,9 +893,25 @@ public final class AppModel {
             selectedModelID = coordinator.id
             applySelectedModelDirectory(coordinator.directoryURL)
         }
-        generationTranscriptMailbox?.reset()
+        if !isRunning { generationTranscriptMailbox?.reset() }
         diagnostics = nil
         error = nil
+        restoreSelectedRunPresentation()
+    }
+
+    private func restoreSelectedRunPresentation() {
+        guard let selected = conversationStore.selectedConversationID,
+              let run = activeAnswerRuns[selected] else {
+            phase = .idle
+            inferenceStore.isCancellationPending = false
+            return
+        }
+        phase = run.phase
+        liveTokenCount = run.tokenCount
+        liveElapsedDecodeSeconds = run.elapsedDecodeSeconds
+        livePrefillDone = run.prefillDone
+        livePrefillTotal = run.prefillTotal
+        inferenceStore.isCancellationPending = run.cancellationPending
     }
 
     public func renameConversation(_ record: AppConversationRecord, to title: String) {
@@ -853,11 +922,37 @@ public final class AppModel {
     /// Deleting a background chat is always harmless, but deleting the
     /// selected one implicitly selects another chat and may switch models.
     public func canDeleteConversation(_ record: AppConversationRecord) -> Bool {
-        guard conversationStore.conversations.contains(where: { $0.id == record.id }),
-              !isRunning else { return false }
+        guard conversationStore.conversations.contains(where: { $0.id == record.id }) else {
+            return false
+        }
+        if isRunning {
+            return activeAnswerRuns[record.id] == nil
+                && record.id != conversationStore.selectedConversationID
+        }
         guard conversationStore.selectedConversationID == record.id else { return true }
         return !loadState.isLoading
     }
+
+    private func endConversationSession(_ conversationID: UUID) {
+        guard sessionCleanups[conversationID] == nil,
+              let sessionID = conversationStore.existingSessionID(for: conversationID),
+              let sessionClient = client as? any AppSessionInferenceClient else { return }
+        sessionCleanups[conversationID] = Task { [weak self] in
+            do {
+                try await sessionClient.endSession(sessionID, requestID: UUID())
+                self?.conversationStore.forgetSessionID(sessionID, for: conversationID)
+            } catch {
+                // Keep the identity so a later cleanup can retry.
+            }
+            self?.sessionCleanups.removeValue(forKey: conversationID)
+        }
+    }
+    func reclaimIdleConversationSessions() {
+        for id in conversationStore.existingSessionIDs.keys where activeAnswerRuns[id] == nil {
+            endConversationSession(id)
+        }
+    }
+
 
     public func deleteConversation(_ record: AppConversationRecord) {
         guard canDeleteConversation(record) else { return }
@@ -870,6 +965,7 @@ public final class AppModel {
             diagnostics = nil
             error = nil
         }
+        endConversationSession(record.id)
         conversationStore.deleteConversation(id: record.id)
         applySelectedConversationModelBinding()
     }
@@ -888,7 +984,35 @@ public final class AppModel {
         refreshVisionInstallReadiness()
     }
 
-    public var isRunning: Bool { runState == .running }
+    private var activeRunConversationID: UUID? {
+        if let selected = conversationStore.selectedConversationID,
+           activeAnswerRuns[selected] != nil { return selected }
+        return activeAnswerRuns.keys.first
+    }
+
+    private var activeRunRuntimeKey: AppLoadedRuntimeKey? {
+        activeRunConversationID.flatMap { activeAnswerRuns[$0]?.runtimeKey }
+    }
+
+    public var isRunning: Bool { !activeAnswerRuns.isEmpty }
+
+    /// A run is using the selected model's loaded runtime.
+    private var selectedModelIsRunning: Bool {
+        activeAnswerRuns.values.contains { $0.modelProfileKey == selectedDescriptor.settingsProfileKey }
+    }
+
+    /// Whether running chats forbid loading, reloading or unloading the
+    /// selected model. A pooled client only needs its own model to be idle.
+    private var runsBlockModelLifecycle: Bool {
+        client is any AppPooledInferenceClient ? selectedModelIsRunning : isRunning
+    }
+
+    private var runsBlockSelectionChange: Bool {
+        client is any AppPooledInferenceClient ? isSelectedConversationRunning : isRunning
+    }
+    public var isSelectedConversationRunning: Bool {
+        conversationStore.selectedConversationID.map { activeAnswerRuns[$0] != nil } ?? false
+    }
 
     public var isModelAvailable: Bool { loadState.isReady }
 
@@ -900,7 +1024,7 @@ public final class AppModel {
     public var canLoadModel: Bool {
         isModelInstalled && hardwareRequirementsSatisfied(for: selectedInstall)
             && memoryRequirementsSatisfied
-            && !isRunning
+            && !runsBlockModelLifecycle
             && !isVisionCompanionOperationInProgress
             && (loadState == .notLoaded || loadState.isFailed)
     }
@@ -913,13 +1037,13 @@ public final class AppModel {
     public var canReloadModel: Bool {
         isModelInstalled && hardwareRequirementsSatisfied(for: selectedInstall)
             && memoryRequirementsSatisfied
-            && !isRunning
+            && !runsBlockModelLifecycle
             && !isVisionCompanionOperationInProgress
             && loadState.isReady && hasStaleLoadedRuntime
     }
 
     public var canUnloadModel: Bool {
-        isModelInstalled && !isRunning
+        isModelInstalled && !runsBlockModelLifecycle
             && !isVisionCompanionOperationInProgress
             && loadState.isReady
     }
@@ -1289,7 +1413,18 @@ public final class AppModel {
         // Staging copies the files a request will carry. Starting a run while
         // it is in flight sent a request without those images and then landed
         // them on the next message instead.
-        !isRunning && !isAddingImages && isModelAvailable && !loadState.isLoading
+        let selectedID = conversationStore.selectedConversationID
+        let selectedAlreadyRunning = selectedID.map { activeAnswerRuns[$0] != nil } ?? false
+        let requestedRuntime = currentRuntimeKey
+        let admissionCompatible = activeAnswerRuns.count < 4
+            && (activeAnswerRuns.isEmpty || client is any AppSessionInferenceClient)
+            && activeAnswerRuns.values.allSatisfy {
+            // Chats on another model do not constrain this model's runtime.
+            $0.modelProfileKey != selectedDescriptor.settingsProfileKey
+                || $0.runtimeKey == requestedRuntime
+        }
+        return !selectedAlreadyRunning && !(selectedID.map { sessionCleanups[$0] != nil } ?? false)
+            && admissionCompatible && !isAddingImages && isModelAvailable && !loadState.isLoading
             && !isVisionCompanionOperationInProgress
             && !hasStaleLoadedRuntime
             && hasComposedInput
@@ -1305,7 +1440,9 @@ public final class AppModel {
     /// A submission can start immediately against a ready runtime or begin the
     /// selected model's normal load and run once that same load reaches ready.
     public var canSubmit: Bool {
-        guard hasComposedInput, !runsAfterCurrentLoad else { return false }
+        guard hasComposedInput, !runsAfterCurrentLoad,
+              !(conversationStore.selectedConversationID.map { sessionCleanups[$0] != nil } ?? false)
+        else { return false }
         return canRun || canLoadModel
     }
 
@@ -1313,7 +1450,9 @@ public final class AppModel {
         runsAfterCurrentLoad && loadState.isLoading
     }
 
-    public var canCancel: Bool { isRunning && !isCancellationPending }
+    public var canCancel: Bool {
+        isSelectedConversationRunning && !isCancellationPending
+    }
 
     public var hasOutputTranscript: Bool {
         !conversation.isEmpty || hasLiveMessage
@@ -1328,7 +1467,8 @@ public final class AppModel {
     /// "empty" is what takes it off the bottom of the transcript.
     public var hasLiveMessage: Bool {
         guard !conversationStore.outputTurnIsRecorded else { return false }
-        return isRunning || !outputPromptText.isEmpty
+        let selectedRunIsActive = isSelectedConversationRunning
+        return selectedRunIsActive || !outputPromptText.isEmpty
             || !outputImageAttachments.isEmpty
             || !outputDocumentAttachments.isEmpty || !outputText.isEmpty
             || !outputThinkingText.isEmpty
@@ -1341,12 +1481,15 @@ public final class AppModel {
         // A continued run generates only the remainder, so the part that was
         // already written is carried here. Without it the finished turn would
         // replace a long truncated answer with its own tail.
-        activeAssistantPrefix + (generationTranscriptMailbox?.completeText ?? outputText)
+        let liveTranscript = activeRunConversationID == conversationStore.selectedConversationID
+            && !(client is any AppSessionInferenceClient)
+            ? generationTranscriptMailbox?.completeText : nil
+        return conversationStore.outputAssistantPrefix + (liveTranscript ?? outputText)
     }
 
     /// The already-written part of the answer this run is carrying on. Empty
     /// for every ordinary run.
-    private(set) var activeAssistantPrefix = ""
+    private var activeAssistantPrefix: String { conversationStore.outputAssistantPrefix }
 
     public var outputConversationPlainText: String {
         let response = outputResponsePlainText
@@ -1390,7 +1533,7 @@ public final class AppModel {
             installReadiness: installReadiness,
             loadState: loadState,
             hasStaleRuntime: hasStaleLoadedRuntime,
-            isRunning: isRunning,
+            isRunning: isSelectedConversationRunning,
             isGenerationCancellationPending: isCancellationPending,
             generationPhase: phase,
             livePrefillDone: livePrefillDone,
@@ -1417,7 +1560,8 @@ public final class AppModel {
     }
 
     public var generationTranscriptMailbox: GenerationTranscriptMailbox? {
-        (client as? any AppInferenceTranscriptReporting)?.generationTranscriptMailbox
+        guard !(client is any AppSessionInferenceClient) else { return nil }
+        return (client as? any AppInferenceTranscriptReporting)?.generationTranscriptMailbox
     }
 
     private var currentRuntimeKey: AppLoadedRuntimeKey {
@@ -1477,7 +1621,6 @@ public final class AppModel {
             visionInstallState = .idle
         }
         pendingExplicitLoadRuntimeKey = nil
-        activeRunRuntimeKey = nil
         loadedRuntimeKey = nil
         loadState = .notLoaded
         diagnostics = nil
@@ -1488,7 +1631,18 @@ public final class AppModel {
             at: URL(fileURLWithPath: path))
         refreshVisionInstallReadiness()
 
-        if let lifecycle = client as? AppModelLifecycleClient {
+        if let pooled = client as? any AppPooledInferenceClient {
+            // The pool keeps the previous model resident (other chats may be
+            // generating on it) and releases it only under memory pressure or
+            // an explicit unload. A model the pool still holds is ready as is.
+            let directory = URL(fileURLWithPath: path, isDirectory: true)
+            if let resident = pooled.residentRuntime(forModelDirectory: directory) {
+                loadedRuntimeKey = AppLoadedRuntimeKey(
+                    modelDirectory: directory, maxContextTokens: resident.maxContextTokens,
+                    options: resident.options, forceLogitsHead: resident.forceLogitsHead)
+                loadState = .ready(modelDirectory: directory, loadSeconds: 0)
+            }
+        } else if let lifecycle = client as? AppModelLifecycleClient {
             unloadGeneration &+= 1
             let generation = unloadGeneration
             let task = Task { [weak self, lifecycle] in
@@ -1743,7 +1897,7 @@ public final class AppModel {
             discardSource()
             return
         }
-        guard !isRunning else {
+        guard !isSelectedConversationRunning else {
             // A promise drop admitted before the run started can be delivered
             // after it. Returning silently made the images look as though they
             // had simply vanished.
@@ -1795,7 +1949,7 @@ public final class AppModel {
     /// of another app arrives on the pasteboard as data, and a drag from an app
     /// that has not written the file yet arrives as a promise.
     public func addImageData(_ data: Data, displayName: String) {
-        guard isImageInputAvailable, !isRunning else { return }
+        guard isImageInputAvailable, !isSelectedConversationRunning else { return }
         let capacity = maximumImageAttachments
         guard imageAttachments.count < capacity else {
             imageAttachmentError = Self.imageCapacityMessage(
@@ -1830,7 +1984,7 @@ public final class AppModel {
     }
 
     public func removeImage(id: UUID) {
-        guard !isRunning,
+        guard !isSelectedConversationRunning,
               let index = imageAttachments.firstIndex(where: { $0.id == id }) else { return }
         let attachment = imageAttachments.remove(at: index)
         attachmentStore.remove(attachment)
@@ -1838,7 +1992,7 @@ public final class AppModel {
     }
 
     public func clearImages() {
-        guard !isRunning else { return }
+        guard !isSelectedConversationRunning else { return }
         for attachment in imageAttachments { attachmentStore.remove(attachment) }
         imageAttachments.removeAll()
         imageAttachmentError = nil
@@ -1856,7 +2010,7 @@ public final class AppModel {
         // has already snapshotted its images: appending here would attach them
         // to the *next* message with no way to take them off, which is worse
         // than saying so. `addImages` refuses a mid-run drop the same way.
-        guard !isRunning else {
+        guard !isSelectedConversationRunning else {
             for attachment in staged { attachmentStore.remove(attachment) }
             imageAttachmentError =
                 "Wait for the current run to finish before attaching images."
@@ -2001,8 +2155,9 @@ public final class AppModel {
         pendingExplicitLoadRuntimeKey = nil
         unloadGeneration &+= 1
         let generation = unloadGeneration
+        let directory = URL(fileURLWithPath: modelPathText)
         unloadTask = Task { [weak self, lifecycle] in
-            await lifecycle.unload()
+            await lifecycle.unload(modelDirectory: directory)
             guard let self, generation == self.unloadGeneration else { return }
             self.loadedRuntimeKey = nil
             self.loadState = .notLoaded
@@ -2016,9 +2171,20 @@ public final class AppModel {
         loadState = .unloading
         unloadGeneration &+= 1
         let generation = unloadGeneration
+        let directory = URL(fileURLWithPath: modelPathText)
         unloadTask = Task { [weak self, lifecycle] in
-            await lifecycle.unload()
+            await lifecycle.unload(modelDirectory: directory)
             guard let self, generation == self.unloadGeneration else { return }
+            if let pooled = lifecycle as? any AppPooledInferenceClient,
+               pooled.residentRuntime(forModelDirectory: directory) != nil {
+                // The shared host refuses to unload a model another client is
+                // still generating on; say so rather than showing it unloaded.
+                self.loadState = .ready(modelDirectory: directory, loadSeconds: 0)
+                self.error = .invalidRequest(
+                    "This model is still in use by another request, so it stays loaded.")
+                self.clearUnloadTask(generation: generation)
+                return
+            }
             self.loadedRuntimeKey = nil
             self.liveMemoryBytes = nil
             self.loadState = .notLoaded
@@ -2636,6 +2802,10 @@ public final class AppModel {
             settingsStore.runFilesInSandbox = settings.runFilesInSandbox
             toolStore.indexInSandbox = settings.runFilesInSandbox
             settingsStore.fileSearchEnabled = settings.fileSearchEnabled
+            settingsStore.codingWriteEnabled = settings.codingWriteEnabled
+            settingsStore.codingCommandEnabled = settings.codingCommandEnabled
+            settingsStore.codingNetworkEnabled = settings.codingNetworkEnabled
+            settingsStore.codingFolderID = settings.codingFolderID
             settingsStore.searchProvider = settings.searchProvider
         }
         applySettingsProfile(storedSettingsProfile(for: selectedInstall))
@@ -2776,6 +2946,10 @@ public final class AppModel {
         settings.runWebInSandbox = settingsStore.runWebInSandbox
         settings.runFilesInSandbox = settingsStore.runFilesInSandbox
         settings.fileSearchEnabled = settingsStore.fileSearchEnabled
+        settings.codingWriteEnabled = settingsStore.codingWriteEnabled
+        settings.codingCommandEnabled = settingsStore.codingCommandEnabled
+        settings.codingNetworkEnabled = settingsStore.codingNetworkEnabled
+        settings.codingFolderID = settingsStore.codingFolderID
         settings.searchProvider = settingsStore.searchProvider
         if (try? MacAppSettingsFileStore.save(
             settings,
@@ -2937,11 +3111,17 @@ public final class AppModel {
     }
 
     public func clearOutput() {
-        guard !isRunning else { return }
+        if isRunning {
+            beginNewConversation(modelID: selectedDescriptor.settingsProfileKey)
+            // The new chat is idle; show its state, not the running chat's.
+            diagnostics = nil
+            error = nil
+            restoreSelectedRunPresentation()
+            return
+        }
         releaseTranscriptImages()
-        clearDocuments()
         beginNewConversation(modelID: selectedDescriptor.settingsProfileKey)
-        generationTranscriptMailbox?.reset()
+        if !(client is any AppSessionInferenceClient) { generationTranscriptMailbox?.reset() }
         diagnostics = nil
         error = nil
     }
@@ -2968,6 +3148,10 @@ public final class AppModel {
             let required = contextUsage.estimatedTokens + reserve
                 + ((effectiveChatCapabilities.web || effectiveChatCapabilities.files) ? 2_048 : 256)
             if required > effectiveMaxContextTokens {
+                guard !selectedModelIsRunning else {
+                    error = .invalidRequest("This chat needs a larger context. Wait for the other chat to finish before changing the shared model runtime.")
+                    return
+                }
                 let choices = AppContextLengthOption.options(for: selectedDescriptor).map(\.tokens).sorted()
                 let plan = choices.lazy.filter { $0 >= required }.compactMap {
                     AppAutomaticMemoryPlanner.plan(for: self.selectedDescriptor, on: self.deviceCapabilities,
@@ -2995,6 +3179,10 @@ public final class AppModel {
         // failed partway through its prompt. Auto reloads with a cache that
         // can take it; a manual setting is the user's to change.
         if imageTurnNeedsLargerExpertCache {
+            guard !selectedModelIsRunning else {
+                error = .invalidRequest("Image input needs a different runtime configuration. Wait for the other chat to finish before reloading the model.")
+                return
+            }
             let directory = URL(fileURLWithPath: modelPathText)
             // The installed layout when it can be read, else the catalog's.
             if automaticMemory,
@@ -3061,9 +3249,9 @@ public final class AppModel {
 
         persistSettings()
 
-        generationTranscriptMailbox?.reset()
+        if !(client is any AppSessionInferenceClient) { generationTranscriptMailbox?.reset() }
         runIdentity &+= 1
-        activeAssistantPrefix = request.assistantPrefix
+        conversationStore.outputAssistantPrefix = request.assistantPrefix
         pendingAssistantPrefix = nil
         conversationStore.outputTurnIsRecorded = false
         // The transcript shows what was typed, not the flattened text the
@@ -3074,18 +3262,15 @@ public final class AppModel {
         outputDocumentAttachments = documentAttachments
         outputText = ""
         outputThinkingText = ""
-        currentGenerationThinking = ""
         conversationStore.clearOutputTools()
         conversationStore.outputCapabilities = capabilities
         diagnostics = nil
         error = nil
-        hasHandledTerminalEvent = false
-        activeRunRuntimeKey = AppLoadedRuntimeKey(
+        let runRuntimeKey = AppLoadedRuntimeKey(
             modelDirectory: request.modelDirectory,
             maxContextTokens: request.maxContextTokens,
             options: request.runtimeOptions,
             forceLogitsHead: !request.isPureGreedy)
-        isCancellationPending = false
         liveTokenCount = 0
         liveElapsedDecodeSeconds = 0
         livePrefillDone = 0
@@ -3107,6 +3292,12 @@ public final class AppModel {
                 capabilities: capabilities),
             attachments: retained,
             modelID: selectedDescriptor.settingsProfileKey)
+        guard let conversationID = conversationStore.selectedConversationID else {
+            error = .unknown("Could not create a chat for this answer.")
+            runState = activeAnswerRuns.isEmpty ? .idle : .running
+            return
+        }
+        conversationStore.outputAssistantPrefix = request.assistantPrefix
         // The chat exists now, so its identity is known even for a first
         // message.
         request.conversationKey = conversationStore.selectedConversationID?.uuidString
@@ -3128,8 +3319,18 @@ public final class AppModel {
             imageAttachmentError = nil
         }
 
-        let cancellation = AppAnswerCancellation()
-        answerCancellation = cancellation
+        let scopedClient: any AppInferenceClient
+        if let sessionClient = client as? any AppSessionInferenceClient {
+            scopedClient = sessionClient.scopedSession(conversationStore.sessionID(for: conversationID))
+        } else {
+            scopedClient = client
+        }
+        let answerRun = ActiveAnswerRun(
+            conversationID: conversationID, runtimeKey: runRuntimeKey,
+            modelProfileKey: selectedDescriptor.settingsProfileKey,
+            scopedClient: scopedClient)
+        activeAnswerRuns[conversationID] = answerRun
+        runState = .running
         let webInSandbox = settingsStore.runWebInSandbox
         #if os(macOS)
         // After an idle stop or a failed start the sandbox is started again
@@ -3137,20 +3338,39 @@ public final class AppModel {
         // starting waits for it. Nothing else starts it.
         if webInSandbox, capabilities.web { startSandbox() }
         #endif
+        let workspace = selectedCodingFolder?.path
+        var toolLimits = AppToolLimits.standard
+        if capabilities.fileWrite || capabilities.command { toolLimits.maximumToolRounds = 12 }
         let runner = AppAnswerRunner(
-            client: client,
-            toolbox: toolStore.makeToolbox(provider: settingsStore.searchProvider,
-                                       webInSandbox: webInSandbox))
+            client: scopedClient,
+            toolbox: toolStore.makeToolbox(provider: settingsStore.searchProvider, limits: toolLimits,
+                                       webInSandbox: webInSandbox, workspace: workspace,
+                                       workspaceWrite: capabilities.fileWrite, commandNetwork: capabilities.commandNetwork,
+                                       codingAllowed: { [weak self] call in
+                await MainActor.run {
+                    guard let self, self.selectedCodingFolder?.path == workspace else { return false }
+                    let current = self.effectiveChatCapabilities
+                    switch call {
+                    case .listFiles, .readFile: return current.workspaceRead
+                    case .writeFile, .editFile: return current.fileWrite
+                    case .runCommand:
+                        return current.command && (!capabilities.fileWrite || current.fileWrite)
+                            && (!capabilities.commandNetwork || current.commandNetwork)
+                    default: return false
+                    }
+                }
+            }), limits: toolLimits)
         let activity = toolStore.inferenceActivity
         activity.set(true)
-        autoObservationStart = .begin()
+        answerRun.observationStart = .begin()
         let answerRequest = request
-        runTask = Task.detached { [weak self, runner, answerRequest] in
+        let cancellation = answerRun.cancellation
+        answerRun.task = Task.detached { [weak self, runner, answerRequest] in
             let model = self
             await runner.run(answerRequest, capabilities: capabilities,
                              firstSourceID: firstSourceID, userText: userText,
                              hasLocalContext: hasLocalContext, cancellation: cancellation) { [weak model] event in
-                await model?.apply(answer: event)
+                await model?.apply(answer: event, for: conversationID)
             }
             // The terminal event clears activity on the main actor. Clearing
             // it again here can race with a new answer that has just started.
@@ -3169,9 +3389,11 @@ public final class AppModel {
 
     public func cancel() {
         guard canCancel else { return }
+        guard let conversationID = conversationStore.selectedConversationID,
+              let run = activeAnswerRuns[conversationID] else { return }
         isCancellationPending = true
-        answerCancellation?.cancel()
-        client.cancel()
+        run.cancellation.cancel()
+        run.scopedClient.cancel()
     }
 
     /// What the model reads for the message being composed: attached files
@@ -3188,7 +3410,7 @@ public final class AppModel {
     /// Whether a recorded message can be put back in the composer or sent
     /// again. Both rewind the chat, so both need it to be idle.
     public func canRewind(to turn: AppChatTurn) -> Bool {
-        !isRunning && !loadState.isLoading
+        !isSelectedConversationRunning && !loadState.isLoading
             && conversation.contains { $0.id == turn.id }
     }
 
@@ -3249,7 +3471,7 @@ public final class AppModel {
     /// mean rewriting the middle of a conversation the model has already been
     /// shown.
     public var canContinueLastAnswer: Bool {
-        guard !isRunning, !loadState.isLoading, isModelAvailable,
+        guard !isSelectedConversationRunning, !loadState.isLoading, isModelAvailable,
               !hasStaleLoadedRuntime, promptText.isEmpty,
               imageAttachments.isEmpty, documentAttachments.isEmpty,
               supportsAssistantContinuation,
@@ -3398,7 +3620,11 @@ public final class AppModel {
         let effective = loadedRuntimeKey ?? currentRuntimeKey
         let instructions = AppToolCatalog.systemInstructions(
             for: capabilities, currentDate: Self.toolDate())
-        let systemPrompt = [effectiveSystemPrompt ?? "", instructions]
+        let workspaceInstruction: String
+        if capabilities.workspaceRead || capabilities.fileWrite || capabilities.command, let folder = selectedCodingFolder {
+            workspaceInstruction = "The selected coding workspace is \(String(reflecting: AppFileNameText.safe(folder.path))). list_files, read_file, write_file and edit_file use paths relative to that workspace; search_files can search all selected folders."
+        } else { workspaceInstruction = "" }
+        let systemPrompt = [effectiveSystemPrompt ?? "", instructions, workspaceInstruction]
             .filter { !$0.isEmpty }.joined(separator: "\n\n")
         let request = AppGenerationRequest(
             modelDirectory: URL(fileURLWithPath: modelPathText),
@@ -3444,36 +3670,52 @@ public final class AppModel {
     }
 
     func apply(_ event: AppInferenceEvent) {
+        let isSelectedRun = handlingAnswerConversationID == conversationStore.selectedConversationID
         switch event {
         case .memorySample:
-            sampleLiveMemory()
+            if isSelectedRun { sampleLiveMemory() }
         case .prefillProgress(let done, let total):
-            phase = .prefill
-            livePrefillDone = done
-            livePrefillTotal = total
-            sampleLiveMemory()
+            handlingAnswerRun?.phase = .prefill
+            handlingAnswerRun?.prefillDone = done
+            handlingAnswerRun?.prefillTotal = total
+            if isSelectedRun {
+                phase = .prefill
+                livePrefillDone = done
+                livePrefillTotal = total
+                sampleLiveMemory()
+            }
         case .token(let token):
-            phase = .decode
-            liveTokenCount = token.index + 1
-            liveElapsedDecodeSeconds = token.elapsedDecodeSeconds
-            sampleLiveMemory()
+            handlingAnswerRun?.phase = .decode
+            handlingAnswerRun?.tokenCount = token.index + 1
+            handlingAnswerRun?.elapsedDecodeSeconds = token.elapsedDecodeSeconds
+            if isSelectedRun {
+                phase = .decode
+                liveTokenCount = token.index + 1
+                liveElapsedDecodeSeconds = token.elapsedDecodeSeconds
+                sampleLiveMemory()
+            }
             if !token.textDelta.isEmpty {
                 outputText += token.textDelta
             }
         case .thinking(let token):
-            phase = .decode
-            liveTokenCount = token.index + 1
-            liveElapsedDecodeSeconds = token.elapsedDecodeSeconds
-            sampleLiveMemory()
+            handlingAnswerRun?.phase = .decode
+            handlingAnswerRun?.tokenCount = token.index + 1
+            handlingAnswerRun?.elapsedDecodeSeconds = token.elapsedDecodeSeconds
+            if isSelectedRun {
+                phase = .decode
+                liveTokenCount = token.index + 1
+                liveElapsedDecodeSeconds = token.elapsedDecodeSeconds
+                sampleLiveMemory()
+            }
             if !token.textDelta.isEmpty {
                 outputThinkingText += token.textDelta
-                currentGenerationThinking += token.textDelta
+                handlingAnswerRun?.currentGenerationThinking += token.textDelta
             }
         case .toolCalls:
             // Calls reach the app through the answer runner, which runs them.
             break
         case .finished(let diagnostics):
-            visionTowerMappedBytes = diagnostics.visionTowerMappedBytes
+            if isSelectedRun { visionTowerMappedBytes = diagnostics.visionTowerMappedBytes }
             finishSuccessfully(diagnostics)
         case .cancelled(let diagnostics):
             finishCancelled(diagnostics)
@@ -3484,16 +3726,24 @@ public final class AppModel {
         }
     }
 
+    private var handlingAnswerRun: ActiveAnswerRun? {
+        handlingAnswerConversationID.flatMap { activeAnswerRuns[$0] }
+    }
+
     private func recordAutoPerformance(_ diagnostics: AppDiagnostics, completed: Bool = true) {
+        // The run's own model, not whatever is selected now: the selection may
+        // have moved to another model while this chat kept generating.
         guard automaticMemory, settingsPersistenceEnabled, diagnostics.toolRounds == 0,
-              let summary = AppAutomaticMemoryPlanner.layoutSummary(at: URL(fileURLWithPath: modelPathText)) else { return }
+              let runKey = handlingAnswerRun?.runtimeKey,
+              handlingAnswerRun?.modelProfileKey == selectedDescriptor.settingsProfileKey,
+              let summary = AppAutomaticMemoryPlanner.layoutSummary(at: runKey.modelDirectory) else { return }
         guard let layers = AppAutoPerformanceRecords.residentDenseLayers(
             diagnostics.runtimeOptions.denseResidencyPolicy, summary: summary) else { return }
         let key = AppAutoPerformanceRecords.workloadKey(promptTokens: diagnostics.promptTokenCount ?? 0,
             reusedPrefix: (diagnostics.cachedPromptTokens ?? 0) > 0, imageInput: !outputImageAttachments.isEmpty,
             sampled: loadedRuntimeKey?.forceLogitsHead ?? currentForceLogitsHead)
         autoWorkloadKey = key
-        let start = autoObservationStart
+        let start = handlingAnswerRun?.observationStart
         let observedPressure = start?.pressure() ?? AppAutoMemoryPressureMonitor.shared.snapshot.pressure
         let paging = start?.pagingBytes() ?? 0
         guard completed || observedPressure != .normal || paging > 0 else { return }
@@ -3511,10 +3761,12 @@ public final class AppModel {
     }
 
     private func finishSuccessfully(_ diagnostics: AppDiagnostics) {
-        guard !hasHandledTerminalEvent else { return }
-        hasHandledTerminalEvent = true
+        guard let run = handlingAnswerRun, !run.hasHandledTerminalEvent else { return }
+        run.hasHandledTerminalEvent = true
         materializeServiceTranscript()
-        self.diagnostics = diagnostics
+        if run.conversationID == conversationStore.selectedConversationID {
+            self.diagnostics = diagnostics
+        }
         recordAutoPerformance(diagnostics)
         recordAnswer()
         finishTerminalRun()
@@ -3528,7 +3780,7 @@ public final class AppModel {
     /// exchange, question and all.
     private func recordAnswer() {
         let thinking = conversationStore.outputToolRounds.isEmpty
-            ? outputThinkingText : currentGenerationThinking
+            ? outputThinkingText : (handlingAnswerRun?.currentGenerationThinking ?? "")
         conversationStore.completeTurn(
             response: outputResponsePlainText,
             thinking: thinking.isEmpty ? nil : thinking,
@@ -3537,25 +3789,28 @@ public final class AppModel {
     }
 
     private func finishCancelled(_ diagnostics: AppDiagnostics) {
-        guard !hasHandledTerminalEvent else { return }
-        hasHandledTerminalEvent = true
+        guard let run = handlingAnswerRun, !run.hasHandledTerminalEvent else { return }
+        run.hasHandledTerminalEvent = true
         materializeServiceTranscript()
-        self.diagnostics = diagnostics
+        if run.conversationID == conversationStore.selectedConversationID {
+            self.diagnostics = diagnostics
+        }
         recordAutoPerformance(diagnostics, completed: false)
-        error = .cancelled
+        if run.conversationID == conversationStore.selectedConversationID { error = .cancelled }
         recordAnswer()
         finishTerminalRun()
     }
 
     private func materializeServiceTranscript() {
+        guard !(client is any AppSessionInferenceClient), activeAnswerRuns.count <= 1 else { return }
         guard let reporter = client as? any AppInferenceTranscriptReporting else { return }
         outputText = reporter.generationTranscriptMailbox.completeText
     }
 
     private func finishWithError(_ appError: AppInferenceError) {
-        guard !hasHandledTerminalEvent else { return }
-        hasHandledTerminalEvent = true
-        error = appError
+        guard let run = handlingAnswerRun, !run.hasHandledTerminalEvent else { return }
+        run.hasHandledTerminalEvent = true
+        if run.conversationID == conversationStore.selectedConversationID { error = appError }
         recordAnswer()
         finishTerminalRun()
     }
@@ -3566,19 +3821,20 @@ public final class AppModel {
     }
 
     private func finishTerminalRun() {
-        phase = .idle
-        runState = .idle
-        isCancellationPending = false
-        activeRunRuntimeKey = nil
-        runTask = nil
-        answerCancellation = nil
-        toolStore.inferenceActivity.set(false)
+        guard let conversationID = handlingAnswerConversationID else { return }
+        activeAnswerRuns.removeValue(forKey: conversationID)
+        runState = activeAnswerRuns.isEmpty ? .idle : .running
+        if activeAnswerRuns.isEmpty { toolStore.inferenceActivity.set(false) }
+        if activeAnswerRuns.isEmpty, AppAutoMemoryPressureMonitor.shared.snapshot.pressure != .normal {
+            reclaimIdleConversationSessions()
+        }
+        restoreSelectedRunPresentation()
         // Auto learns from every answer, but its next plan waits for the next
         // load. Applying it here changed the settings of the model already in
         // memory, so after an ordinary answer the composer asked for a reload
         // nobody had caused (#54). `run` still reloads with a larger window
         // when the conversation outgrows the loaded one.
-        if automaticMemory, settingsPersistenceEnabled, !loadState.isReady {
+        if activeAnswerRuns.isEmpty, automaticMemory, settingsPersistenceEnabled, !loadState.isReady {
             applySettingsProfile(storedSettingsProfile(for: selectedInstall))
         }
     }
@@ -3592,7 +3848,12 @@ public final class AppModel {
         guard support.allowsTools else { return .none }
         return AppChatCapabilities(
             web: settingsStore.webSearchEnabled && !isWebSearchPaused,
-            files: settingsStore.fileSearchEnabled && !toolStore.folders.isEmpty)
+            files: settingsStore.fileSearchEnabled && !toolStore.folders.isEmpty,
+            workspaceRead: settingsStore.fileSearchEnabled && selectedCodingFolder != nil,
+            fileWrite: settingsStore.fileSearchEnabled && selectedCodingFolder != nil && settingsStore.codingWriteEnabled,
+            command: settingsStore.fileSearchEnabled && selectedCodingFolder != nil && settingsStore.codingCommandEnabled,
+            commandNetwork: settingsStore.fileSearchEnabled && selectedCodingFolder != nil
+                && settingsStore.codingCommandEnabled && settingsStore.codingNetworkEnabled)
     }
 
     public var toolSupport: AppToolSupport {
@@ -3756,6 +4017,29 @@ public final class AppModel {
         }
     }
 
+    /// The workspace for coding tools. Only an explicit choice counts: Local
+    /// Files alone never grants raw file access to the first search folder.
+    public var selectedCodingFolder: AppSearchFolder? {
+        guard let id = settingsStore.codingFolderID else { return nil }
+        return toolStore.folders.first { $0.id.uuidString == id }
+    }
+    public var codingFolderID: String {
+        get { selectedCodingFolder?.id.uuidString ?? "" }
+        set { settingsStore.codingFolderID = newValue; persistSettings() }
+    }
+    public var codingWriteEnabled: Bool {
+        get { settingsStore.codingWriteEnabled }
+        set { settingsStore.codingWriteEnabled = newValue; persistSettings() }
+    }
+    public var codingCommandEnabled: Bool {
+        get { settingsStore.codingCommandEnabled }
+        set { settingsStore.codingCommandEnabled = newValue; persistSettings() }
+    }
+    public var codingNetworkEnabled: Bool {
+        get { settingsStore.codingNetworkEnabled }
+        set { settingsStore.codingNetworkEnabled = newValue; persistSettings() }
+    }
+
     public var searchProvider: AppSearchProviderKind {
         get { settingsStore.searchProvider }
         set {
@@ -3769,20 +4053,33 @@ public final class AppModel {
     public var outputToolRounds: [AppToolRound] { conversationStore.outputToolRounds }
     public var outputSources: [AppSource] { conversationStore.outputSources }
 
-    func apply(answer event: AppAnswerEvent) {
+    func apply(answer event: AppAnswerEvent, for conversationID: UUID) {
+        guard activeAnswerRuns[conversationID] != nil else { return }
+        handlingAnswerConversationID = conversationID
+        conversationStore.beginOutputUpdate(for: conversationID)
+        defer {
+            conversationStore.endOutputUpdate()
+            handlingAnswerConversationID = nil
+        }
         switch event {
         case .inference(let inference):
             apply(inference)
         case .generationStarted(let round):
-            phase = .prefill
-            currentGenerationThinking = ""
+            handlingAnswerRun?.phase = .prefill
+            if conversationStore.selectedConversationID == conversationID {
+                phase = .prefill
+            }
+            handlingAnswerRun?.currentGenerationThinking = ""
             if round > 0 {
                 // The text before the calls belongs to the round now.
                 outputText = ""
-                generationTranscriptMailbox?.reset()
+                if !(client is any AppSessionInferenceClient) {
+                    generationTranscriptMailbox?.reset()
+                }
             }
         case .toolActivity(let activity):
-            phase = .tools
+            handlingAnswerRun?.phase = .tools
+            if conversationStore.selectedConversationID == conversationID { phase = .tools }
             var activities = conversationStore.outputToolActivities
             if let index = activities.firstIndex(where: { $0.id == activity.id }) {
                 activities[index] = activity
@@ -3814,9 +4111,9 @@ public final class AppModel {
     }
 
     private func finishCancelledWithoutDiagnostics() {
-        guard !hasHandledTerminalEvent else { return }
-        hasHandledTerminalEvent = true
-        error = .cancelled
+        guard let run = handlingAnswerRun, !run.hasHandledTerminalEvent else { return }
+        run.hasHandledTerminalEvent = true
+        if run.conversationID == conversationStore.selectedConversationID { error = .cancelled }
         recordAnswer()
         finishTerminalRun()
     }

@@ -57,11 +57,11 @@ final class SharedExpertInt8 {
     private let fusedGateUpActPSO: MTLComputePipelineState
     private let specializedFusedGateUpActPSO: MTLComputePipelineState?
 
-    init(context: MetalContext, siluActivation: Bool = false) throws {
-        self.int8 = try DequantInt8GEMV(context: context)
-        let activationConstants: [MetalFunctionConstant] = siluActivation
-            ? [MetalFunctionConstant(index: 74, value: .bool(true))]
-            : []
+    init(context: MetalContext, siluActivation: Bool = false, wide: Bool = false) throws {
+        self.int8 = try DequantInt8GEMV(context: context, wide: wide)
+        let activationConstants: [MetalFunctionConstant] =
+            (siluActivation ? [MetalFunctionConstant(index: 74, value: .bool(true))] : [])
+            + (wide ? [MetalFunctionConstant(index: 75, value: .bool(true))] : [])
         self.fusedGateUpActPSO = try context.pipeline(
             "shared_int8_gate_up_act_simd",
             constants: activationConstants)

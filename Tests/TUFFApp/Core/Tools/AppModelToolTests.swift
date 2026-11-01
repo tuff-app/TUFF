@@ -56,7 +56,7 @@ import TUFFEngine
         let requests = client.requests
         #expect(requests.count == 2)
         #expect(requests[0].tools.map(\.name) == ["web_search", "read_webpage"])
-        #expect(requests[0].systemPrompt.contains("Cite what you use"))
+        #expect(requests[0].systemPrompt.contains("Cite retrieved web or file-search sources"))
         #expect(requests[0].conversationKey != nil)
         #expect(requests[1].conversationKey == requests[0].conversationKey)
         #expect(requests[1].currentRounds.count == 1)
@@ -79,6 +79,29 @@ import TUFFEngine
         #expect(client.requests.first?.tools.isEmpty == true)
         #expect(client.requests.first?.systemPrompt.contains("Cite") == false)
         #expect(transport.requests.isEmpty)
+    }
+
+    @MainActor
+    @Test func localFilesWithoutAWorkspaceGrantsNoRawFileTools() async throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tuff-legacy-files-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try "note".write(to: folder.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let transport = FixtureHTTPTransport { _ in .html(DuckDuckGoFixtures.ordinary) }
+        let model = readyModel(client: ScriptedInferenceClient([]), transport: transport)
+        model.toolStore.addFolders([folder])
+        model.fileSearchEnabled = true
+        // The upgrade path: Local Files on, a folder added, no workspace ever chosen.
+        #expect(model.selectedCodingFolder == nil)
+        #expect(model.effectiveChatCapabilities.files)
+        #expect(!model.effectiveChatCapabilities.workspaceRead)
+        #expect(AppToolCatalog.definitions(for: model.effectiveChatCapabilities).map(\.name) == ["search_files"])
+        model.codingFolderID = try #require(model.toolStore.folders.first).id.uuidString
+        #expect(model.effectiveChatCapabilities.workspaceRead)
+        model.codingFolderID = ""
+        #expect(!model.effectiveChatCapabilities.workspaceRead)
+        model.toolStore.cancelIndexing()
     }
 
     @MainActor

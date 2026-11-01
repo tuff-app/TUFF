@@ -253,4 +253,65 @@ import Testing
         try store.save([folder])
         #expect(store.load() == [folder])
     }
+
+    @Test func theIndexerReadsOnlyTheFileTheScanSaw() throws {
+        let box = try Self.sandbox()
+        defer { box.cleanUp() }
+        try box.write("note.md", "plain note text")
+        let secret = box.root.deletingLastPathComponent().appendingPathComponent("secret.md")
+        try "outside secret".write(to: secret, atomically: true, encoding: .utf8)
+        let found = try #require(box.indexer.scan(box.folder).files.first)
+        #expect(found.device != nil && found.inode != nil)
+        let limits = AppLocalIndexLimits.standard
+        let passages = try AppLocalIndexer.passages(for: found, in: box.folder, limits: limits)
+        #expect(passages.first?.3.contains("plain note text") == true)
+
+        // The name is swapped for a symbolic link to an outside file with the
+        // same size, as a racing command could do between scan and read.
+        let path = URL(fileURLWithPath: found.path)
+        try FileManager.default.removeItem(at: path)
+        try FileManager.default.createSymbolicLink(at: path, withDestinationURL: secret)
+        #expect(throws: AppLocalFileChanged.self) {
+            _ = try AppLocalIndexer.passages(for: found, in: box.folder, limits: limits)
+        }
+        // A directory component swapped for a link is refused too.
+        try box.write("dir/inner.md", "inner text")
+        let inner = try #require(box.indexer.scan(box.folder).files.first { $0.path.hasSuffix("inner.md") })
+        let outsideDirectory = box.root.deletingLastPathComponent().appendingPathComponent("elsewhere")
+        try FileManager.default.createDirectory(at: outsideDirectory, withIntermediateDirectories: true)
+        try "inner text".write(to: outsideDirectory.appendingPathComponent("inner.md"), atomically: true, encoding: .utf8)
+        let directory = box.root.appendingPathComponent("dir")
+        try FileManager.default.removeItem(at: directory)
+        try FileManager.default.createSymbolicLink(at: directory, withDestinationURL: outsideDirectory)
+        #expect(throws: AppLocalFileChanged.self) {
+            _ = try AppLocalIndexer.passages(for: inner, in: box.folder, limits: limits)
+        }
+    }
+
+    @Test func aReplacedOrHardLinkedFileIsNotRead() throws {
+        let box = try Self.sandbox()
+        defer { box.cleanUp() }
+        try box.write("a.md", "original text")
+        let found = try #require(box.indexer.scan(box.folder).files.first)
+        let limits = AppLocalIndexLimits.standard
+        // Same size, different file (new inode).
+        let path = URL(fileURLWithPath: found.path)
+        try FileManager.default.removeItem(at: path)
+        try "replaced text".write(to: path, atomically: false, encoding: .utf8)
+        #expect(throws: AppLocalFileChanged.self) {
+            _ = try AppLocalIndexer.passages(for: found, in: box.folder, limits: limits)
+        }
+        // A hard link to an outside file is skipped, not extracted.
+        let outside = box.root.deletingLastPathComponent().appendingPathComponent("outside.md")
+        try "outside text".write(to: outside, atomically: true, encoding: .utf8)
+        try FileManager.default.removeItem(at: path)
+        try FileManager.default.linkItem(at: outside, to: path)
+        var info = stat()
+        #expect(lstat(path.path, &info) == 0)
+        let linked = AppLocalIndexer.FoundFile(path: found.path, size: Int(info.st_size),
+                                               mtime: found.mtime, device: info.st_dev, inode: info.st_ino)
+        #expect(throws: AppLocalFileSkip.self) {
+            _ = try AppLocalIndexer.passages(for: linked, in: box.folder, limits: limits)
+        }
+    }
 }

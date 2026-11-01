@@ -6,7 +6,7 @@ import TUFFModelCatalog
 /// BF16/MXFP4 layer graph after the model has passed normal load validation.
 public final class ModelForwardRunner: ChunkedPrefillRunner,
     MultimodalPrefillRunner, ContextWindowReporting, EpilogueFusingLogitProducer,
-    ContinuableLogitProducer, SpeculativeVerificationRunner,
+    ContinuableLogitProducer, SpeculativeVerificationRunner, PrefillHeadSkippingRunner,
     SpeculativeTargetCostReporting, GreedyHeadReporting,
     @unchecked Sendable {
     private enum Backend {
@@ -112,6 +112,30 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss(let runner):
             try await runner.produce(token: token, position: position, into: logits)
+        #endif
+        }
+    }
+
+    var supportsHeadSkippingPrefill: Bool {
+        switch backend {
+        #if !TUFF_ENGINE_GPT_OSS
+        case .affine(let runner): runner.supportsHeadSkippingPrefill
+        #endif
+        #if !TUFF_ENGINE_AFFINE_ONLY
+        case .gptOss: false
+        #endif
+        }
+    }
+
+    func consumePrefillToken(_ token: Int32, position: Int, scratchLogits: MTLBuffer) async throws {
+        switch backend {
+        #if !TUFF_ENGINE_GPT_OSS
+        case .affine(let runner):
+            try await runner.consumePrefillToken(token, position: position, scratchLogits: scratchLogits)
+        #endif
+        #if !TUFF_ENGINE_AFFINE_ONLY
+        case .gptOss:
+            preconditionFailure("GPT-OSS does not support this prefill path")
         #endif
         }
     }
@@ -269,6 +293,18 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
                            config: PrefillRuntimeConfig,
                            into logits: MTLBuffer,
                            onProgress: (Int) -> Void) async throws -> PrefillResult {
+        try await prefillMultimodal(
+            input: input, startPosition: startPosition, outputMode: outputMode,
+            config: config, into: logits, chunkGate: nil, onProgress: onProgress)
+    }
+
+    func prefillMultimodal(input: MultimodalPrefillInput,
+                           startPosition: Int,
+                           outputMode: PrefillOutputMode,
+                           config: PrefillRuntimeConfig,
+                           into logits: MTLBuffer,
+                           chunkGate: PrefillChunkGate?,
+                           onProgress: (Int) -> Void) async throws -> PrefillResult {
         switch backend {
         #if !TUFF_ENGINE_GPT_OSS
         case .affine(let runner):
@@ -278,6 +314,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
                 outputMode: outputMode,
                 config: config,
                 into: logits,
+                chunkGate: chunkGate,
                 onProgress: onProgress)
         #endif
         #if !TUFF_ENGINE_AFFINE_ONLY

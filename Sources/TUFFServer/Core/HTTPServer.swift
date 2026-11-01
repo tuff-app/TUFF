@@ -495,12 +495,6 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                             // The model is loaded by now, so its load is not
                             // counted as part of the run.
                             recorder.withLock { $0 = self.provider.completionRecorder(for: target) }
-                            if self.provider is RoutedServerModelProvider,
-                               !request.imageFiles.isEmpty, backend.visionCapability != "ready" {
-                                throw ServerRequestError.invalid(
-                                    message: "The loaded model cannot accept images on this Mac",
-                                    param: "messages", code: "image_input_unavailable")
-                            }
                             timings.preparing()
                             let prepared = try await backend.prepare(request)
                             timings.prepared()
@@ -1006,7 +1000,7 @@ private extension ServerRequestError {
             .notFound
         case .queueFull:
             .tooManyRequests
-        case .modelMemoryBusy:
+        case .modelMemoryBusy, .hostUnavailable, .modelBusy:
             .serviceUnavailable
         case .invalid(_, _, let code):
             switch code {

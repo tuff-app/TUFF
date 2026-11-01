@@ -191,10 +191,17 @@ public final class RemoteStreamingRepacker {
                                                            metadataDirectory: paths.metadataDirectory,
                                                            audit: audit)
         try Task.checkCancellation()
-        let plan = try RepackPlanner.plan(meta: snapshot.metadata,
-                                          arch: snapshot.arch,
-                                          shardHeaders: snapshot.shardHeaders,
-                                          outputDir: paths.partialDirectory)
+        let plan: RepackPlan
+        if snapshot.arch.family == .flint {
+            plan = try FlintRepackPlanner.plan(arch: snapshot.arch, headers: snapshot.shardHeaders,
+                                                outputDir: paths.partialDirectory,
+                                                sourceIdentity: options.repoID,
+                                                declaredQuantization: options.repoID == OptiQRemoteInstaller.repoID
+                                                    ? snapshot.metadata.bitsOverrides : nil)
+        } else {
+            plan = try RepackPlanner.plan(meta: snapshot.metadata, arch: snapshot.arch,
+                                          shardHeaders: snapshot.shardHeaders, outputDir: paths.partialDirectory)
+        }
         let rangePlan = try RangeCopyPlanner.plan(repackPlan: plan,
                                                   rangeChunkBytes: options.rangeChunkBytes,
                                                   layoutMode: "identity",
@@ -330,9 +337,7 @@ public final class RemoteStreamingRepacker {
             let layoutPath = ((paths.partialDirectory as NSString)
                 .appendingPathComponent("packed_experts") as NSString)
                 .appendingPathComponent("layout.json")
-            expertStride = plan.layers.first(where: {
-                $0.expertsPerLayer > 0
-            })?.expertStride ?? 0
+            expertStride = plan.layers.map(\.expertStride).max() ?? 0
             let layoutData = try GTurboJSON.encodeLayout(
                 plan: plan, expertStride: expertStride)
             try writeSmall(path: layoutPath, data: layoutData)
@@ -553,13 +558,15 @@ public final class RemoteStreamingRepacker {
         }
 
         let pinned = remote.pinned(commit: snapshot.resolvedCommit)
-        let tokenizerFiles: [(name: String, cap: UInt64, required: Bool)] = [
-            ("tokenizer.json", 64 * 1024 * 1024, true),
-            ("tokenizer_config.json", 4 * 1024 * 1024, true),
-            ("special_tokens_map.json", 1 * 1024 * 1024, false),
-            ("chat_template.jinja", 4 * 1024 * 1024, false),
-            ("chat_template.json", 4 * 1024 * 1024, false),
+        var tokenizerFiles: [(name: String, cap: UInt64, required: Bool)] = [
+            ("tokenizer.json", 67_108_864, true),
+            ("tokenizer_config.json", 4_194_304, true),
+            ("chat_template.jinja", 4_194_304, remote.repoID == OptiQRemoteInstaller.repoID),
         ]
+        if remote.repoID != OptiQRemoteInstaller.repoID {
+            tokenizerFiles.append(("special_tokens_map.json", 1_048_576, false))
+            tokenizerFiles.append(("chat_template.json", 4_194_304, false))
+        }
         for file in tokenizerFiles {
             try Task.checkCancellation()
             let info: RemoteFileInfo
@@ -577,11 +584,42 @@ public final class RemoteStreamingRepacker {
                                             capBytes: file.cap,
                                             outputPath: dst,
                                             audit: audit)
+            if let pins = Self.pinnedSidecars[remote.repoID] {
+                guard let expected = pins[file.name] else {
+                    throw RepackError.remoteProtocolInvalid(detail: "Unexpected sidecar \(file.name) for \(remote.repoID)")
+                }
+                try Self.verifyPinnedSidecar(path: dst, sha256: expected)
+            }
             try recordOutputFile(relativePath: "tokenizer/\(file.name)",
                                  path: dst,
                                             progress: progress)
         }
     }
+    /// Pinned tokenizer sidecar digests per checkpoint; a repository listed
+    /// here accepts no other sidecar content.
+    static let pinnedSidecars: [String: [String: String]] = [
+        OptiQRemoteInstaller.repoID: optiqSidecarHashes,
+        FlintInt4RemoteInstaller.repoID: flintInt4SidecarHashes,
+    ]
+    static let flintInt4SidecarHashes: [String: String] = [
+        "tokenizer.json": "a263cce0b7e2b03f7ee07ce809783ef4b47f160c3f268a4ea1524f638da45b68",
+        "tokenizer_config.json": "159ac88217e90ffd0a4a294726048bb302829e82e1958dc85bb203aa79138fbf",
+        "special_tokens_map.json": "be37b302338dda189bc70bfbe902d8faebeb5986d60c1342713439eefc4ca182",
+        "chat_template.jinja": "7940f4ffa3275c36caa4a582f845aaad79da11018b3961e8fbcad6ae29733466",
+    ]
+    static let optiqSidecarHashes: [String: String] = [
+        "tokenizer.json": "752cbc36d07b82cfceac213502efc25ea43413af349f1d3c1376674cacdd43b4",
+        "tokenizer_config.json": "148a30ecd43ee6a18190506aed06d966a0d00078a4ca26a9aa855910eb9a64c2",
+        "chat_template.jinja": "7940f4ffa3275c36caa4a582f845aaad79da11018b3961e8fbcad6ae29733466",
+    ]
+
+    static func verifyPinnedSidecar(path: String, sha256: String) throws {
+        let actual = try Sha256Stream.hashFile(path: path, noFollow: true)
+        guard actual == sha256 else {
+            throw RepackError.sourceFingerprintRejected(path: path, sha256: actual)
+        }
+    }
+
 
     private func isRemoteNotFound(_ error: Error) -> Bool {
         if case RepackError.remoteHTTPStatus(_, 404) = error {
@@ -601,7 +639,7 @@ public final class RemoteStreamingRepacker {
         var bits = GTurboJSON.QuantBitWidths(
             embedding: 4,
             attention: 4,
-            router: 8,
+            router: plan.arch.family == .flint ? 16 : 8,
             sharedExpert: 8,
             routedExpert: 4)
         for e in plan.resident.entries {

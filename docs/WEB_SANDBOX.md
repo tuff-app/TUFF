@@ -7,7 +7,7 @@ your Mac's files. It is **off by default**.
 
 ## Turn it on
 
-**Settings > Search > Run web search and page reads in a sandbox.** The row is
+**Settings > Tools > Run web search and page reads in a sandbox.** The row is
 shown on macOS 26 and newer. It needs Apple's
 [`container`](https://github.com/apple/container/releases) tool (version 1.5 or
 newer), installed at `/usr/local/bin/container`. If it is missing, the status
@@ -65,7 +65,7 @@ the [sandbox README](https://github.com/tuff-app/sandbox#readme) for the full li
 
 ## File search in a sandbox
 
-**Settings > Search > Files > Read my search folders in a sandbox too** is a
+**Settings > Tools > Files > Read my search folders in a sandbox too** is a
 separate switch, off by default, with the same macOS and `container`
 requirements. With it on, the folders you add for file search are read by a
 second sandbox, a VM with **no network at all**, instead of by TUFF:

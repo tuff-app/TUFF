@@ -16,6 +16,11 @@
   <a href="https://github.com/tuff-app/TUFF/discussions">Discussions</a>
 </p>
 
+<p align="center">
+  <a href="https://tuff-app.github.io/assets/tuff-film.mp4"><img src="docs/assets/tuff-film-poster.jpg" alt="Watch the TUFF film" width="640"></a><br>
+  <a href="https://tuff-app.github.io/assets/tuff-film.mp4">Watch the film (66 s)</a>
+</p>
+
 ![TUFF chatting with Qwen3.8 Flash Next on a 16 GB MacBook Air](docs/assets/tuff-chat.png)
 
 TUFF runs language models on Apple Silicon Macs. The app is SwiftUI and the
@@ -84,6 +89,9 @@ TUFF updates itself. If an update stops it from opening, see
 | Ornith 1.5 397B Q4 | 239 GB | 16 GB | Optional |
 | Qwen3.8 27B Q4 | 16.2 GB | 8 GB | Optional, 16 GB |
 | Gemma 4 26B-A4B Heretic Q4 | 15.0 GB | 8 GB | Optional |
+| Recursive Flint 40B A2.5B OptiQ | 25.6 GB | 16 GB | No |
+| Bonsai 2 2B Q2 | 1.2 GB | 8 GB | No |
+| Bonsai 2 27B Q2 | 8.6 GB | 16 GB | No |
 
 Models are grouped under **MoE**, **Dense** and **Legacy**. Each section can be
 collapsed. MiniMax and both GPT-OSS models stay available under Legacy.
@@ -121,7 +129,7 @@ people's benchmarks. Images need an M2 or newer.
 | Streams MoE experts from disk | ✅ | ❌ | ❌ | ✅ | ✅ |
 | Open-source desktop app | ✅ | ❌ | ✅ | ✅ | ✅ |
 | Windows and Linux | ❌ | ✅ | ✅ | ✅ | ❌ |
-| Models | 14 | GGUF / MLX catalog | Model library | 13 engines, mostly MoE | Gemma 26B |
+| Models | 18 | GGUF / MLX catalog | Model library | 13 engines, mostly MoE | Gemma 26B |
 
 ✅ yes · ◐ partly · ❌ no. Checked against each project's docs on October 8, 2026.
 

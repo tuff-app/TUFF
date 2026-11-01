@@ -254,6 +254,11 @@ public enum DecodeServiceCommand: Codable, Sendable {
     case hello(DecodeEngineHello)
     case load(DecodeLoadRequest)
     case generate(DecodeGenerationRequest)
+    /// Multiplexed sessions share one loaded model but retain independent state.
+    case generateSession(sessionID: UUID, request: DecodeGenerationRequest)
+    case cancelRequest(UUID)
+    case endSession(sessionID: UUID, requestID: UUID)
+    case cancelWarmup
     case cancel
     case unload(UUID)
     case shutdown

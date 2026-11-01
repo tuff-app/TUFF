@@ -22,7 +22,9 @@ enum GTurboLayoutValidator {
                 throw RepackError.configurationInvalid(detail: "layout.json validation failed: malformed layer")
             }
             guard layer.experts.count == planLayer.expertsPerLayer,
-                  layout.expertStride == planLayer.expertStride else {
+                  (planLayer.expertsPerLayer == 0 ||
+                   (planLayer.expertStride <= layout.expertStride &&
+                    layer.experts.allSatisfy { $0.size == planLayer.expertStride })) else {
                 throw RepackError.configurationInvalid(detail:
                     "layout.json validation failed: plan mismatch in layer \(layer.layer)")
             }

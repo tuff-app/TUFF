@@ -161,8 +161,9 @@ public enum VerifiedInstallTool {
             throw RepackError.configurationInvalid(
                 detail: "packed expert layout does not match manifest: \(error)")
         }
-        let expectedLayerSize = UInt64(layout.expertsPerLayer) * layout.expertStride
         for layer in layout.layers {
+            if layer.experts.isEmpty { continue }
+            let expectedLayerSize = UInt64(layout.expertsPerLayer) * layer.experts[0].size
             let relativePath = "packed_experts/\(layer.file)"
             guard let manifestEntry = manifest.files[relativePath] else {
                 throw RepackError.configurationInvalid(detail: "manifest missing \(relativePath)")

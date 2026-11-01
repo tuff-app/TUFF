@@ -310,6 +310,8 @@ public func run(args: Args,
             context: context,
             maxContext: args.maxContext,
             runtimeConfiguration: runtime)
+        let residentWarmup = model.startResidentWarmup()
+        defer { residentWarmup?.cancel() }
         if ProcessInfo.processInfo.environment["TUFF_PHASES"] == "1" {
             let seconds = { (from: ContinuousClock.Instant, to: ContinuousClock.Instant) -> String in
                 let d = from.duration(to: to)
@@ -404,6 +406,7 @@ public func run(args: Args,
                 }
             }
         }
+        residentWarmup?.cancel()
         let stats = try await runRawCompletion(
             producer: runner,
             tokenizer: tokenizer,
@@ -453,6 +456,9 @@ public func run(args: Args,
             }
         }
 
+        if let profiler = GPUOpProfiler.shared {
+            stderr.write(Data(profiler.report().utf8))
+        }
         if ProcessInfo.processInfo.environment["TUFF_PHASES"] == "1" {
             let ms = { (n: UInt64) in String(format: "%.1f", Double(n) / 1e6) }
             let total = stats.decodeSeconds * 1000

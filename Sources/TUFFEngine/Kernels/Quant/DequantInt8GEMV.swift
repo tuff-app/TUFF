@@ -27,10 +27,14 @@ final class DequantInt8GEMV {
         Shape(m: 2816, n: 2112),    // shared expert down
     ]
 
+    /// `wide` selects the four-bytes-per-lane row kernel (Flint).
     init(context: MetalContext,
-         additionalShapes: [(m: Int, n: Int)] = []) throws {
+         additionalShapes: [(m: Int, n: Int)] = [],
+         wide: Bool = false) throws {
         let kernelName = "dequant_int8_gemv_simd"
-        self.pso = try context.pipeline(kernelName)
+        let wideConstants: [MetalFunctionConstant] = wide
+            ? [MetalFunctionConstant(index: 75, value: .bool(true))] : []
+        self.pso = try context.pipeline(kernelName, constants: wideConstants)
 
         let shapes = Self.realDecodeShapes
             + additionalShapes.map { Shape(m: UInt32($0.m), n: UInt32($0.n)) }
@@ -42,7 +46,7 @@ final class DequantInt8GEMV {
                     MetalFunctionConstant(index: 70, value: .uint32(shape.m)),
                     MetalFunctionConstant(index: 71, value: .uint32(shape.n)),
                     MetalFunctionConstant(index: 72, value: .bool(true)),
-                ])
+                ] + wideConstants)
         }
         self.specializedPSOs = variants
     }

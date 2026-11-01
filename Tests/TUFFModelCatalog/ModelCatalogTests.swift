@@ -42,6 +42,7 @@ import Testing
         #expect(TUFFModelCatalog.all.map(\.selector) == [
             "gemma4-e2b", "gemma4-e4b", "gemma4-12b-qat", "gemma4", "qwen36",
             "gpt-oss-20b", "gpt-oss-120b", "minimax-m2.7", "qwen38-flash-next", "ornith-9b", "ornith-35b", "ornith-122b", "ornith-397b", "qwen38-27b", "gemma4-heretic",
+            "flint-40b", "bonsai-2-2b", "bonsai-2-27b",
         ])
         #expect(TUFFModelCatalog.model(selector: "e2b")?.id == .gemma4_E2B)
         #expect(TUFFModelCatalog.default.id == .gemma4_26B_A4B)
@@ -55,6 +56,35 @@ import Testing
         #expect(TUFFModelCatalog.model(selector: "flash-next")?.id == .qwen38FlashNext)
         #expect(TUFFModelCatalog.model(selector: "qwen-flash")?.id == .qwen38FlashNext)
         #expect(TUFFModelCatalog.model(selector: "unknown") == nil)
+    }
+
+    @Test func flintOptiQAndBonsaiAreAdvertisedTextOnly() {
+        let flint = TUFFModelCatalog.flint40B
+        #expect(flint.qualification == .requiresRealModelValidation)
+        #expect(flint.architecture.family == .flint)
+        // The OptiQ promotion descriptor replaces `flint40B` when promoted: same
+        // identity, install directory and architecture, its own pinned source.
+        let optiq = TUFFModelCatalog.flint40BOptiQ
+        #expect(optiq.id == flint.id && optiq.installDirectoryName == flint.installDirectoryName)
+        #expect(optiq.source.repoID == "mlx-community/flint-OptiQ-4bit")
+        #expect(optiq.qualification == .qualified)
+        #expect(TUFFModelCatalog.model(selector: flint.selector)?.source.repoID == optiq.source.repoID)
+        #expect(optiq.hardware.minimumUnifiedMemoryBytes == 16 * 1024 * 1024 * 1024)
+        #expect(TUFFModelCatalog.model(manifestModelID: optiq.source.manifestModelID)?.source.revision
+                == optiq.source.revision)
+        for model in [flint, optiq, TUFFModelCatalog.bonsai2_2B, TUFFModelCatalog.bonsai2_27B] {
+            #expect(model.source.revision.count == 40)
+            #expect(model.source.sourceIndexSHA256.count == 64)
+            #expect(model.capabilities.contains(.textGeneration))
+            #expect(!model.capabilities.contains(.imageInput))
+            #expect(model.addons.isEmpty)
+        }
+        for model in [TUFFModelCatalog.bonsai2_2B, TUFFModelCatalog.bonsai2_27B] {
+            #expect(model.qualification == .qualified)
+            #expect(TUFFModelCatalog.model(selector: model.selector)?.id == model.id)
+            #expect(model.architecture.weightLayout == .prismQ2)
+        }
+        #expect(TUFFModelCatalog.all.count == 18)
     }
 
     @Test func sourcesRemainPinnedAndUnique() {

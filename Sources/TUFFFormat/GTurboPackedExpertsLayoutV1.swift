@@ -113,7 +113,8 @@ package enum GTurboV1StructuralValidator {
                     field: "layout.layers[\(layer.layer)].file",
                     reason: "duplicate layer filename")
             }
-            guard layer.experts.count == layout.expertsPerLayer else {
+            guard layer.experts.count == layout.expertsPerLayer
+                    || (layer.layer < 2 && layer.experts.isEmpty) else {
                 throw GTurboFormatError.invalid(field: "layout.layers[\(layer.layer)].experts",
                                                 reason: "wrong expert count")
             }
@@ -127,6 +128,11 @@ package enum GTurboV1StructuralValidator {
                     field: "layout.layers[\(layer.layer)].experts",
                     reason: "expert ids must be either all explicit or all positional")
             }
+            let layerStride = layer.experts.first?.size ?? layout.expertStride
+            guard layerStride > 0, layerStride <= layout.expertStride,
+                  layerStride % GTurboFormatV1.alignmentBytes == 0 else {
+                throw GTurboFormatError.invalid(field: "layout.layers[\(layer.layer)]", reason: "invalid layer stride")
+            }
             for (position, expert) in layer.experts.enumerated() {
                 let logical = expert.expert ?? position
                 let physical = expert.physicalRank ?? logical
@@ -138,9 +144,9 @@ package enum GTurboV1StructuralValidator {
                     throw GTurboFormatError.invalid(field: "layout.layers[\(layer.layer)].experts",
                                                     reason: "duplicate or invalid expert mapping")
                 }
-                let expectedOffset = try gturboCheckedMultiply(UInt64(physical), layout.expertStride,
+                let expectedOffset = try gturboCheckedMultiply(UInt64(physical), layerStride,
                                                                field: "expert.offset")
-                guard expert.offset == expectedOffset, expert.size == layout.expertStride else {
+                guard expert.offset == expectedOffset, expert.size == layerStride else {
                     throw GTurboFormatError.invalid(field: "expert[\(logical)]",
                                                     reason: "offset or size does not match physical rank")
                 }
@@ -183,7 +189,7 @@ package enum GTurboV1StructuralValidator {
             manifestExpertsPerLayer: manifest.expertsPerLayer,
             manifestExpertStride: manifest.expertStride,
             manifestFileSizes: manifest.files.mapValues(\.size),
-            layout: layout)
+            layout: layout, densePrefixLayers: manifest.arch.family == "flint" ? 2 : 0)
     }
 
     package static func crossValidate(
@@ -191,7 +197,8 @@ package enum GTurboV1StructuralValidator {
         manifestExpertsPerLayer: Int,
         manifestExpertStride: UInt64,
         manifestFileSizes: [String: UInt64],
-        layout: GTurboPackedExpertsLayoutV1
+        layout: GTurboPackedExpertsLayoutV1,
+        densePrefixLayers: Int = 0
     ) throws {
         guard manifestNumLayers == layout.numLayers,
               manifestExpertsPerLayer == layout.expertsPerLayer,
@@ -199,12 +206,21 @@ package enum GTurboV1StructuralValidator {
             throw GTurboFormatError.invalid(field: "manifest/layout",
                                             reason: "dimension mismatch")
         }
-        let expectedLayerSize = try gturboCheckedMultiply(UInt64(layout.expertsPerLayer),
-                                                          layout.expertStride,
-                                                          field: "layout.layerSize")
+        try validate(layout)
         for layer in layout.layers {
             let path = "packed_experts/\(layer.file)"
-            guard manifestFileSizes[path] == expectedLayerSize else {
+            if layer.layer < densePrefixLayers {
+                guard layer.experts.isEmpty, manifestFileSizes[path] == nil else {
+                    throw GTurboFormatError.invalid(field: "layout.layers[\(layer.layer)]", reason: "dense layer must not have streamed experts")
+                }
+                continue
+            }
+            let layerStride = layer.experts.first?.size ?? 0
+            let expectedLayerSize = try gturboCheckedMultiply(UInt64(layout.expertsPerLayer),
+                                                              layerStride, field: "layout.layerSize")
+            guard (densePrefixLayers == 2 || layerStride == layout.expertStride),
+                  layer.experts.count == layout.expertsPerLayer,
+                  manifestFileSizes[path] == expectedLayerSize else {
                 throw GTurboFormatError.invalid(field: "manifest.files.\(path)",
                                                 reason: "missing or wrong layer size")
             }

@@ -6,6 +6,64 @@ import Darwin
 
 @Suite struct ResidentBufferTests {
 
+    @Test func warmupRespectsMemoryAndStreamingLimits() {
+        #expect(ResidentWarmup.eligible(payloadSize: 8, physicalMemory: 16, stagesDenseLayers: false, isDense: true))
+        #expect(!ResidentWarmup.eligible(payloadSize: 9, physicalMemory: 16, stagesDenseLayers: false, isDense: true))
+        #expect(!ResidentWarmup.eligible(payloadSize: 1, physicalMemory: 16, stagesDenseLayers: true, isDense: true))
+        #expect(!ResidentWarmup.eligible(payloadSize: 1, physicalMemory: 16, stagesDenseLayers: false, isDense: false))
+        #expect(!ResidentWarmup.eligible(payloadSize: 0, physicalMemory: 16, stagesDenseLayers: false, isDense: true))
+        #expect(!ResidentWarmup.eligible(payloadSize: 1, physicalMemory: 0, stagesDenseLayers: false, isDense: true))
+    }
+
+    @Test func warmupStopsAfterCurrentPageWhenCancelled() {
+        let warmup = ResidentWarmup()
+        var pages: [Int] = []
+        warmup.run(length: 10, startPageOffset: 0, pageSize: 1) { offset in
+            pages.append(offset)
+            if offset == 2 { warmup.cancel() }
+        }
+        #expect(pages == [0, 1, 2])
+    }
+
+    @Test func warmupCoversUnalignedFirstAndLastPages() {
+        let warmup = ResidentWarmup()
+        var offsets: [Int] = []
+        warmup.run(length: 9, startPageOffset: 3, pageSize: 4) { offsets.append($0) }
+        #expect(offsets == [0, 1, 5])
+    }
+
+    @Test func cancelledWarmupDoesNotStartAnotherPass() {
+        let warmup = ResidentWarmup()
+        warmup.cancel()
+        var read = false
+        warmup.run(length: 4, startPageOffset: 0, pageSize: 1) { _ in read = true }
+        #expect(!read)
+    }
+
+    @Test func cancelDoesNotWaitForAnInFlightPageRead() {
+        let warmup = ResidentWarmup()
+        let entered = DispatchSemaphore(value: 0)
+        let resume = DispatchSemaphore(value: 0)
+        let finished = DispatchSemaphore(value: 0)
+        let lock = NSLock()
+        final class Reads: @unchecked Sendable { var offsets: [Int] = [] }
+        let reads = Reads()
+        DispatchQueue.global().async {
+            warmup.run(length: 4, startPageOffset: 0, pageSize: 1) { offset in
+                lock.lock(); reads.offsets.append(offset); lock.unlock()
+                entered.signal()
+                _ = resume.wait(timeout: .now() + 5)
+            }
+            finished.signal()
+        }
+        #expect(entered.wait(timeout: .now() + 5) == .success)
+        warmup.cancel()
+        resume.signal()
+        #expect(finished.wait(timeout: .now() + 5) == .success)
+        lock.lock(); let actual = reads.offsets; lock.unlock()
+        #expect(actual == [0])
+    }
+
     private static func entry(
         _ name: String,
         weights: (UInt64, UInt64),

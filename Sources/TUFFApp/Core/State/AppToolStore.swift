@@ -31,7 +31,7 @@ public enum AppToolSupport: Equatable, Sendable {
         case .gemma4_26B_A4B, .gemma4_26B_Heretic, .qwen38FlashNext, .gemma4_12B_QAT, .gemma4_E4B, .gemma4_E2B,
              .qwen36_35B_A3B, .gptOss_20B, .ornith15_9B, .ornith15_35B_A3B, .ornith15_122B, .qwen38_27B, .ornith15_397B:
             .validated
-        case .gptOss_120B, .minimaxM27:
+        case .gptOss_120B, .minimaxM27, .flint40B, .bonsai2_2B, .bonsai2_27B:
             .untested
         }
     }
@@ -388,7 +388,9 @@ public final class AppToolStore {
     /// sandbox to use, web requests fail and nothing is sent directly.
     public func makeToolbox(provider kind: AppSearchProviderKind,
                             limits: AppToolLimits = .standard,
-                            webInSandbox: Bool = false) -> AppToolbox {
+                            webInSandbox: Bool = false, workspace: String? = nil,
+                            workspaceWrite: Bool = false, commandNetwork: Bool = false,
+                            codingAllowed: @escaping @Sendable (AppValidatedToolCall) async -> Bool = { _ in true }) -> AppToolbox {
         let timeout = limits.requestTimeoutSeconds
         let transport: any AppHTTPTransport
         let readPage: @Sendable (URL) async throws -> AppWebPage
@@ -432,6 +434,28 @@ public final class AppToolStore {
                     throw AppLocalSearchError.index("The local search index could not be opened.")
                 }
                 return try await index.search(query, folders: folders, limit: count)
+            }, coding: { call in
+                #if os(macOS)
+                guard let workspace else { throw AppToolValidationError("No workspace is selected.") }
+                guard await codingAllowed(call) else { throw AppToolValidationError("Workspace access changed while this answer was running.") }
+                let files = AppWorkspaceFiles(root: workspace)
+                switch call {
+                case .listFiles(let path): return try files.list(path)
+                case .readFile(let path, let startLine, let lineCount):
+                    let lines = try files.read(path).components(separatedBy: "\n")
+                    let start = min(lines.count, startLine - 1)
+                    let end = min(lines.count, start + lineCount)
+                    return lines[start..<end].enumerated().map { "\(start + $0.offset + 1): \($0.element)" }.joined(separator: "\n")
+                case .writeFile(let path, let content): try files.write(path, content: content); return "Wrote \(path)."
+                case .editFile(let path, let old, let new): try files.edit(path, old: old, new: new); return "Edited \(path)."
+                case .runCommand(let command):
+                    return try await AppWorkspaceCommand(root: workspace, allowWrite: workspaceWrite,
+                                                         allowNetwork: commandNetwork).run(command)
+                default: throw AppToolValidationError("Command execution is unavailable.")
+                }
+                #else
+                throw AppToolValidationError("Workspace tools require macOS.")
+                #endif
             })
     }
 

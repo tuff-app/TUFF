@@ -355,9 +355,15 @@ public func runRawCompletion(producer: any LogitProducer,
         // same reasoning `coercedForImagePrompt` applies in the other
         // direction — and a hyper-connection architecture has no chunked
         // kernels at all, so throwing here would mean the model cannot answer.
-        for t in prefillTokens {
+        for (index, t) in prefillTokens.enumerated() {
             try Task.checkCancellation()
-            try await producer.produce(token: t, position: position, into: scratch.logits)
+            if index + 1 < prefillTokens.count,
+               let skipping = producer as? any PrefillHeadSkippingRunner,
+               skipping.supportsHeadSkippingPrefill {
+                try await skipping.consumePrefillToken(t, position: position, scratchLogits: scratch.logits)
+            } else {
+                try await producer.produce(token: t, position: position, into: scratch.logits)
+            }
             position += 1
             history.append(t)
             onProgress(.prefill(done: position, total: promptIds.count))

@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import Testing
 import TUFFEngine
 @testable import TUFFAppCore
@@ -6,6 +7,50 @@ import TUFFEngine
 import TUFFDecodeProtocol
 
 @Suite struct DecodeServiceOutboxTests {
+    @Test func socketWriterDoesNotChangeSharedReadFlags() throws {
+        var descriptors: [Int32] = [0, 0]
+        #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors) == 0)
+        let output = FileHandle(fileDescriptor: descriptors[0], closeOnDealloc: true)
+        let peer = FileHandle(fileDescriptor: descriptors[1], closeOnDealloc: true)
+        let before = fcntl(descriptors[0], F_GETFL)
+        let writer = DecodeServiceFrameWriter(handle: output, timeout: 1)
+        try writer.write(Data([1, 2, 3]))
+        let after = fcntl(descriptors[0], F_GETFL)
+        #expect((before & O_NONBLOCK) == (after & O_NONBLOCK))
+        #expect(try peer.read(upToCount: 3) == Data([1, 2, 3]))
+    }
+
+    @Test func blockedFrameWriterFailsAndRefusesFurtherFrames() throws {
+        let pipe = Pipe()
+        let writer = DecodeServiceFrameWriter(handle: pipe.fileHandleForWriting, timeout: 0.05)
+        do {
+            try writer.write(Data(repeating: 1, count: 1_048_576))
+            Issue.record("A stalled reader accepted an oversized frame")
+        } catch {}
+        do {
+            try writer.write(Data([1]))
+            Issue.record("A failed transport accepted another frame")
+        } catch {}
+        try? pipe.fileHandleForWriting.close()
+        try? pipe.fileHandleForReading.close()
+    }
+
+    @Test func oversizedPendingOutputCancelsAndFailsOnce() throws {
+        let id = UUID()
+        let cancelled = DispatchSemaphore(value: 0)
+        let outbox = DecodeServiceOutbox(generationID: id, maximumPendingBytes: 4,
+                                         onOverflow: { cancelled.signal() })
+        outbox.publish(.token(AppTokenEvent(index: 0, textDelta: "too long", elapsedDecodeSeconds: 0)))
+        #expect(cancelled.wait(timeout: .now() + 1) == .success)
+        outbox.publish(.token(AppTokenEvent(index: 1, textDelta: "more", elapsedDecodeSeconds: 0)))
+        #expect(cancelled.wait(timeout: .now()) == .timedOut)
+        let pipe = Pipe()
+        try outbox.runWriter(to: pipe.fileHandleForWriting)
+        let event = try DecodeFrameCodec.read(DecodeServiceEvent.self, from: pipe.fileHandleForReading)
+        #expect(event.kind == .failed)
+        #expect(event.error == "output consumer is too slow")
+    }
+
     @Test func cancellationFollowedByThrownCancellationWritesOneTerminal() throws {
         let generationID = UUID()
         let outbox = DecodeServiceOutbox(generationID: generationID)

@@ -144,6 +144,25 @@ enum GTurboJSON {
                     biasType: "none",
                     groupSize: 1)
             }
+            if arch.family == .flint, name == "router", weightBits == 16 {
+                return GTurboManifestQuantSlotV1(weightBits: 16, scheme: "bf16",
+                    scaleType: "none", biasType: "none", groupSize: 1)
+            }
+            if [RepackModelVariant.bonsai2_2B, .bonsai2_27B].contains(arch.variant), name == "routedExpert" {
+                return GTurboManifestQuantSlotV1(weightBits: weightBits, scheme: "affine",
+                    scaleType: "BF16", biasType: "BF16", groupSize: 64)
+            }
+            // Prism's packed language matrices retain the source's FP16
+            // affine companions. Router and routed-expert slots remain the
+            // ordinary unused dense placeholders for schema compatibility.
+            if [RepackModelVariant.bonsai2_2B, .bonsai2_27B].contains(arch.variant),
+               ["embedding", "attention", "sharedExpert"].contains(name) {
+                guard weightBits == 2 else {
+                    throw RepackError.configurationInvalid(detail: "Prism \(name) must use 2-bit weights")
+                }
+                return GTurboManifestQuantSlotV1(weightBits: 2, scheme: "affine",
+                                                scaleType: "FP16", biasType: "FP16", groupSize: 128)
+            }
             // The group size follows the bit width, not the checkpoint: a
             // 4-bit checkpoint can carry an 8-bit router grouped at 64 beside
             // 4-bit tensors grouped at 32, and recording the base for both
@@ -277,7 +296,7 @@ enum GTurboJSON {
             GTurboPackedExpertsLayoutV1(
                 expertStride: expertStride,
                 numLayers: arch.numLayers,
-                expertsPerLayer: plan.layers.first?.expertsPerLayer ?? 0,
+                expertsPerLayer: plan.layers.first(where: { $0.expertsPerLayer > 0 })?.expertsPerLayer ?? 0,
                 layers: layers))
     }
 }

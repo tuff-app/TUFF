@@ -30,7 +30,9 @@ import Testing
 
         #expect(model.modelPathText == "/tmp/example.gturbo")
         #expect(model.liveTokenCount == 12)
-        #expect(model.isRunning)
+        #expect(model.inferenceStore.runState == .running)
+        // Running is derived from live answer runs, not from the stored state.
+        #expect(!model.isRunning)
     }
 
     @MainActor

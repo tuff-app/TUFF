@@ -1,5 +1,319 @@
 {
   "profiles": {
+    "flint-40b-a2.5b": {
+      "layout": {
+        "architectureID": "flint-40b-a2.5b",
+        "layout": {
+          "denseGroupBytes": [
+            60358656,
+            60375040,
+            27508736,
+            27508736,
+            27508736,
+            27525120,
+            27508736,
+            27525120,
+            27508736,
+            27525120,
+            27508736,
+            27525120,
+            27508736,
+            27525120,
+            27508736,
+            27525120,
+            27508736,
+            27525120,
+            27508736,
+            27525120,
+            27525120,
+            27525120,
+            27508736,
+            27525120,
+            27508736,
+            27525120,
+            27508736,
+            27525120,
+            27508736,
+            27525120,
+            27525120,
+            27508736,
+            27525120,
+            27508736,
+            27525120,
+            27525120,
+            27508736,
+            27525120,
+            27508736,
+            27525120,
+            27525120,
+            23314432,
+            23330816,
+            27508736,
+            23330816,
+            23314432,
+            23330816,
+            23330816,
+            27508736
+          ],
+          "expertLayers": [
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            },
+            {
+              "bytesPerExpert": 3342336,
+              "expertCount": 256,
+              "minimumSlots": 6
+            }
+          ],
+          "fixedResidentBytes": 653443072,
+          "rowAccessTables": []
+        },
+        "manifestSHA256": "add65d7baae0751e57e1f46cf7461da12118e2923ddbdb987e2d5d3fa93ff3ff",
+        "minimumDenseStagingBytes": 60171008,
+        "modelID": "mlx-community/flint-OptiQ-4bit",
+        "packedResidentPayloadBytes": 2031918656,
+        "schemaVersion": 1,
+        "weightsSHA256": "e54d507ce4d112bfd88eded10706564733f0beb4fb8d795b4928ba37c58c3f54"
+      },
+      "sourceIndexSHA256": "54bd24dfdb836f9154da82f2273cc52274a230b74c9996379357285d72330fd0"
+    },
     "gemma4-12b-qat": {
       "layout": {
         "architectureID": "gemma4-12b-qat",
@@ -2967,6 +3281,132 @@
         "weightsSHA256": "97c08d21b8b211c50370b5a0ec090c33a7ec888c67f437ed0f5e663696c459e6"
       },
       "sourceIndexSHA256": "0b28df60e33753a14e816d3b31577ae2c93884c58430a4a6de6ae9ea483842ea"
+    },
+    "ternary-bonsai-2-27b": {
+      "layout": {
+        "architectureID": "ternary-bonsai-2-27b",
+        "layout": {
+          "denseGroupBytes": [
+            110313472,
+            110329856,
+            110313472,
+            105218048,
+            110329856,
+            110329856,
+            110313472,
+            105234432,
+            110313472,
+            110329856,
+            110313472,
+            105234432,
+            110313472,
+            110313472,
+            110313472,
+            105234432,
+            110313472,
+            110329856,
+            110313472,
+            105234432,
+            110313472,
+            110280704,
+            110313472,
+            105218048,
+            110329856,
+            110313472,
+            110313472,
+            105218048,
+            110313472,
+            110329856,
+            110329856,
+            105218048,
+            110313472,
+            110329856,
+            110313472,
+            105234432,
+            110313472,
+            110313472,
+            110329856,
+            105218048,
+            110313472,
+            110313472,
+            110313472,
+            105234432,
+            110313472,
+            110329856,
+            110264320,
+            105201664,
+            110313472,
+            110313472,
+            110313472,
+            105218048,
+            110329856,
+            110313472,
+            110313472,
+            105234432,
+            110313472,
+            110329856,
+            110313472,
+            105234432,
+            110313472,
+            110313472,
+            110329856,
+            105218048
+          ],
+          "expertLayers": [],
+          "fixedResidentBytes": 715292672,
+          "rowAccessTables": []
+        },
+        "manifestSHA256": "e608fba61191ef7bf0343602dc581bc5659fd1c2dd9b2c56ab47735668e114ab",
+        "minimumDenseStagingBytes": 109990912,
+        "modelID": "prism-ml/Ternary-Bonsai-2-27B-mlx-2bit",
+        "packedResidentPayloadBytes": 7673714688,
+        "schemaVersion": 1,
+        "weightsSHA256": "9812ad3456b22a88968f91ca0c594fb5854829e0fcce7d96118a466123dc2ea6"
+      },
+      "sourceIndexSHA256": "130de5925082c168b7866b2e91b52e44abbafc99017e3ca352b77b5b55a269ed"
+    },
+    "ternary-bonsai-2-2b": {
+      "layout": {
+        "architectureID": "ternary-bonsai-2-2b",
+        "layout": {
+          "denseGroupBytes": [
+            17268736,
+            17285120,
+            17285120,
+            15138816,
+            17285120,
+            17285120,
+            17285120,
+            15122432,
+            17285120,
+            17285120,
+            17285120,
+            15138816,
+            17285120,
+            17285120,
+            17285120,
+            15122432,
+            17301504,
+            17285120,
+            17285120,
+            15122432,
+            17285120,
+            17285120,
+            17285120,
+            15138816
+          ],
+          "expertLayers": [],
+          "fixedResidentBytes": 143097856,
+          "rowAccessTables": []
+        },
+        "manifestSHA256": "a6102cfce17e9ddee2e3ff57532ee03cb6c81ffecd7cef84d5569b963018eb87",
+        "minimumDenseStagingBytes": 16958464,
+        "modelID": "prism-ml/Ternary-Bonsai-2-2B-mlx-2bit",
+        "packedResidentPayloadBytes": 537320704,
+        "schemaVersion": 1,
+        "weightsSHA256": "6780f7f44b67b04c14199b1cab78a11880a0d9c67bf4faa64eda0b4d0a5478cc"
+      },
+      "sourceIndexSHA256": "da5095b9f34d7f0d5094090afeeadf124eef821c75136dc28957ce586ae7ac0c"
     }
   },
   "schemaVersion": 1

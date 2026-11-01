@@ -460,7 +460,7 @@ enum RepackPlanner {
         case .qwen36: routedContainer = ".mlp.switch_mlp."
         case .gptOss: routedContainer = ".mlp.experts."
         case .minimaxM2: routedContainer = ".block_sparse_moe.switch_mlp."
-        case .qwen4Exp: routedContainer = ".mlp.switch_mlp."
+        case .qwen4Exp, .flint: routedContainer = ".mlp.switch_mlp."
         }
         guard name.contains(routedContainer) else { return nil }
         if name.contains(".gate_proj.") { return "gate" }
@@ -1187,6 +1187,7 @@ enum RepackPlanner {
                 case .gptOss: slot = gptOssSlotRank(in: n)
                 case .minimaxM2: slot = minimaxSlotRank(in: n)
                 case .qwen4Exp: slot = qwen4ExpSlotRank(in: n)
+                case .flint: slot = qwenSlotRank(in: n)
                 }
                 return (1, li, slot, n)
             }

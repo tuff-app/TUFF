@@ -10,7 +10,7 @@ public enum AppSettingsSection: String, CaseIterable, Hashable, Identifiable, Se
         switch self {
         case .general: "General"
         case .models: "Models"
-        case .search: "Search"
+        case .search: "Tools"
         case .advanced: "Advanced"
         }
     }

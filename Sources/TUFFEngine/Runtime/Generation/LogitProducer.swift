@@ -32,6 +32,13 @@ protocol ContextWindowReporting: Sendable {
     var maxContext: Int { get }
 }
 
+/// A decode-only prefill path can avoid evaluating the vocabulary head until
+/// the final prompt token while still updating every layer and cache.
+protocol PrefillHeadSkippingRunner: LogitProducer {
+    var supportsHeadSkippingPrefill: Bool { get }
+    func consumePrefillToken(_ token: Int32, position: Int, scratchLogits: MTLBuffer) async throws
+}
+
 public enum PrefillOutputMode: Sendable, Equatable {
     case logits
     case greedyIfAvailable
@@ -70,6 +77,12 @@ protocol ChunkedPrefillRunner: LogitProducer {
 extension ChunkedPrefillRunner {
     var supportsChunkedPrefill: Bool { true }
 }
+
+/// Runs one planned forward chunk of a multimodal prefill. A caller that
+/// shares the model with other sessions passes a gate that holds its fairness
+/// lease for exactly that chunk, so another session's forward can run between
+/// the chunks of a long image prompt.
+public typealias PrefillChunkGate = (_ chunk: () async throws -> Void) async throws -> Void
 
 protocol MultimodalPrefillRunner: LogitProducer {
     func prefillMultimodal(input: MultimodalPrefillInput,

@@ -1,4 +1,5 @@
 import Foundation
+import TUFFDecodeProtocol
 import TUFFModelCatalog
 import TUFFRuntimeDescriptions
 import TUFFModelMetadata
@@ -52,25 +53,45 @@ public struct AppResidencyCoordinator: Sendable {
         if let model = TUFFModelCatalog.model(manifestModelID: identity.modelID) {
             if let options, let estimate = AppAutomaticMemoryPlanner.estimatedAllocation(
                 directory: directory, context: context, options: options) {
-                let hasVision = (try? VisionPackLocation.companionURL(forTextModel: directory))
-                    .map { FileManager.default.fileExists(atPath: $0.path) } ?? false
                 return try await reserve(record: .init(owner: .app, modelID: model.apiModelID,
-                    estimatedBytes: hasVision ? max(budgetBytes, estimate.peakAllocatedBytes) : estimate.peakAllocatedBytes))
-            }
-            if let companion = try? VisionPackLocation.companionURL(forTextModel: directory),
-               FileManager.default.fileExists(atPath: companion.path) {
-                // Vision towers can allocate a transient encoding working set.
-                // Serialize cross-process residency until a combined text/vision
-                // peak has been qualified, rather than guessing that it fits.
-                let estimate = model.estimatedInferenceWorkingSetBytes(contextTokens: context,
-                    expertCacheSlots: slots, prefillChunkTokens: chunk)
-                return try await reserve(record: .init(owner: .app, modelID: model.apiModelID,
-                    estimatedBytes: max(budgetBytes, estimate)))
+                    estimatedBytes: estimate.peakAllocatedBytes))
             }
             return try await reserve(model: model, context: context, slots: slots, chunk: chunk)
         }
         // A custom pack still participates in admission, without publishing its path.
         return try await reserve(record: .init(owner: .app, modelID: "custom", estimatedBytes: budgetBytes))
+    }
+
+    /// Reserve the private state and runtime allocation for an additional
+    /// session. Weight pages are covered by the owning model's existing lease.
+    /// When a layout cannot be estimated, do not guess that another session fits.
+    public func reserveSession(directory: URL, context: Int,
+                               options: AppRuntimeOptions) async throws -> TUFFResidencyLease {
+        guard let estimate = AppAutomaticMemoryPlanner.estimatedAllocation(
+            directory: directory, context: context, options: options) else {
+            throw AppInferenceError.modelLoadFailed(
+                "This model's additional session memory cannot be estimated safely.")
+        }
+        let total = estimate.stateBytes.addingReportingOverflow(estimate.runtimeBytes)
+        guard !total.overflow else {
+            throw AppInferenceError.modelLoadFailed("Session memory estimate overflowed.")
+        }
+        return try await reserve(record: .init(owner: .app, modelID: "session",
+                                               estimatedBytes: total.partialValue))
+    }
+
+    /// Image tower peaks are not yet qualified alongside other models. Reserve
+    /// the whole budget exclusively while image work or retained tower mappings
+    /// are active; ordinary text loads do not reserve an absent image workload.
+    public func reserveVision(allowing own: [TUFFResidencyLease]) throws -> TUFFResidencyLease {
+        do {
+            return try registry.reserveExclusive(
+                .init(owner: .app, modelID: "vision-workspace", estimatedBytes: budgetBytes),
+                allowing: own)
+        } catch is TUFFResidencyRegistry.MemoryBusy {
+            throw AppInferenceError.modelLoadFailed(
+                "Image processing \(ServingMemoryPressure.exclusivePhrase). Finish or unload other sessions and models first.")
+        }
     }
 
     private func reserve(record: TUFFResidencyRecord) async throws -> TUFFResidencyLease {
@@ -89,7 +110,7 @@ public struct AppResidencyCoordinator: Sendable {
                 return try registry.reserve(record, budgetBytes: budgetBytes)
             } catch is TUFFResidencyRegistry.MemoryBusy {
                 throw AppInferenceError.modelLoadFailed(
-                    "Another TUFF process holds model memory. Unload its model before loading this one.")
+                    "Another TUFF process \(ServingMemoryPressure.phrase). Unload its model before loading this one.")
             }
         }
     }

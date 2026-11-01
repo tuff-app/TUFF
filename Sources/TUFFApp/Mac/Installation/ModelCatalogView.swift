@@ -365,6 +365,7 @@ struct ModelCatalogRow: View {
     }
 
     private var actions: some View {
+        VStack(alignment: .trailing, spacing: 3) {
         HStack(spacing: 8) {
             if install.isInstalling {
                 Button("Cancel") { install.cancel() }
@@ -405,19 +406,16 @@ struct ModelCatalogRow: View {
                 .help(deleteHelp)
             }
             if !isSelected {
-                VStack(alignment: .trailing, spacing: 3) {
-                    Button("Use This Model") { model.selectModel(install) }
-                        .disabled(!model.canSelectModel(install))
-                        .help(selectionHelp)
-                    // Said, not only greyed out: the disabled button gave no
-                    // reason while a reply was being written.
-                    if model.isRunning, install.isInstalled {
-                        Text("Stop the reply to switch")
-                            .appFont(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                }
+                Button("Use This Model") { model.selectModel(install) }
+                    .disabled(!model.canSelectModel(install))
+                    .help(selectionHelp)
             }
+        }
+        if !isSelected, model.isRunning, install.isInstalled {
+            Text("Stop the reply to switch")
+                .appFont(.caption2)
+                .foregroundStyle(.secondary)
+        }
         }
         .controlSize(compact ? .small : .regular)
     }

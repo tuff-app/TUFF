@@ -102,6 +102,7 @@ final class LMHeadChainInt4 {
     func encodeGreedyDecode(commandBuffer: MTLCommandBuffer,
                             hidden: MTLBuffer,
                             hiddenOffset: Int = 0,
+                            normedInput: MTLBuffer? = nil,
                             normWeight: MTLBuffer,
                             normOffset: Int = 0,
                             weights: MTLBuffer,
@@ -125,19 +126,23 @@ final class LMHeadChainInt4 {
 
         let rowGroups = (Int(vocab) + Self.rowsPerThreadgroup - 1)
             / Self.rowsPerThreadgroup
-        rms.encodeBF16W(commandBuffer: commandBuffer,
-                        x: hidden,
-                        xOffset: hiddenOffset,
-                        weight: normWeight,
-                        weightOffset: normOffset,
-                        out: xNormedBuffer,
-                        d: d,
-                        eps: rmsEps)
+        // A caller that already normalized the row (Flint, from its FP32
+        // residual) passes it in and the kernel reads it directly.
+        if normedInput == nil {
+            rms.encodeBF16W(commandBuffer: commandBuffer,
+                            x: hidden,
+                            xOffset: hiddenOffset,
+                            weight: normWeight,
+                            weightOffset: normOffset,
+                            out: xNormedBuffer,
+                            d: d,
+                            eps: rmsEps)
+        }
 
         if let encoder = commandBuffer.makeComputeCommandEncoder() {
             let specialized = d == specializedD && vocab == specializedVocab
             encoder.setComputePipelineState(specialized ? rowGreedySpecialized : rowGreedy)
-            encoder.setBuffer(xNormedBuffer, offset: 0, index: 0)
+            encoder.setBuffer(normedInput ?? xNormedBuffer, offset: 0, index: 0)
             encoder.setBuffer(weights, offset: weightsOffset, index: 1)
             encoder.setBuffer(scales, offset: scalesOffset, index: 2)
             encoder.setBuffer(biases, offset: biasesOffset, index: 3)

@@ -3,15 +3,34 @@ import Foundation
 import TUFFEngine
 import TUFFAppCore
 import TUFFDecodeProtocol
+import Synchronization
 
 /// The inference operations the decode service drives. `RealInferenceClient`
 /// is the production client; tests substitute a fake.
 protocol DecodeServiceInference: AppModelLifecycleClient {
     var currentVisionTowerBytes: UInt64? { get }
     func waitUntilIdle() async
+    func waitUntilRequestIdle(_ requestID: UUID) async
+    func generate(_ request: AppGenerationRequest, sessionID: UUID,
+                  requestID: UUID) -> AsyncThrowingStream<AppInferenceEvent, Error>
+    func cancel(requestID: UUID)
+    func cancelAllRequests()
+    func cancelWarmup()
+    func endSession(_ sessionID: UUID) async
 }
 
 extension RealInferenceClient: DecodeServiceInference {}
+extension DecodeServiceInference {
+    func generate(_ request: AppGenerationRequest, sessionID: UUID,
+                  requestID: UUID) -> AsyncThrowingStream<AppInferenceEvent, Error> {
+        AsyncThrowingStream { $0.finish(throwing: AppInferenceError.modelNotLoaded) }
+    }
+    func cancel(requestID: UUID) { cancel() }
+    func waitUntilRequestIdle(_ requestID: UUID) async {}
+    func cancelAllRequests() { cancel() }
+    func cancelWarmup() {}
+    func endSession(_ sessionID: UUID) async {}
+}
 
 /// The decode service's command loop over one app transport. Commands are
 /// read on their own thread so a cancel reaches the client while a generation
@@ -25,6 +44,13 @@ final class DecodeService: @unchecked Sendable {
     private let input: FileHandle
     private let output: FileHandle
     private let commands = DecodeCommandQueue()
+    private let frameWriter: DecodeServiceFrameWriter
+    private struct ActiveRequest: Sendable {
+        let sessionID: UUID
+        var task: Task<Void, Never>?
+        var drained = false
+    }
+    private let activeRequests = Mutex<[UUID: ActiveRequest]>([:])
     let lifecycle: DecodeTransportLifecycle
     /// Test hook that runs after a generation command is accepted and before
     /// its inference starts.
@@ -39,10 +65,11 @@ final class DecodeService: @unchecked Sendable {
         self.requiresHandshake = requiresHandshake
         self.input = input
         self.output = output
+        self.frameWriter = DecodeServiceFrameWriter(handle: output)
         self.beforeGenerationStarts = beforeGenerationStarts
         lifecycle = DecodeTransportLifecycle(
             commands: commands,
-            cancelInference: { [client] in client.cancel() })
+            cancelInference: { [client] in client.cancelAllRequests() })
     }
 
     /// Runs until an orderly shutdown (nil) or a transport loss (the loss).
@@ -96,6 +123,11 @@ final class DecodeService: @unchecked Sendable {
                         error: "\(error)"))
                 }
             case .generate(let request):
+                guard activeRequests.withLock({ $0.isEmpty }) else {
+                    send(DecodeServiceEvent(kind: .failed, generationID: request.generationID,
+                                            error: "concurrent sessions are active"))
+                    continue
+                }
                 guard let modelDirectory else {
                     send(DecodeServiceEvent(
                         kind: .failed, generationID: request.generationID,
@@ -117,9 +149,39 @@ final class DecodeService: @unchecked Sendable {
                     continue
                 }
                 await generate(request, modelDirectory: modelDirectory)
+            case .generateSession(let sessionID, let request):
+                guard let modelDirectory, let loadedOptions else {
+                    send(DecodeServiceEvent(kind: .failed, generationID: request.generationID,
+                                            error: "model is not loaded"))
+                    continue
+                }
+                var comparable = request.runtimeOptions
+                comparable.prefillEnabled = loadedOptions.prefillEnabled
+                comparable.prefillChunkTokens = loadedOptions.prefillChunkTokens
+                guard comparable == loadedOptions else {
+                    send(DecodeServiceEvent(kind: .failed, generationID: request.generationID,
+                                            error: "generation runtime options do not match the loaded session"))
+                    continue
+                }
+                startConcurrent(request, sessionID: sessionID, modelDirectory: modelDirectory)
+            case .cancelRequest(let requestID):
+                client.cancel(requestID: requestID)
+            case .cancelWarmup:
+                break // Applied by the input thread without waiting for the command loop.
+            case .endSession(let sessionID, let requestID):
+                let active = activeRequests.withLock { requests in
+                    requests.filter { $0.value.sessionID == sessionID }
+                        .map { ($0.key, $0.value.task) }
+                }
+                for (id, _) in active { client.cancel(requestID: id) }
+                for (_, task) in active { await task?.value }
+                await client.endSession(sessionID)
+                send(DecodeServiceEvent(kind: .unloaded, generationID: requestID))
             case .cancel:
                 break
             case .unload(let requestID):
+                client.cancelAllRequests()
+                await client.waitUntilIdle()
                 await client.unload()
                 modelDirectory = nil
                 loadedOptions = nil
@@ -128,7 +190,10 @@ final class DecodeService: @unchecked Sendable {
                 break commandLoop
             }
         }
+        client.cancelAllRequests()
         await client.waitUntilIdle()
+        let remaining = activeRequests.withLock { $0.values.compactMap(\.task) }
+        for task in remaining { await task.value }
         await client.unload()
         return lifecycle.lostTransport
     }
@@ -140,6 +205,8 @@ final class DecodeService: @unchecked Sendable {
                     let command = try DecodeFrameCodec.read(
                         DecodeServiceCommand.self, from: input)
                     if case .cancel = command { client.cancel() }
+                    if case .cancelRequest(let id) = command { client.cancel(requestID: id) }
+                    if case .cancelWarmup = command { client.cancelWarmup() }
                     commands.append(command)
                     if case .shutdown = command { break }
                 }
@@ -158,11 +225,12 @@ final class DecodeService: @unchecked Sendable {
                           modelDirectory: URL) async {
         let outbox = DecodeServiceOutbox(
             generationID: request.generationID,
-            towerBytes: { [client] in client.currentVisionTowerBytes })
+            towerBytes: { [client] in client.currentVisionTowerBytes },
+            onOverflow: { [client] in client.cancel() })
         let writerFinished = DispatchSemaphore(value: 0)
-        let writer = Thread { [output, lifecycle] in
+        let writer = Thread { [output, lifecycle, frameWriter] in
             defer { writerFinished.signal() }
-            do { try outbox.runWriter(to: output) }
+            do { try outbox.runWriter(to: output, frameWriter: frameWriter) }
             catch {
                 FileHandle.standardError.write(Data("IPC writer failed: \(error)\n".utf8))
                 lifecycle.abort(.outputFailed)
@@ -203,6 +271,63 @@ final class DecodeService: @unchecked Sendable {
                 writerFinished.wait()
                 continuation.resume()
             }
+        }
+    }
+
+    private func startConcurrent(_ request: DecodeGenerationRequest, sessionID: UUID,
+                                 modelDirectory: URL) {
+        let reserved = activeRequests.withLock { requests -> Bool in
+            guard requests[request.generationID] == nil,
+                  !requests.values.contains(where: { $0.sessionID == sessionID && !$0.drained }) else { return false }
+            requests[request.generationID] = ActiveRequest(sessionID: sessionID)
+            return true
+        }
+        guard reserved else {
+            send(DecodeServiceEvent(kind: .failed, generationID: request.generationID,
+                                    error: "session or request is already active"))
+            return
+        }
+        do {
+            let generation = try Self.appGenerationRequest(request, modelDirectory: modelDirectory)
+            let stream = client.generate(generation, sessionID: sessionID, requestID: request.generationID)
+            if lifecycle.lostTransport != nil { client.cancel(requestID: request.generationID) }
+            let task = Task { [self] in
+                let outbox = DecodeServiceOutbox(generationID: request.generationID,
+                    towerBytes: { [client] in client.currentVisionTowerBytes },
+                    onOverflow: { [client] in client.cancel(requestID: request.generationID) })
+                let writerDone = DispatchSemaphore(value: 0)
+                let writer = Thread { [self] in
+                    defer { writerDone.signal() }
+                    do { try outbox.runWriter(to: output, frameWriter: frameWriter) }
+                    catch { lifecycle.abort(.outputFailed) }
+                }
+                writer.start()
+                var terminal: AppInferenceEvent?
+                var failure: (any Error)?
+                do {
+                    for try await event in stream {
+                        switch event {
+                        case .finished, .cancelled, .failed: terminal = event
+                        default: outbox.publish(event)
+                        }
+                    }
+                } catch { failure = error }
+                // A stream consumer can observe its terminal before the
+                // producer has released GPU, cache and session state. Do not
+                // acknowledge it until this specific producer is drained.
+                await client.waitUntilRequestIdle(request.generationID)
+                activeRequests.withLock { $0[request.generationID]?.drained = true }
+                if let terminal { outbox.publish(terminal) }
+                outbox.finish(error: failure)
+                await withCheckedContinuation { continuation in
+                    DispatchQueue.global().async { writerDone.wait(); continuation.resume() }
+                }
+                _ = activeRequests.withLock { $0.removeValue(forKey: request.generationID) }
+            }
+            activeRequests.withLock { $0[request.generationID]?.task = task }
+        } catch {
+            _ = activeRequests.withLock { $0.removeValue(forKey: request.generationID) }
+            send(DecodeServiceEvent(kind: .failed, generationID: request.generationID, error: "\(error)"))
         }
     }
 
@@ -298,7 +423,7 @@ final class DecodeService: @unchecked Sendable {
     /// can no longer hear the service, which ends it like a closed input.
     private func send(_ event: DecodeServiceEvent) {
         do {
-            try output.write(contentsOf: DecodeFrameCodec.encode(event))
+            try frameWriter.write(DecodeFrameCodec.encode(event))
         } catch {
             FileHandle.standardError.write(Data("IPC write failed: \(error)\n".utf8))
             lifecycle.abort(.outputFailed)

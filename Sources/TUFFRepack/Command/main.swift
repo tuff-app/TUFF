@@ -370,6 +370,62 @@ private func visionSource(
     return (arch["family"] as? String) == "qwen36" ? .qwen36 : .gemma4
 }
 
+/// Bonsai checkpoints are repacked by the Prism installer, which only installs
+/// the pinned revision; an explicit repo or revision cannot be honoured.
+private func prismSize(_ arguments: Arguments) -> PrismRemoteInstaller.Size? {
+    guard arguments.repoID == nil, arguments.revision == nil,
+          let model = TUFFModelCatalog.model(selector: arguments.model.name) else { return nil }
+    return PrismRemoteInstaller.Size(modelID: model.id)
+}
+
+private func installPrism(_ arguments: Arguments, size: PrismRemoteInstaller.Size, output: String) async -> Int32 {
+    let source = arguments.model
+    guard let model = TUFFModelCatalog.model(selector: source.name) else { return 2 }
+    guard !arguments.resume else {
+        printError("install failed: \(source.displayName) downloads cannot be resumed; discard the partial with --discard-partial and start again")
+        return 1
+    }
+    guard !arguments.overwrite else {
+        printError("install failed: \(source.displayName) does not support --overwrite; choose a new output directory")
+        return 1
+    }
+    let directory = URL(fileURLWithPath: output)
+    var engine: InferenceEngineInstallation?
+    do {
+        if arguments.dryRun {
+            let needed = size.snapshotBytes + size.outputReservationBytes + 8 * 1024 * 1024
+            let space = try DiskSpaceChecker.assess(path: directory.path, bytes: needed,
+                                                     reserveBytes: source.reserveBytes)
+            guard space.canInstall else {
+                throw RepackError.diskSpaceInsufficient(path: space.path, required: space.requiredBytes,
+                                                        available: space.availableBytes)
+            }
+            print("Planned \(source.displayName)")
+            print("Download: \(size.snapshotBytes) bytes; peak disk: \(needed) bytes; available: \(space.availableBytes) bytes")
+            return 0
+        }
+        printError("[install] preparing inference engine")
+        engine = try await InferenceEngineEnvironment.acquire(architectureID: model.architecture.id.rawValue,
+            quantizationLayout: model.architecture.weightLayout.rawValue)
+        let progress = InstallProgressReporter()
+        let result = try await PrismRemoteInstaller.install(size: size, outputDirectory: directory,
+            token: ProcessInfo.processInfo.environment["HF_TOKEN"], reserveBytes: source.reserveBytes,
+            progress: { progress($0) })
+        if let engine {
+            try await InferenceEngineEnvironment.bind(engine, to: result)
+            await engine.release()
+        }
+        print("Installed \(source.displayName)")
+        print("Source revision: \(source.revision)")
+        print("Model: \(result.path)")
+        return 0
+    } catch {
+        await engine?.release()
+        printError("install failed: \(error)")
+        return 1
+    }
+}
+
 private func run(_ values: [String]) async -> Int32 {
     let arguments: Arguments
     do {
@@ -388,7 +444,11 @@ private func run(_ values: [String]) async -> Int32 {
 
     if arguments.discardPartial, let output = arguments.output {
         do {
-            try RemoteStreamingRepacker.discardPartial(outputDirectory: output)
+            if prismSize(arguments) != nil {
+                try PrismRemoteInstaller.discardPartial(outputDirectory: URL(fileURLWithPath: output))
+            } else {
+                try RemoteStreamingRepacker.discardPartial(outputDirectory: output)
+            }
             print("Discarded saved download for \(output)")
             return 0
         } catch {
@@ -412,6 +472,7 @@ private func run(_ values: [String]) async -> Int32 {
 
     guard let output = arguments.output else { return 2 }
     let source = arguments.model
+    if let size = prismSize(arguments) { return await installPrism(arguments, size: size, output: output) }
     var options = source.installOptions(
         outputDirectory: URL(fileURLWithPath: output),
         overwrite: arguments.overwrite,

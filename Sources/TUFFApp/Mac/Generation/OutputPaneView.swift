@@ -37,7 +37,7 @@ struct OutputPaneView: View {
             Divider()
 
             Button("New Chat") { model.clearOutput() }
-                .disabled(model.isRunning || !model.hasOutputTranscript)
+                .disabled(model.isSelectedConversationRunning || !model.hasOutputTranscript)
         }
     }
 

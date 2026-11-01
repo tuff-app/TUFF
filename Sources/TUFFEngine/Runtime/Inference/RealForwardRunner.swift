@@ -1,7 +1,7 @@
 import Foundation
 import Metal
 
-public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRunner, ContextWindowReporting, ContinuableLogitProducer, SpeculativeVerificationRunner, @unchecked Sendable {
+public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRunner, ContextWindowReporting, ContinuableLogitProducer, SpeculativeVerificationRunner, PrefillHeadSkippingRunner, @unchecked Sendable {
     private struct LayerSharedExpertProjections {
         let gate: SharedExpertInt8Proj
         let up: SharedExpertInt8Proj
@@ -20,12 +20,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
 
     // Kernels
     private let embedInt4: EmbedLookupInt4
+    private let flintEmbedding: FlintEmbedding?
+    private let flintResidual: FlintResidual?
+    private let flintRouter: FlintRouter?
+    private let flintFiniteLogits: FlintFiniteLogits?
     private let rms: RMSNorm
     private let int4: DequantInt4GEMV
+    private let flintInt8: DequantInt8GEMV?
     private let attention: Attention
     private let shared: SharedExpertRuntime
     private let moe: MoE?
     private let fusionHead: LMHeadChainInt4
+    private lazy var greedyArgmax: FP16Argmax = try! FP16Argmax(context: ctx)
     private let fusedQKVGEMV: FusedQKVGEMV
     private let fusedQKVEpilogue: FusedQKVEpilogue
     private let fusedPostAttentionSetup: FusedPostAttentionSetup
@@ -34,6 +40,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     // Qwen 3.6 kernels. Nil on architectures that never dispatch them.
     private let elementwise: Elementwise?
     private let gdn: GDN?
+    private let prism: PrismProjection?
+    private let prismGDN: PrismGDN?
+    private let prismToken: MTLBuffer?
     private let gdnState: GDNStateManager?
     private let rope: RoPE?
     private let perLayerEmbeddingKernel: PerLayerEmbedding?
@@ -63,6 +72,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     /// Test-only view of each layer's routed MoE prefill phase. A throw from it
     /// is treated like a failure at that step. Nil in production.
     var routedPhaseObserver: ((PrefillRoutedPhaseStep) throws -> Void)?
+    /// Test-only fault injection after a decode read is registered.
+    var decodeLookaheadObserver: ((DispatchGroup) throws -> Void)?
     private let prefillQKVEpilogue: PrefillQKVEpilogue
     private let prefillAttention: PrefillAttention
     private let prefillPostAttention: PrefillPostAttentionSetup
@@ -129,6 +140,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     var debugAttentionOut: MTLBuffer { oOut }
     var debugSharedExpertOut: MTLBuffer { h1Buf }
     var debugRoutedOut: MTLBuffer { h2Buf }
+    var debugFlintQuery: MTLBuffer { qScratch }
+    var debugFlintAttentionContext: MTLBuffer { attnOut }
+    var debugFlintFFNInput: MTLBuffer { routedX }
+    var debugFlintResidual: MTLBuffer? { flintResidual?.values }
+    func debugKVSlot(layer: Int, position: Int) -> (key: (buffer: MTLBuffer, offset: Int), value: (buffer: MTLBuffer, offset: Int))? {
+        guard let kv else { return nil }
+        return (kv.kSlot(layer: layer, position: position), kv.vSlot(layer: layer, position: position))
+    }
     private var sharedGateBeforeHalf: Bool {
         cfg.variant == .ornith15_397B && model.sharedExpertWeightBits == 4
     }
@@ -140,6 +159,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     /// against a reference, and setting this forces one commit per layer, so
     /// nothing but a diagnostic should install it.
     var debugLayerSink: ((Int) -> Void)?
+    /// Diagnostic observer invoked after router readback, before expert fetch.
+    var debugRouterSink: ((Int, [Int]) -> Void)?
 
     /// Test-only: the chunk path's twin of `debugLayerSink`, called with the
     /// index of the layer just finished and that layer's output for the
@@ -202,6 +223,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     /// has no auxiliary scale tensors.
     private let onesPerExpertScale: MTLBuffer?
     private var prefillChunkState = PrefillChunkCommitState()
+    /// Flint prefill chunk scratch; allocated on first chunked prefill.
+    fileprivate var flintPrefill: FlintBatchedPrefillState?
+    /// Test-only: (layer, first position, rows x topK expert ids) per prefill chunk layer.
+    var debugFlintPrefillRouteSink: ((Int, Int, [UInt32]) -> Void)?
     private var prefillClock = PrefillPhaseClock()
     public var prefillPhaseTimes: PrefillPhaseTimes { prefillClock.times }
     private var prefillScratch: PrefillChunkScratchBuffers?
@@ -295,8 +320,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         // architecture whose "final norm" is a whole hyper-connection mixer —
         // two projections and a gated collapse over four streams — has nothing
         // to fold, so it takes the unfused path.
+        let isPrism = config.variant == .bonsai2_2B || config.variant == .bonsai2_27B
+        // Flint's fused head argmaxes an INT4 LM head from the FP32-normed row;
+        // an 8-bit head (OptiQ) takes the logits path.
+        let flintHeadIsInt4 = model.lmHead.length * 2
+            == UInt64(config.vocabSize) * UInt64(config.hiddenSize)
         self.fusedGreedyHeadAvailable = runtimeConfiguration.headPath == .fusedRows
             && !config.hyperConnection.isEnabled
+            && (config.family != .flint || flintHeadIsInt4)
         self.prefillAttentionPath = runtimeConfiguration.prefillAttentionPath
         let useFP16Ring = runtimeConfiguration.fp16RingEnabled
         self.rdadvisePolicyMode = runtimeConfiguration.rdadvisePolicy
@@ -330,16 +361,23 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         let int4Groups = cfg.int4GroupSize
         self.embedInt4 = try EmbedLookupInt4(context: context,
                                              groupSize: int4Groups)
+        self.flintEmbedding = cfg.family == .flint ? try FlintEmbedding(context: context) : nil
+        self.flintResidual = cfg.family == .flint ? try FlintResidual(context: context, width: cfg.hiddenSize) : nil
+        self.flintRouter = cfg.family == .flint ? try FlintRouter(context: context, maximumExperts: cfg.numExperts) : nil
+        self.flintFiniteLogits = cfg.family == .flint ? try FlintFiniteLogits(context: context) : nil
         self.rms       = try RMSNorm(context: context)
         self.int4      = try DequantInt4GEMV(
             context: context,
             additionalShapes: cfg.decodeInt4GEMVShapes,
             groupSize: int4Groups)
+        self.flintInt8 = cfg.family == .flint && model.sharedExpertWeightBits == 8
+            ? try DequantInt8GEMV(context: context, wide: true) : nil
         self.attention = try Attention(context: context)
         self.shared    = try SharedExpertRuntime(context: context,
-                                                  weightBits: model.sharedExpertWeightBits,
+                                                  weightBits: isPrism ? 4 : model.sharedExpertWeightBits,
                                                   siluActivation: silu,
-                                                  groupSize: int4Groups)
+                                                  groupSize: int4Groups,
+                                                  wideInt8: cfg.family == .flint)
         self.moe       = cfg.feedForwardKind == .mixtureOfExperts
             ? try MoE(context: context,
                       siluActivation: silu,
@@ -347,7 +385,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                       specializedF: UInt32(cfg.moeIntermediateSize),
                       specializedNumExperts: UInt32(cfg.numExperts),
                       topKExperts: cfg.topKExperts,
-                      groupSize: int4Groups)
+                      groupSize: int4Groups,
+                      wideIntermediate: cfg.family == .flint,
+                      floatIntermediate: cfg.family == .flint)
             : nil
         self.fusionHead = try LMHeadChainInt4(context: context,
                                               maxD: cfg.hiddenSize,
@@ -386,7 +426,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         self.prefillRouter = try PrefillRouter(context: context)
         self.prefillSharedExpert = try PrefillSharedExpert(
             context: context,
-            weightBits: model.sharedExpertWeightBits,
+            weightBits: isPrism ? 4 : model.sharedExpertWeightBits,
             siluActivation: silu,
             groupSize: int4Groups,
             smallBlock: smallBlockProjection)
@@ -424,6 +464,23 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             || cfg.feedForwardKind == .dense
             || cfg.hasPerLayerInputs
         self.elementwise = needsElementwise ? try Elementwise(context: context) : nil
+        if isPrism {
+            let block = config.variant == .bonsai2_2B ? 512 : 1024
+            self.prism = try PrismProjection(context: context, block: block,
+                                             maximumWidth: max(config.hiddenSize, config.intermediateSize,
+                                                               config.numHeads * config.fullHeadDim,
+                                                               config.linearAttention.valueDim))
+            self.prismGDN = try PrismGDN(context: context, config: config.linearAttention)
+            guard let token = context.device.makeBuffer(length: MemoryLayout<Int32>.stride,
+                                                        options: .storageModeShared) else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            self.prismToken = token
+        } else {
+            self.prism = nil
+            self.prismGDN = nil
+            self.prismToken = nil
+        }
         if cfg.hasLinearAttentionLayers {
             self.gdn = try GDN(context: context, config: cfg.linearAttention,
                                specializedHiddenSize: cfg.hiddenSize,
@@ -532,7 +589,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         memset(self.zeroResidual.contents(), 0, self.zeroResidual.length)
         self.outIndices    = try buf(cfg.topKExperts, MemoryLayout<UInt32>.size)
         self.outWeights    = try buf(cfg.topKExperts)
-        self.moeActs       = try buf(cfg.topKExperts * cfg.moeIntermediateSize)
+        self.moeActs       = try buf(cfg.topKExperts * cfg.moeIntermediateSize,
+                                      cfg.family == .flint ? MemoryLayout<Float>.size : MemoryLayout<Float16>.size)
         self.moeHitActiveSlots = try buf(cfg.topKExperts, MemoryLayout<UInt32>.size)
         self.moeMissActiveSlots = try buf(cfg.topKExperts, MemoryLayout<UInt32>.size)
         guard let tok = device.makeBuffer(length: MemoryLayout<UInt32>.size,
@@ -556,8 +614,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             self.gdnQKVRaw = try buf(la.qkvDim)
             self.gdnConvOut = try buf(la.qkvDim)
             self.gdnZ = try buf(la.valueDim)
-            self.gdnA = try buf(la.numVHeads)
-            self.gdnB = try buf(la.numVHeads)
+            self.gdnA = try buf(la.numVHeads, isPrism ? MemoryLayout<Float>.stride : MemoryLayout<Float16>.stride)
+            self.gdnB = try buf(la.numVHeads, isPrism ? MemoryLayout<Float>.stride : MemoryLayout<Float16>.stride)
             self.gdnY = try buf(la.valueDim)
             self.gdnOut = try buf(la.valueDim)
         } else {
@@ -836,7 +894,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     /// so this POC advertises verification only for the fused-head affine
     /// path without linear-attention layers.
     public var supportsSpeculativeVerification: Bool {
-        useFusedGreedyHead && gdnState == nil
+        useFusedGreedyHead && gdnState == nil && cfg.family != .flint
     }
     public private(set) var totalRDAdviseNanos: UInt64 = 0
     public private(set) var totalRDAdviseCalls: UInt64 = 0
@@ -1017,6 +1075,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     /// the chunk, layer and phase that was running.
     private func makePrefillCommandBuffer(_ label: String) -> MTLCommandBuffer? {
         let commandBuffer = ctx.queue.makeCommandBuffer()
+        if prism != nil, let commandBuffer { SharedComputeEncoding.share(commandBuffer) }
         commandBuffer?.label = label
         if collectingSpeculativeMetrics, commandBuffer != nil {
             speculativeTargetCommandBuffers &+= 1
@@ -1085,11 +1144,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                outputMode: .greedyIfAvailable)
     }
 
-    /// Chunked prefill has no hyper-connection graph, and its quantized
-    /// kernels are not yet built at the architecture's INT4 group size. Until
-    /// they are, a Qwen4-Exp prompt goes through the decode path — slower, but
-    /// through the kernels that were actually validated for it.
+    /// Flint retains its separate decode path and FP32 residual representation.
     var supportsChunkedPrefill: Bool { true }
+
+    var supportsHeadSkippingPrefill: Bool { prism != nil }
+
+    func consumePrefillToken(_ token: Int32, position: Int, scratchLogits: MTLBuffer) async throws {
+        try prefillChunkState.requireClean(operation: "consumePrefillToken")
+        try await produceToken(token: token, position: position, into: scratchLogits,
+                               emitHead: false, outputMode: .logits)
+    }
 
     public func prefillChunked(tokens: ArraySlice<Int32>,
                                startPosition: Int,
@@ -1117,6 +1181,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         }
         guard !tokens.isEmpty else {
             return PrefillResult(newPosition: startPosition, seed: .logitsWritten)
+        }
+        if cfg.family == .flint {
+            return try await prefillFlintBatched(tokens: tokens, startPosition: startPosition,
+                                                 outputMode: outputMode, config: config,
+                                                 into: logits, onProgress: onProgress)
         }
         let config = config.replacingChunkTokens(
             min(config.chunkTokens, prefillTextChunkCapacity))
@@ -1151,6 +1220,21 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                   outputMode: PrefillOutputMode,
                                   config: PrefillRuntimeConfig,
                                   into logits: MTLBuffer,
+                                  onProgress: (Int) -> Void) async throws -> PrefillResult {
+        try await prefillMultimodal(
+            input: input, startPosition: startPosition, outputMode: outputMode,
+            config: config, into: logits, chunkGate: nil, onProgress: onProgress)
+    }
+
+    /// `chunkGate` runs one planned forward chunk (a text span or one image
+    /// span) so a caller sharing the model can hold its fairness lease for
+    /// exactly that chunk.
+    public func prefillMultimodal(input: MultimodalPrefillInput,
+                                  startPosition: Int,
+                                  outputMode: PrefillOutputMode,
+                                  config: PrefillRuntimeConfig,
+                                  into logits: MTLBuffer,
+                                  chunkGate: PrefillChunkGate?,
                                   onProgress: (Int) -> Void) async throws -> PrefillResult {
         try prefillChunkState.requireClean(operation: "prefillMultimodal")
         // The same property `coercedForImagePrompt()` repairs, so the guard and
@@ -1236,19 +1320,24 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 isImage ? item.range.count : textChunkTokens)
             let lower = tokens.index(tokens.startIndex, offsetBy: item.range.lowerBound)
             let upper = tokens.index(tokens.startIndex, offsetBy: item.range.upperBound)
-            try await executePrefillChunk(
-                tokens: tokens[lower..<upper],
-                startPosition: startPosition + item.range.lowerBound,
-                outputMode: outputMode,
-                logits: logits,
-                scratch: scratch,
-                config: chunkConfig,
-                writeFinalHead: index == work.count - 1,
-                embeddingOverride: imageFeatures,
-                bidirectionalBlock: isImage && input.usesBidirectionalImageAttention
-                    ? (startPosition + item.range.lowerBound)..<(startPosition + item.range.upperBound)
-                    : nil,
-                positionIDs: try resolvedPositions?.slice(item.range))
+            let chunkStart = startPosition + item.range.lowerBound
+            let chunkPositions = try resolvedPositions?.slice(item.range)
+            let run: () async throws -> Void = {
+                try await self.executePrefillChunk(
+                    tokens: tokens[lower..<upper],
+                    startPosition: chunkStart,
+                    outputMode: outputMode,
+                    logits: logits,
+                    scratch: scratch,
+                    config: chunkConfig,
+                    writeFinalHead: index == work.count - 1,
+                    embeddingOverride: imageFeatures,
+                    bidirectionalBlock: isImage && input.usesBidirectionalImageAttention
+                        ? chunkStart..<(startPosition + item.range.upperBound)
+                        : nil,
+                    positionIDs: chunkPositions)
+            }
+            if let chunkGate { try await chunkGate(run) } else { try await run() }
             completed += item.range.count
             onProgress(completed)
         }
@@ -1687,6 +1776,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 }
             }
             blit.endEncoding()
+        } else if let prism {
+            try prism.encodeEmbedding(commandBuffer: cb, model: model, weight: emb,
+                                      tokens: tokenBuffer, output: scratch.hidden,
+                                      width: D, vocabulary: cfg.vocabSize, count: t)
         } else {
             prefillEmbed.encode(commandBuffer: cb,
                                 table: emb.buffer,
@@ -1847,6 +1940,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 // The two hyper-connection modules carry the only norms in the
                 // layer; there is no `input_layernorm` to encode.
                 try encodePrefillHyperConnectionRead(cb, slot: .attention, layer: L)
+            } else if let prism {
+                prism.encodeNorm(commandBuffer: cb, weight: views.inputNorm!,
+                                 input: scratch.hidden, output: scratch.normed,
+                                 width: D, rows: t, eps: eps)
             } else {
                 prefillRMS.encodeBF16W(commandBuffer: cb,
                                        x: scratch.hidden,
@@ -1866,6 +1963,41 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                     preconditionFailure("linear-attention layer without GDN kernels")
                 }
                 let la = cfg.linearAttention
+                if let prism, let prismGDN {
+                    try prism.encode(commandBuffer: cb, model: model, weight: views.linQKV!,
+                                     input: blockInput, output: scratch.q, columns: D,
+                                     outputs: la.qkvDim, rows: t, inputStride: D, outputStride: la.qkvDim)
+                    try prism.encode(commandBuffer: cb, model: model, weight: views.linZ!,
+                                     input: blockInput, output: scratch.gdnZ, columns: D,
+                                     outputs: la.valueDim, rows: t, inputStride: D, outputStride: la.valueDim)
+                    for row in 0..<t {
+                        let qOffset = row * la.qkvDim * MemoryLayout<Float16>.stride
+                        let valueOffset = row * la.valueDim * MemoryLayout<Float16>.stride
+                        let scalarOffset = row * la.numVHeads * MemoryLayout<Float>.stride
+                        prism.encodeFloat(commandBuffer: cb, weight: views.linA!, input: blockInput,
+                                          output: scratch.gdnA, columns: D, outputs: la.numVHeads,
+                                          inputOffset: row * D * 2, outputOffset: scalarOffset)
+                        prism.encodeFloat(commandBuffer: cb, weight: views.linB!, input: blockInput,
+                                          output: scratch.gdnB, columns: D, outputs: la.numVHeads,
+                                          inputOffset: row * D * 2, outputOffset: scalarOffset)
+                        prismGDN.encodeConv(commandBuffer: cb, tail: gdnState.convTailBuffer(layer: L),
+                                            qkv: scratch.q, weight: views.linConv!, output: scratch.gdnConvOut,
+                                            qkvOffset: qOffset, outputOffset: qOffset)
+                        gdn.encodeQKNorm(commandBuffer: cb, convOut: scratch.gdnConvOut, convOutOffset: qOffset)
+                        prismGDN.encodeDelta(commandBuffer: cb, convOut: scratch.gdnConvOut,
+                                             a: scratch.gdnA, b: scratch.gdnB, aLog: views.linALog!,
+                                             dtBias: views.linDtBias!, state: gdnState.stateBuffer(layer: L),
+                                             output: scratch.gdnY, convOutOffset: qOffset,
+                                             aOffset: scalarOffset, bOffset: scalarOffset, outputOffset: valueOffset)
+                        prismGDN.encodeGatedNorm(commandBuffer: cb, y: scratch.gdnY, z: scratch.gdnZ,
+                                                 weight: views.linNorm!, output: scratch.attentionOutput,
+                                                 yOffset: valueOffset, zOffset: valueOffset, outputOffset: valueOffset)
+                    }
+                    try prism.encode(commandBuffer: cb, model: model, weight: views.linOut!,
+                                     input: scratch.attentionOutput, output: scratch.h1,
+                                     columns: la.valueDim, outputs: D, rows: t,
+                                     inputStride: la.valueDim, outputStride: D)
+                } else {
                 encodeInt4Projection(commandBuffer: cb,
                                      family: .q,
                                      weights: views.linQKV!,
@@ -1953,8 +2085,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                      tokenCount: t,
                                      xStrideElements: la.valueDim,
                                      yStrideElements: D)
+                }
             } else {
                 let qProjRows = cfg.attnOutputGate ? 2 * qDim : qDim
+                if let prism {
+                    for (weight, output, width) in [(views.q!, scratch.q, qProjRows),
+                                                    (views.k!, scratch.kStage, kvDim),
+                                                    (views.v!, scratch.vStage, kvDim)] {
+                        try prism.encode(commandBuffer: cb, model: model, weight: weight,
+                                         input: blockInput, output: output, columns: D,
+                                         outputs: width, rows: t, inputStride: D, outputStride: width)
+                    }
+                } else {
                 encodeInt4Projection(commandBuffer: cb,
                                      family: .q,
                                      weights: views.q!,
@@ -1987,6 +2129,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                          xStrideElements: D,
                                          yStrideElements: kvDim)
                 }
+                }
 
                 // The attention input Q: the packed q_proj output is split
                 // into per-head query/gate halves for gated architectures.
@@ -2004,7 +2147,24 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                     attnQ = scratch.q
                 }
 
-                if cfg.layerSharesKV(L) {
+                if let prism {
+                    prism.encodeNorm(commandBuffer: cb, weight: views.qNorm!, input: attnQ,
+                                     output: attnQ, width: headDim, rows: t * cfg.numHeads, eps: eps)
+                    prism.encodeNorm(commandBuffer: cb, weight: views.kNorm!, input: scratch.kStage,
+                                     output: scratch.kStage, width: headDim, rows: t * numKVHeads, eps: eps)
+                    for row in 0..<t {
+                        let position = UInt32(startPosition + row)
+                        let rotaryDim = UInt32(Double(headDim) * cfg.partialRotaryFactor)
+                        rope!.encodeNeoxSubdim(commandBuffer: cb, data: attnQ,
+                                               dataOffset: row * qDim * 2, position: position,
+                                               headDim: UInt32(headDim), numHeads: UInt32(cfg.numHeads),
+                                               rotaryDim: rotaryDim, theta: Float(cfg.fullRopeTheta))
+                        rope!.encodeNeoxSubdim(commandBuffer: cb, data: scratch.kStage,
+                                               dataOffset: row * kvDim * 2, position: position,
+                                               headDim: UInt32(headDim), numHeads: UInt32(numKVHeads),
+                                               rotaryDim: rotaryDim, theta: Float(cfg.fullRopeTheta))
+                    }
+                } else if cfg.layerSharesKV(L) {
                     let rotatedPairs = isFull
                         ? UInt32(Double(cfg.fullHeadDim) * cfg.partialRotaryFactor / 2.0)
                         : UInt32(headDim / 2)
@@ -2190,6 +2350,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                                       gate: scratch.attnGate,
                                                       count: t * qDim)
                 }
+                if let prism {
+                    try prism.encode(commandBuffer: cb, model: model, weight: views.o!,
+                                     input: scratch.attentionOutput, output: scratch.h1,
+                                     columns: qDim, outputs: D, rows: t, inputStride: qDim, outputStride: D)
+                } else {
                 encodeInt4Projection(commandBuffer: cb,
                                          family: .o,
                                          weights: views.o!,
@@ -2200,6 +2365,32 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                          tokenCount: t,
                                          xStrideElements: qDim,
                                          yStrideElements: D)
+                }
+            }
+            if let prism {
+                elementwise!.encodeResidualAdd(commandBuffer: cb, hidden: scratch.hidden,
+                                               delta: scratch.h1, count: t * D)
+                prism.encodeNorm(commandBuffer: cb, weight: views.postAttention!, input: scratch.hidden,
+                                 output: scratch.denseX, width: D, rows: t, eps: eps)
+                let gate = try model.sharedExpertGate(layer: L)
+                let up = try model.sharedExpertUp(layer: L)
+                let down = try model.sharedExpertDown(layer: L)
+                let intermediate = Int(gate.shape.0)
+                try prism.encode(commandBuffer: cb, model: model, weight: gate, input: scratch.denseX,
+                                 output: scratch.sharedGateScratch, columns: D, outputs: intermediate,
+                                 rows: t, inputStride: D, outputStride: intermediate)
+                try prism.encode(commandBuffer: cb, model: model, weight: up, input: scratch.denseX,
+                                 output: scratch.sharedUpScratch, columns: D, outputs: intermediate,
+                                 rows: t, inputStride: D, outputStride: intermediate)
+                prism.encodeSiluMul(commandBuffer: cb, gate: scratch.sharedGateScratch, up: scratch.sharedUpScratch,
+                                    output: scratch.sharedActScratch, count: t * intermediate)
+                try prism.encode(commandBuffer: cb, model: model, weight: down, input: scratch.sharedActScratch,
+                                 output: scratch.h1, columns: intermediate, outputs: D,
+                                 rows: t, inputStride: intermediate, outputStride: D)
+                elementwise!.encodeResidualAdd(commandBuffer: cb, hidden: scratch.hidden,
+                                               delta: scratch.h1, count: t * D)
+                try finishStagedDenseChunkLayer(L)
+                continue
             }
             if cfg.feedForwardKind == .dense && cfg.family == .qwen36 {
                 elementwise!.encodeResidualAdd(commandBuffer: cb, hidden: scratch.hidden,
@@ -2893,7 +3084,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 return
             }
             let finalNorm = model.finalNorm
-            if let speculativeTargetTokens {
+            if let prism {
+                prism.encodeNorm(commandBuffer: finalCB, weight: finalNorm, input: scratch.hidden,
+                                 output: scratch.normed, width: D, rows: 1, eps: eps,
+                                 inputOffset: (t - 1) * D * 2)
+                try prism.encode(commandBuffer: finalCB, model: model, weight: lm,
+                                 input: scratch.normed, output: logits, columns: D,
+                                 outputs: cfg.vocabSize, rows: 1, inputStride: D, outputStride: cfg.vocabSize)
+                if outputMode == .greedyIfAvailable, useFusedGreedyHead {
+                    greedyArgmax.encode(commandBuffer: finalCB, values: logits,
+                                        count: cfg.vocabSize, output: greedyTokenBuf)
+                }
+            } else if let speculativeTargetTokens {
                 fusionHead.encodeGreedyDecodeRows(
                     commandBuffer: finalCB,
                     hidden: scratch.hidden,
@@ -2973,9 +3175,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             throw PrefillError.prefillCursorMismatch(
                 "produce position \(position) exceeds maxContext \(maxContext)")
         }
+        if let profiler = GPUOpProfiler.shared {
+            profiler.install(device: ctx.device, queue: ctx.queue)
+            profiler.beginStep()
+        }
         try kv?.ensureCapacity(through: position + 1, on: ctx.queue)
-        // A token that threw midway can leave the next layer's read in flight.
-        _ = lookahead.drain()
+        // Settle every read before returning or throwing to the lease owner.
+        // A layer's own defer dispatches any registered read before this runs.
+        defer { _ = lookahead.drain() }
         let D    = UInt32(cfg.hiddenSize)
         let FmoE = UInt32(cfg.moeIntermediateSize)
         let eps: Float = 1e-6
@@ -3020,20 +3227,55 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             for i in 0..<slots.count { ptr[i] = slots[i] }
         }
 
+        func flintProjectionBits(_ view: TensorView, rows: UInt32, columns: UInt32) -> Int {
+            let elements = UInt64(rows) * UInt64(columns)
+            if view.length == elements { return 8 }
+            precondition(view.length * 2 == elements, "invalid Flint affine projection length")
+            return 4
+        }
+
+        func encodeFlintProjection(_ cb: MTLCommandBuffer, view: TensorView,
+                                   x: MTLBuffer, y: MTLBuffer, yOffset: Int = 0,
+                                   rows: UInt32, columns: UInt32) {
+            if flintProjectionBits(view, rows: rows, columns: columns) == 8 {
+                flintInt8!.encode(commandBuffer: cb,
+                    weights: view.buffer, weightsOffset: Int(view.offset),
+                    scales: view.buffer, scalesOffset: Int(view.scaleOffset),
+                    biases: view.buffer, biasesOffset: Int(view.biasOffset),
+                    x: x, y: y, yOffset: yOffset, m: rows, n: columns)
+            } else {
+                int4.encode(commandBuffer: cb,
+                    weights: view.buffer, weightsOffset: Int(view.offset),
+                    scales: view.buffer, scalesOffset: Int(view.scaleOffset),
+                    biases: view.buffer, biasesOffset: Int(view.biasOffset),
+                    x: x, y: y, yOffset: yOffset, m: rows, n: columns)
+            }
+        }
+
         // Embed lookup + sqrt(H) fused. Keep these encodes on the first
         // layer's command buffer: nothing on the CPU consumes `hidden` or the
         // optional PLE scratch before that layer, so the old standalone
         // command-buffer commit and synchronous wait were pure token overhead.
         let emb = model.embedding
         var firstLayerCommandBuffer: MTLCommandBuffer? = ctx.queue.makeCommandBuffer()!
-        embedInt4.encode(commandBuffer: firstLayerCommandBuffer!,
-                         table:  emb.buffer, tableOffset:  Int(emb.offset),
-                         scales: emb.buffer, scalesOffset: Int(emb.scaleOffset),
-                         biases: emb.buffer, biasesOffset: Int(emb.biasOffset),
-                         out: hidden,
-                         tokenId: UInt32(bitPattern: token),
-                         d: D,
-                         outScale: embedOutScale)
+        if prism != nil { SharedComputeEncoding.share(firstLayerCommandBuffer!) }
+        if let prism, let prismToken {
+            prismToken.contents().storeBytes(of: token, as: Int32.self)
+            try prism.encodeEmbedding(commandBuffer: firstLayerCommandBuffer!, model: model,
+                                      weight: emb, tokens: prismToken, output: hidden,
+                                      width: cfg.hiddenSize, vocabulary: cfg.vocabSize, count: 1)
+        } else if let flintEmbedding {
+            flintEmbedding.encode(commandBuffer: firstLayerCommandBuffer!, table: emb,
+                                  output: hidden, residual: flintResidual!.values,
+                                  token: UInt32(bitPattern: token), width: D)
+        } else {
+            embedInt4.encode(commandBuffer: firstLayerCommandBuffer!,
+                             table: emb.buffer, tableOffset: Int(emb.offset),
+                             scales: emb.buffer, scalesOffset: Int(emb.scaleOffset),
+                             biases: emb.buffer, biasesOffset: Int(emb.biasOffset),
+                             out: hidden, tokenId: UInt32(bitPattern: token), d: D,
+                             outScale: embedOutScale)
+        }
         if cfg.hyperConnection.isEnabled {
             // The reference tiles the embedding across the streams, so each
             // starts from the same token vector and they diverge only through
@@ -3084,6 +3326,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             }
         }
 
+        // Flint: a branch output (shared/routed FFN) is added to the FP32
+        // residual inside the next norm instead of by its own dispatch. Tests
+        // that read the residual at layer boundaries get the eager add.
+        let flintDefersResidualAdd = flintResidual != nil && debugLayerSink == nil
+        var flintPendingDelta: MTLBuffer?
+
         for L in 0..<cfg.numLayers {
             if model.stagesDenseLayers {
                 try drainForDebug()
@@ -3130,11 +3378,26 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 try encodeHyperConnectionRead(cb, slot: .attention, layer: L)
 
             } else if let inNorm {
+                if let prism {
+                    prism.encodeNorm(commandBuffer: cb, weight: inNorm, input: hidden,
+                                     output: normed, width: cfg.hiddenSize, rows: 1, eps: eps)
+                } else if let flintResidual {
+                    if let delta = flintPendingDelta {
+                        flintResidual.addNorm(cb, delta: delta, mirror: hidden,
+                                              weight: inNorm.buffer, weightOffset: Int(inNorm.offset),
+                                              output: normed, count: cfg.hiddenSize, eps: eps)
+                        flintPendingDelta = nil
+                    } else {
+                        flintResidual.norm(cb, weight: inNorm.buffer, weightOffset: Int(inNorm.offset),
+                                           output: normed, count: cfg.hiddenSize, eps: eps)
+                    }
+                } else {
                 rms.encodeBF16W(commandBuffer: cb,
                                 x: hidden,
                                 weight: inNorm.buffer, weightOffset: Int(inNorm.offset),
                                 out: normed,
                                 d: D, eps: eps)
+                }
             }
 
             if isLinear {
@@ -3231,6 +3494,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 let qNorm = try model.qNorm(layer: L)
                 let kNorm = try model.kNorm(layer: L)
 
+                if cfg.family == .flint &&
+                    (flintProjectionBits(q, rows: qDim, columns: D) == 8 ||
+                     flintProjectionBits(k, rows: kvDim, columns: D) == 8 ||
+                     flintProjectionBits(vProj, rows: kvDim, columns: D) == 8) {
+                    encodeFlintProjection(cb, view: q, x: blockInput, y: qScratch, rows: qDim, columns: D)
+                    encodeFlintProjection(cb, view: k, x: blockInput, y: kSlot.buffer,
+                                          yOffset: kSlot.offset, rows: kvDim, columns: D)
+                    encodeFlintProjection(cb, view: vProj, x: blockInput, y: vSlot.buffer,
+                                          yOffset: vSlot.offset, rows: kvDim, columns: D)
+                } else {
                 fusedQKVGEMV.encode(commandBuffer: cb,
                                     qWeights: q.buffer, qWeightsOffset: Int(q.offset),
                                     qScales: q.buffer, qScalesOffset: Int(q.scaleOffset),
@@ -3248,11 +3521,27 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                     qRows: qDim,
                                     kvRows: kvDim,
                                     n: D)
+                }
 
                 let rotated = isFull
                     ? UInt32(Double(cfg.fullHeadDim) * cfg.partialRotaryFactor / 2.0)
                     : UInt32(headDimL / 2)
-                if cfg.usesProjectionWideQKNorm {
+                if cfg.family == .flint {
+                    guard let rope else { preconditionFailure("Flint requires RoPE kernels") }
+                    rms.encodeBF16WPerHead(commandBuffer: cb, x: qScratch,
+                        weight: qNorm.buffer, weightOffset: Int(qNorm.offset), out: qScratch,
+                        headDim: UInt32(headDimL), numHeads: cfg.numHeads, eps: eps)
+                    rms.encodeBF16WPerHead(commandBuffer: cb, x: kSlot.buffer, xOffset: kSlot.offset,
+                        weight: kNorm.buffer, weightOffset: Int(kNorm.offset), out: kSlot.buffer,
+                        outOffset: kSlot.offset, headDim: UInt32(headDimL), numHeads: numKVL, eps: eps)
+                    if !isFull {
+                        rope.encodeDefaultNeox(commandBuffer: cb, data: qScratch, position: UInt32(position),
+                            headDim: UInt32(headDimL), numHeads: UInt32(cfg.numHeads), theta: Float(cfg.ropeTheta))
+                        rope.encodeDefaultNeox(commandBuffer: cb, data: kSlot.buffer, dataOffset: kSlot.offset,
+                            position: UInt32(position), headDim: UInt32(headDimL),
+                            numHeads: UInt32(numKVL), theta: Float(cfg.ropeTheta))
+                    }
+                } else if cfg.usesProjectionWideQKNorm {
                     guard let rope else {
                         preconditionFailure("MiniMax attention requires RoPE kernels")
                     }
@@ -3304,6 +3593,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 guard kv != nil else {
                     preconditionFailure("FP16 attention requires an FP16 KV cache")
                 }
+                let sinkView = cfg.family == .flint ? try model.attentionSinks(layer: L) : nil
                 if isFull {
                     attention.encodeFull(commandBuffer: cb,
                                          q: qScratch,
@@ -3314,7 +3604,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                          numQHeads: UInt32(cfg.numHeads),
                                          numKVHeads: UInt32(numKVL),
                                          seqLen: seqLen,
-                                         scale: Float(cfg.attentionScale))
+                                         scale: Float(cfg.attentionScale),
+                                         sinks: sinkView?.buffer, sinksOffset: Int(sinkView?.offset ?? 0))
                 } else {
                     let ringCapacity = kv?.ringCapacity(layer: L) ?? 0
                     let activeRingCapacity = ringCapacity > 0 && Int(seqLen) > ringCapacity
@@ -3331,29 +3622,78 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                         seqLen: seqLen,
                                         window: UInt32(cfg.slidingWindow),
                                         scale: Float(cfg.attentionScale),
+                                        sinks: sinkView?.buffer, sinksOffset: Int(sinkView?.offset ?? 0),
                                         ringCapacity: activeRingCapacity)
                 }
-                int4.encode(commandBuffer: cb,
-                            weights: o.buffer, weightsOffset: Int(o.offset),
-                            scales:  o.buffer, scalesOffset:  Int(o.scaleOffset),
-                            biases:  o.buffer, biasesOffset:  Int(o.biasOffset),
-                            x: attnOut, y: oOut, m: D, n: qDim)
+                if cfg.family == .flint {
+                    encodeFlintProjection(cb, view: o, x: attnOut, y: oOut, rows: D, columns: qDim)
+                } else {
+                    int4.encode(commandBuffer: cb,
+                                weights: o.buffer, weightsOffset: Int(o.offset),
+                                scales: o.buffer, scalesOffset: Int(o.scaleOffset),
+                                biases: o.buffer, biasesOffset: Int(o.biasOffset),
+                                x: attnOut, y: oOut, m: D, n: qDim)
+                }
             }
 
-            if cfg.feedForwardKind == .dense {
-                if cfg.family == .qwen36 {
-                    elementwise!.encodeResidualAdd(commandBuffer: cb, hidden: hidden,
-                                                   delta: oOut, count: cfg.hiddenSize)
-                    rms.encodeBF16W(commandBuffer: cb, x: hidden,
-                        weight: postAttn!.buffer, weightOffset: Int(postAttn!.offset),
-                        out: denseX, d: D, eps: eps)
+            if cfg.feedForwardKind == .dense || (cfg.family == .flint && L < 2) {
+                if cfg.family == .qwen36 || cfg.family == .flint {
+                    // Flint folds this add into the post-attention norm below.
+                    if flintResidual == nil {
+                        elementwise!.encodeResidualAdd(commandBuffer: cb, hidden: hidden,
+                                                       delta: oOut, count: cfg.hiddenSize)
+                    }
+                    if let prism {
+                        prism.encodeNorm(commandBuffer: cb, weight: postAttn!, input: hidden,
+                                         output: denseX, width: cfg.hiddenSize, rows: 1, eps: eps)
+                        let gate = try model.sharedExpertGate(layer: L)
+                        let up = try model.sharedExpertUp(layer: L)
+                        let down = try model.sharedExpertDown(layer: L)
+                        let intermediate = Int(gate.shape.0)
+                        if prism.supportsDual(columns: cfg.hiddenSize, outputsA: intermediate) {
+                            try prism.encodeDual(commandBuffer: cb, model: model, weightA: gate, weightB: up,
+                                                 input: denseX, outputA: denseScratchGate, outputB: denseScratchUp,
+                                                 columns: cfg.hiddenSize, outputsA: intermediate,
+                                                 outputsB: Int(up.shape.0))
+                        } else {
+                            try prism.encode(commandBuffer: cb, model: model, weight: gate,
+                                input: denseX, output: denseScratchGate, columns: cfg.hiddenSize,
+                                outputs: intermediate, rows: 1, inputStride: cfg.hiddenSize, outputStride: intermediate)
+                            try prism.encode(commandBuffer: cb, model: model, weight: up,
+                                input: denseX, output: denseScratchUp, columns: cfg.hiddenSize,
+                                outputs: intermediate, rows: 1, inputStride: cfg.hiddenSize, outputStride: intermediate)
+                        }
+                        prism.encodeSiluMul(commandBuffer: cb, gate: denseScratchGate,
+                                            up: denseScratchUp, output: denseScratchAct, count: intermediate)
+                        try prism.encode(commandBuffer: cb, model: model, weight: down,
+                            input: denseScratchAct, output: h1Buf, columns: intermediate,
+                            outputs: cfg.hiddenSize, rows: 1, inputStride: intermediate, outputStride: cfg.hiddenSize)
+                    } else {
+                    if let flintResidual {
+                        flintResidual.addNorm(cb, delta: oOut, mirror: hidden,
+                                              weight: postAttn!.buffer, weightOffset: Int(postAttn!.offset),
+                                              output: denseX, count: cfg.hiddenSize, eps: eps)
+                    } else {
+                        rms.encodeBF16W(commandBuffer: cb, x: hidden,
+                            weight: postAttn!.buffer, weightOffset: Int(postAttn!.offset),
+                            out: denseX, d: D, eps: eps)
+                    }
                     let projections = sharedProj!
                     try shared.encode(commandBuffer: cb, x: denseX,
                         gate: projections.gate, up: projections.up, down: projections.down,
                         y: h1Buf, scratchGate: denseScratchGate, scratchUp: denseScratchUp,
                         scratchAct: denseScratchAct)
-                    elementwise!.encodeResidualAdd(commandBuffer: cb, hidden: hidden,
-                                                   delta: h1Buf, count: cfg.hiddenSize)
+                    }
+                    if let flintResidual {
+                        if flintDefersResidualAdd {
+                            flintPendingDelta = h1Buf
+                        } else {
+                            flintResidual.add(cb, delta: h1Buf, mirror: hidden, count: cfg.hiddenSize)
+                        }
+                    } else {
+                        elementwise!.encodeResidualAdd(commandBuffer: cb, hidden: hidden,
+                                                       delta: h1Buf, count: cfg.hiddenSize)
+                    }
                 } else {
                     try encodeDenseGemmaLayerDecode(
                         cb, layer: L, postAttention: postAttn!,
@@ -3400,16 +3740,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 // Plain pre-norm residual block: hidden += attention branch,
                 // then one post-attention norm feeds router, shared expert,
                 // and routed phase 1 (routedX doubles as moeX).
-                elementwise!.encodeResidualAdd(commandBuffer: cb,
-                                               hidden: hidden,
-                                               delta: oOut,
-                                               count: cfg.hiddenSize)
-                rms.encodeBF16W(commandBuffer: cb,
-                                x: hidden,
-                                weight: postAttn!.buffer,
-                                weightOffset: Int(postAttn!.offset),
-                                out: routedX,
-                                d: D, eps: eps)
+                if let flintResidual {
+                    flintResidual.addNorm(cb, delta: oOut, mirror: hidden,
+                                          weight: postAttn!.buffer, weightOffset: Int(postAttn!.offset),
+                                          output: routedX, count: cfg.hiddenSize, eps: eps)
+                } else {
+                    elementwise!.encodeResidualAdd(commandBuffer: cb, hidden: hidden,
+                                                   delta: oOut, count: cfg.hiddenSize)
+                    rms.encodeBF16W(commandBuffer: cb, x: hidden, weight: postAttn!.buffer,
+                                    weightOffset: Int(postAttn!.offset), out: routedX, d: D, eps: eps)
+                }
             }
 
             let moe = self.moe!
@@ -3422,7 +3762,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 perExpertScale = (onesPerExpertScale!, 0)
             }
 
-            if cfg.usesSigmoidCorrectionRouter {
+            if let flintRouter {
+                flintRouter.encode(commandBuffer: cb, weight: routerW.buffer,
+                    weightOffset: Int(routerW.offset), hidden: flintResidual!.normalized,
+                    indices: outIndices, weights: outWeights, hiddenSize: cfg.hiddenSize,
+                    experts: cfg.numExperts, topK: cfg.topKExperts, floatInput: true,
+                    affineScalesOffset: routerW.dtype == 0 ? Int(routerW.scaleOffset) : nil,
+                    affineBiasesOffset: routerW.dtype == 0 ? Int(routerW.biasOffset) : nil)
+            } else if cfg.usesSigmoidCorrectionRouter {
                 let correction = try model.routerCorrectionBias(layer: L)
                 moe.encodeRouterMiniMax(commandBuffer: cb,
                     weights: routerW.buffer, weightsOffset: Int(routerW.offset),
@@ -3462,7 +3809,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             defer { fireLookahead() }
             if lookahead.enabled, !model.stagesDenseLayers, L + 1 < cfg.numLayers,
                let nextRouter = try? model.router(layer: L + 1) {
-                if cfg.usesSigmoidCorrectionRouter {
+                if let flintRouter {
+                    // Flint routes on the FP32 normalized residual: this
+                    // layer's post-attention norm is the predictor input.
+                    flintRouter.encode(commandBuffer: cb, weight: nextRouter.buffer,
+                        weightOffset: Int(nextRouter.offset), hidden: flintResidual!.normalized,
+                        indices: lookaheadIndices, weights: lookaheadWeights,
+                        hiddenSize: cfg.hiddenSize, experts: cfg.numExperts,
+                        topK: cfg.topKExperts, floatInput: true,
+                        affineScalesOffset: nextRouter.dtype == 0 ? Int(nextRouter.scaleOffset) : nil,
+                        affineBiasesOffset: nextRouter.dtype == 0 ? Int(nextRouter.biasOffset) : nil)
+                } else if cfg.usesSigmoidCorrectionRouter {
                     let correction = try model.routerCorrectionBias(layer: L + 1)
                     moe.encodeRouterMiniMax(commandBuffer: cb,
                         weights: nextRouter.buffer, weightsOffset: Int(nextRouter.offset),
@@ -3517,6 +3874,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             for i in 0..<cfg.topKExperts {
                 experts[i] = min(Int(idxPtr[i]), cfg.numExperts - 1)
             }
+            debugRouterSink?(L, experts)
             // The read issued for this layer during the previous one must land
             // before this layer plans its own fetch.
             if let finished = lookahead.drain(), finished.layer == L {
@@ -3552,9 +3910,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 }
                 lookahead.pending = ExpertLookahead.Pending(layer: L + 1, experts: predicted,
                                                             reads: reads)
+                if let reads { try decodeLookaheadObserver?(reads) }
             }
 
             let routedOffsets = model.routedExpertOffsets(layer: L)
+            let routedBitWidths = model.routedExpertBitWidths(layer: L)
             let topK = UInt32(cfg.topKExperts)
             let canPlanPhase1HitSplit =
                 cfg.topKExperts <= MoE.maxStreamedExperts
@@ -3588,7 +3948,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                                         acts: moeActs,
                                                         d: D,
                                                         f: FmoE,
-                                                        topK: topK)
+                                                        topK: topK, bitWidths: routedBitWidths)
             }
 
             func encodeRoutedPhase1Subset(
@@ -3611,7 +3971,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                     activeCount: activeCount,
                     d: D,
                     f: FmoE,
-                    topK: topK)
+                    topK: topK, bitWidths: routedBitWidths)
             }
 
             // Cache-hit work and the shared expert use the same input and
@@ -3763,10 +4123,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 // The phase-2 reduce already folded the shared branch (h1Buf
                 // as its residual); the tail is a plain residual add.
                 gTail = { [self] cb in
-                    elementwise!.encodeResidualAdd(commandBuffer: cb,
-                                                   hidden: hidden,
-                                                   delta: h2Buf,
-                                                   count: cfg.hiddenSize)
+                    if let flintResidual {
+                        // The add joins the next norm (layer input or final head).
+                        if flintDefersResidualAdd {
+                            flintPendingDelta = h2Buf
+                        } else {
+                            flintResidual.add(cb, delta: h2Buf, mirror: hidden, count: cfg.hiddenSize)
+                        }
+                    } else {
+                        elementwise!.encodeResidualAdd(commandBuffer: cb, hidden: hidden,
+                                                       delta: h2Buf, count: cfg.hiddenSize)
+                    }
                 }
             }
             let routedCB = ctx.queue.makeCommandBuffer()!
@@ -3801,7 +4168,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                                    y: h2Buf,
                                                    d: D,
                                                    f: FmoE,
-                                                   topK: topK)
+                                                   topK: topK, bitWidths: routedBitWidths)
             gTail(routedCB)
             routedCB.commit()
             precondition(pendingRoutedCommand == nil,
@@ -3833,23 +4200,58 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 // injection gate and only collapses.
                 try? self.encodeHyperConnectionRead(cb, slot: .attention, layer: nil)
             } else if let fNorm {
+                if let prism = self.prism {
+                    prism.encodeNorm(commandBuffer: cb, weight: fNorm, input: self.hidden,
+                                     output: self.normed, width: self.cfg.hiddenSize, rows: 1, eps: eps)
+                } else if let flintResidual = self.flintResidual {
+                    if let delta = flintPendingDelta {
+                        flintResidual.addNorm(cb, delta: delta, mirror: self.hidden,
+                                              weight: fNorm.buffer, weightOffset: Int(fNorm.offset),
+                                              output: self.normed, count: self.cfg.hiddenSize, eps: eps)
+                        flintPendingDelta = nil
+                    } else {
+                        flintResidual.norm(cb, weight: fNorm.buffer, weightOffset: Int(fNorm.offset),
+                                           output: self.normed, count: self.cfg.hiddenSize, eps: eps)
+                    }
+                } else {
                 self.rms.encodeBF16W(commandBuffer: cb, x: self.hidden,
                                      weight: fNorm.buffer, weightOffset: Int(fNorm.offset),
                                      out: self.normed, d: D, eps: eps)
+                }
             }
         }
-        let gLmHead: (MTLCommandBuffer) -> Void = { cb in
+        let gLmHead: (MTLCommandBuffer) throws -> Void = { cb in
+            if let prism = self.prism {
+                try prism.encode(commandBuffer: cb, model: self.model, weight: lm,
+                                 input: headInput, output: logits, columns: self.cfg.hiddenSize,
+                                 outputs: self.cfg.vocabSize, rows: 1,
+                                 inputStride: self.cfg.hiddenSize, outputStride: self.cfg.vocabSize)
+            } else if self.cfg.family == .flint {
+                encodeFlintProjection(cb, view: lm, x: headInput, y: logits,
+                                      rows: UInt32(self.cfg.vocabSize), columns: D)
+            } else {
             self.int4.encode(commandBuffer: cb,
                              weights: lm.buffer, weightsOffset: Int(lm.offset),
                              scales:  lm.buffer, scalesOffset:  Int(lm.scaleOffset),
                              biases:  lm.buffer, biasesOffset:  Int(lm.biasOffset),
                              x: headInput, y: logits,
                              m: UInt32(self.cfg.vocabSize), n: D)
+            }
         }
         let gFusionHead: (MTLCommandBuffer) -> Void = { cb in
+            // Flint norms its FP32 residual first; the fused kernel then takes
+            // the already-normalized row instead of the half mirror.
+            let flintNormed: MTLBuffer?
+            if self.cfg.family == .flint {
+                gFinalNorm(cb)
+                flintNormed = self.normed
+            } else {
+                flintNormed = nil
+            }
             self.fusionHead.encodeGreedyDecode(
                 commandBuffer: cb,
                 hidden: self.hidden,
+                normedInput: flintNormed,
                 normWeight: fNorm!.buffer, normOffset: Int(fNorm!.offset),
                 weights: lm.buffer, weightsOffset: Int(lm.offset),
                 scales: lm.buffer, scalesOffset: Int(lm.scaleOffset),
@@ -3869,12 +4271,26 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         if emitHead {
             let useFusedHeadForThisToken = useFusedGreedyHead && outputMode == .greedyIfAvailable
             let tHead = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            let head = useFusedHeadForThisToken ? gFusionHead : { cb in
-                gFinalNorm(cb)
-                gLmHead(cb)
+            if !useFusedHeadForThisToken { flintFiniteLogits?.prepare() }
+            let head: (MTLCommandBuffer) throws -> Void = { cb in
+                if useFusedHeadForThisToken {
+                    if self.prism != nil {
+                        // Prism's head is a rotated Q2 projection; take the GPU argmax of its logits.
+                        gFinalNorm(cb)
+                        try gLmHead(cb)
+                        self.greedyArgmax.encode(commandBuffer: cb, values: logits,
+                                                 count: self.cfg.vocabSize, output: self.greedyTokenBuf)
+                    } else {
+                        gFusionHead(cb)
+                    }
+                } else { gFinalNorm(cb); try gLmHead(cb) }
+                // The fused head never writes logits, so there is nothing to check.
+                if !useFusedHeadForThisToken {
+                    try self.flintFiniteLogits?.encode(commandBuffer: cb, logits: logits, count: self.cfg.vocabSize)
+                }
             }
             if let cb = pendingTokenCommandBuffer {
-                head(cb)
+                try head(cb)
                 epilogue?(cb)
                 cb.commit()
                 waitUntilCompleted(cb)
@@ -3884,6 +4300,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             } else {
                 try runSync(head)
             }
+            if !useFusedHeadForThisToken { try flintFiniteLogits?.validate() }
             if useFusedHeadForThisToken {
                 totalHeadFusedNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tHead
                 lastGreedyToken = greedyTokenBuf.contents().load(as: UInt32.self)
@@ -3898,6 +4315,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             totalGPULayerCommandBuffers &+= 1
         }
 
+        if emitHead { GPUOpProfiler.shared?.endStep(kind: "decode") }
         kv?.advance()
     }
 
@@ -4249,6 +4667,33 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         let dtBias = try model.linearDtBias(layer: L)
         let gatedNormW = try model.linearNorm(layer: L)
 
+        if let prism, let prismGDN {
+            if prism.supportsDual(columns: cfg.hiddenSize, outputsA: la.qkvDim) {
+                try prism.encodeDual(commandBuffer: cb, model: model, weightA: qkvW, weightB: zW,
+                                     input: blockInput, outputA: gdnQKVRaw, outputB: gdnZ,
+                                     columns: cfg.hiddenSize, outputsA: la.qkvDim, outputsB: la.valueDim)
+            } else {
+                try prism.encode(commandBuffer: cb, model: model, weight: qkvW,
+                                 input: blockInput, output: gdnQKVRaw, columns: cfg.hiddenSize,
+                                 outputs: la.qkvDim, rows: 1, inputStride: cfg.hiddenSize, outputStride: la.qkvDim)
+                try prism.encode(commandBuffer: cb, model: model, weight: zW,
+                                 input: blockInput, output: gdnZ, columns: cfg.hiddenSize,
+                                 outputs: la.valueDim, rows: 1, inputStride: cfg.hiddenSize, outputStride: la.valueDim)
+            }
+            prism.encodeFloatDual(commandBuffer: cb, weightA: aW, weightB: bW, input: blockInput,
+                                  outputA: gdnA, outputB: gdnB, columns: cfg.hiddenSize, outputs: la.numVHeads)
+            prismGDN.encodeConv(commandBuffer: cb, tail: gdnState.convTailBuffer(layer: L),
+                                qkv: gdnQKVRaw, weight: convW, output: gdnConvOut)
+            gdn.encodeQKNorm(commandBuffer: cb, convOut: gdnConvOut)
+            prismGDN.encodeDelta(commandBuffer: cb, convOut: gdnConvOut, a: gdnA, b: gdnB,
+                                 aLog: aLog, dtBias: dtBias, state: gdnState.stateBuffer(layer: L), output: gdnY)
+            prismGDN.encodeGatedNorm(commandBuffer: cb, y: gdnY, z: gdnZ, weight: gatedNormW, output: gdnOut)
+            try prism.encode(commandBuffer: cb, model: model, weight: outW,
+                             input: gdnOut, output: oOut, columns: la.valueDim,
+                             outputs: cfg.hiddenSize, rows: 1, inputStride: la.valueDim, outputStride: cfg.hiddenSize)
+            return
+        }
+
         // One dispatch over the concatenated qkv/z/a/b row space instead of four
         // separate GEMVs (a and b were 4 threadgroups each).
         gdn.encodeInputProjections(commandBuffer: cb,
@@ -4343,6 +4788,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         let kNormW = try model.kNorm(layer: L)
         let rotaryDim = UInt32(Double(headDim) * cfg.partialRotaryFactor)
 
+        if let prism {
+            for (weight, output, offset, count) in [
+                (q, qPackedScratch, 0, Int(2 * qDim)),
+                (k, kSlot.buffer, kSlot.offset, Int(kvDim)),
+                (v, vSlot.buffer, vSlot.offset, Int(kvDim)),
+            ] {
+                try prism.encode(commandBuffer: cb, model: model, weight: weight,
+                                 input: blockInput, output: output, columns: cfg.hiddenSize,
+                                 outputs: count, rows: 1, outputOffset: offset,
+                                 inputStride: cfg.hiddenSize, outputStride: count)
+            }
+        } else {
         fusedQKVGEMV.encode(commandBuffer: cb,
                             qWeights: q.buffer, qWeightsOffset: Int(q.offset),
                             qScales: q.buffer, qScalesOffset: Int(q.scaleOffset),
@@ -4365,12 +4822,20 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                             qRows: 2 * qDim,
                             kvRows: kvDim,
                             n: D)
+        }
         elementwise.encodeSplitQGate(commandBuffer: cb,
                                      packed: qPackedScratch,
                                      q: qScratch,
                                      gate: attnGateScratch,
                                      heads: cfg.numHeads,
                                      dim: headDim)
+        if let prism {
+            prism.encodeNorm(commandBuffer: cb, weight: qNormW, input: qScratch, output: qScratch,
+                             width: headDim, rows: cfg.numHeads, eps: eps)
+            prism.encodeNorm(commandBuffer: cb, weight: kNormW, input: kSlot.buffer, output: kSlot.buffer,
+                             width: headDim, rows: numKV, eps: eps,
+                             inputOffset: kSlot.offset, outputOffset: kSlot.offset)
+        } else {
         encodeHeadNorm(cb,
                                x: qScratch,
                                weight: qNormW.buffer,
@@ -4387,6 +4852,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                headDim: UInt32(headDim),
                                numHeads: numKV,
                                eps: eps)
+        }
         let ropePosition = position + Int(qwenMultimodalRopeDelta)
         precondition(ropePosition >= 0, "Qwen multimodal RoPE position must be nonnegative")
         rope.encodeNeoxSubdim(commandBuffer: cb,
@@ -4435,16 +4901,22 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                          out: attnOut,
                                          gate: attnGateScratch,
                                          count: Int(qDim))
+        if let prism {
+            try prism.encode(commandBuffer: cb, model: model, weight: o,
+                             input: attnOut, output: oOut, columns: Int(qDim), outputs: cfg.hiddenSize,
+                             rows: 1, inputStride: Int(qDim), outputStride: cfg.hiddenSize)
+        } else {
         int4.encode(commandBuffer: cb,
                     weights: o.buffer, weightsOffset: Int(o.offset),
                     scales: o.buffer, scalesOffset: Int(o.scaleOffset),
                     biases: o.buffer, biasesOffset: Int(o.biasOffset),
                     x: attnOut, y: oOut, m: D, n: qDim)
+        }
     }
 
-    private func runSync(_ body: (MTLCommandBuffer) -> Void) throws {
+    private func runSync(_ body: (MTLCommandBuffer) throws -> Void) throws {
         let cb = ctx.queue.makeCommandBuffer()!
-        body(cb)
+        try body(cb)
         cb.commit()
         try waitForCompletion(cb)
         totalGPUHeadNanos &+= UInt64(max(0, (cb.gpuEndTime - cb.gpuStartTime) * 1e9))
@@ -4472,6 +4944,9 @@ extension RealForwardRunner {
     /// is limited by the kernels or by submission latency. The CLI exposes it
     /// behind `TUFF_KERNEL_BENCH=1`.
     public func benchmarkDecodeKernels(repetitions: Int = 20) throws -> String {
+        if prism != nil {
+            return try benchmarkPrismAffine2(repetitions: repetitions)
+        }
         var report = ""
         let D = UInt32(cfg.hiddenSize)
         guard let scratchLogits = ctx.device.makeBuffer(
@@ -4587,6 +5062,81 @@ extension RealForwardRunner {
         }
         return report
     }
+
+    /// Measure Q2 projections without Hadamard using actual resident pack tensors.
+    private func benchmarkPrismAffine2(repetitions: Int) throws -> String {
+        precondition(repetitions > 0)
+        let affine = try PrismAffine2(context: ctx)
+        let head = model.lmHead
+        let layers = cfg.numLayers
+        let repetitions = max(repetitions, layers * 2)
+        let gates = try (0..<layers).map { try model.sharedExpertGate(layer: $0) }
+        let ups = try (0..<layers).map { try model.sharedExpertUp(layer: $0) }
+        let gateAndUp = (0..<layers).flatMap { [gates[$0], ups[$0]] }
+        let downs = try (0..<layers).map { try model.sharedExpertDown(layer: $0) }
+        let maxColumns = max(Int(head.shape.1), Int(downs[0].shape.1))
+        guard let input = ctx.device.makeBuffer(length: maxColumns * 2, options: .storageModeShared),
+              let output = ctx.device.makeBuffer(length: Int(head.shape.0) * 2, options: .storageModeShared),
+              let reference = ctx.device.makeBuffer(length: Int(head.shape.0) * 2, options: .storageModeShared) else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        let values = input.contents().assumingMemoryBound(to: Float16.self)
+        for i in 0..<maxColumns { values[i] = Float16(sin(Float(i) * 0.37) * 0.5) }
+        var report = "Prism Q2 GEMV, group=128, FP16 input/output; best GPU time per dispatch. "
+            + "Per-layer tensors rotate; the gate/up case covers both projections in every layer.\n"
+        // (label, views cycled per repetition, rows to use)
+        let cases: [(String, [TensorView], Int)] = [
+            ("gate_proj", gates, Int(gates[0].shape.0)),
+            ("gate_up_all_layers", gateAndUp, Int(gates[0].shape.0)),
+            ("gate_proj rows[0..<2048]", gates, 2048),
+            ("down_proj", downs, Int(downs[0].shape.0)),
+            ("lm_head", [head], Int(head.shape.0)),
+        ]
+        for (label, views, rows) in cases {
+            let columns = Int(views[0].shape.1)
+            func encode(_ cb: MTLCommandBuffer, _ index: Int, _ variant: PrismAffine2.Variant, _ out: MTLBuffer) {
+                let view = views[index % views.count]
+                affine.encode(commandBuffer: cb, input: input, weights: view.buffer,
+                              scales: view.buffer, biases: view.buffer, output: out,
+                              weightsOffset: Int(view.offset), scalesOffset: Int(view.scaleOffset),
+                              biasesOffset: Int(view.biasOffset), columns: columns, outputs: rows, rows: 1,
+                              variant: variant)
+            }
+            let check = ctx.queue.makeCommandBuffer()!
+            encode(check, 0, .rows4, reference)
+            check.commit()
+            check.waitUntilCompleted()
+            try checkCommandBufferError(check)
+            let expected = Array(UnsafeBufferPointer(start: reference.contents().assumingMemoryBound(to: Float16.self), count: rows))
+            let bytes = Double(rows * columns) * (0.25 + 4.0 / 128.0)
+            for variant in PrismAffine2.Variant.allCases {
+                for shared in [false, true] where variant == .rows4 || !shared {
+                    let verify = ctx.queue.makeCommandBuffer()!
+                    encode(verify, 0, variant, output)
+                    verify.commit()
+                    verify.waitUntilCompleted()
+                    let actual = Array(UnsafeBufferPointer(start: output.contents().assumingMemoryBound(to: Float16.self), count: rows))
+                    var worst: Float = 0
+                    for i in 0..<rows { worst = max(worst, abs(Float(actual[i]) - Float(expected[i]))) }
+                    var best = Double.infinity
+                    for _ in 0..<5 {
+                        let cb = ctx.queue.makeCommandBuffer()!
+                        if shared { SharedComputeEncoding.share(cb) }
+                        for index in 0..<repetitions { encode(cb, index, variant, output) }
+                        cb.commit()
+                        cb.waitUntilCompleted()
+                        try checkCommandBufferError(cb)
+                        best = min(best, (cb.gpuEndTime - cb.gpuStartTime) / Double(repetitions))
+                    }
+                    report += String(format: "%-26@ %5dx%-5d %-6@ %@ %9.3f us %7.2f GB/s  max|diff vs rows4| %.4f\n",
+                                     label as NSString, rows, columns, variant.rawValue as NSString,
+                                     (shared ? "shared " : "separate") as NSString,
+                                     best * 1e6, bytes / best / 1e9, worst)
+                }
+            }
+        }
+        return report
+    }
 }
 
 extension RealForwardRunner: PrefixCheckpointingRunner {
@@ -4684,5 +5234,381 @@ extension RealForwardRunner: StateSnapshottingRunner {
             reset()
             throw error
         }
+    }
+}
+
+// MARK: - Flint chunked prefill
+
+/// Flint prefill batches a chunk of prompt rows per layer. Attention runs the
+/// decode kernels row by row inside one command buffer, so a row's numerics
+/// are a decode token's; the routed experts are grouped by expert so each is
+/// read from SSD once per chunk rather than once per token. The last prompt
+/// token goes through the ordinary decode path, which writes the logits and
+/// any fused-greedy seed.
+extension RealForwardRunner {
+    func prefillFlintBatched(tokens: ArraySlice<Int32>,
+                             startPosition: Int,
+                             outputMode: PrefillOutputMode,
+                             config: PrefillRuntimeConfig,
+                             into logits: MTLBuffer,
+                             onProgress: (Int) -> Void) async throws -> PrefillResult {
+        let total = tokens.count
+        let batched = total - 1
+        if batched > 0 {
+            let capacity = min(config.chunkTokens, prefillTextChunkCapacity)
+            let state: FlintBatchedPrefillState
+            if let existing = flintPrefill, existing.rows >= capacity {
+                state = existing
+            } else {
+                state = try FlintBatchedPrefillState(context: ctx, config: cfg, rows: capacity,
+                                                     silu: cfg.hiddenActivation == "silu")
+                flintPrefill = state
+            }
+            var offset = 0
+            while offset < batched {
+                let count = min(capacity, batched - offset)
+                let lower = tokens.index(tokens.startIndex, offsetBy: offset)
+                let upper = tokens.index(lower, offsetBy: count)
+                try Task.checkCancellation()
+                try await encodeFlintPrefillChunk(tokens: tokens[lower..<upper],
+                                                  startPosition: startPosition + offset,
+                                                  state: state)
+                offset += count
+                onProgress(offset)
+            }
+        }
+        try await produceToken(token: tokens[tokens.index(before: tokens.endIndex)],
+                               position: startPosition + total - 1, into: logits,
+                               emitHead: true, outputMode: outputMode)
+        onProgress(total)
+        if outputMode == .greedyIfAvailable, useFusedGreedyHead {
+            return PrefillResult(newPosition: startPosition + total, seed: .greedyToken(lastGreedyToken))
+        }
+        return PrefillResult(newPosition: startPosition + total, seed: .logitsWritten)
+    }
+
+    private func encodeFlintPrefillChunk(tokens: ArraySlice<Int32>,
+                                         startPosition: Int,
+                                         state: FlintBatchedPrefillState) async throws {
+        guard let kv, let rope, let flintEmbedding else {
+            throw PrefillError.chunkedUnsupported("Flint chunked prefill requires KV, RoPE and embedding kernels")
+        }
+        let T = tokens.count
+        precondition(T > 0 && T <= state.rows)
+        let D = cfg.hiddenSize
+        let K = cfg.topKExperts
+        let F = cfg.moeIntermediateSize
+        let half = MemoryLayout<Float16>.stride
+        let eps: Float = 1e-6
+        try kv.ensureCapacity(through: startPosition + T, on: ctx.queue)
+        _ = lookahead.drain()
+        if let ringLayer = (0..<cfg.numLayers).first(where: { kv.ringCapacity(layer: $0) > 0 }) {
+            let required = min(maxContext, cfg.slidingWindow + T)
+            guard required <= kv.ringCapacity(layer: ringLayer) else {
+                throw PrefillError.chunkedUnsupported(
+                    "FP16 KV ring capacity \(kv.ringCapacity(layer: ringLayer)) cannot hold \(required) rows for a Flint prefill chunk")
+            }
+        }
+        let tokenPointer = state.tokens.contents().assumingMemoryBound(to: UInt32.self)
+        for (row, token) in tokens.enumerated() { tokenPointer[row] = UInt32(bitPattern: token) }
+        prefillChunkState.markDirty(startPosition: startPosition, tokenCount: T)
+
+        func makeBuffer(_ label: String) throws -> MTLCommandBuffer {
+            guard let cb = ctx.queue.makeCommandBuffer() else { throw ModelError.residentBufferWrapFailed }
+            SharedComputeEncoding.share(cb)
+            cb.label = "flint prefill start=\(startPosition) rows=\(T) \(label)"
+            return cb
+        }
+
+        func bits(_ view: TensorView, rows: UInt32, columns: UInt32) -> Int {
+            view.length == UInt64(rows) * UInt64(columns) ? 8 : 4
+        }
+
+        func project(_ cb: MTLCommandBuffer, _ view: TensorView,
+                     x: MTLBuffer, xOffset: Int, y: MTLBuffer, yOffset: Int,
+                     rows: UInt32, columns: UInt32) {
+            if bits(view, rows: rows, columns: columns) == 8 {
+                flintInt8!.encode(commandBuffer: cb,
+                    weights: view.buffer, weightsOffset: Int(view.offset),
+                    scales: view.buffer, scalesOffset: Int(view.scaleOffset),
+                    biases: view.buffer, biasesOffset: Int(view.biasOffset),
+                    x: x, xOffset: xOffset, y: y, yOffset: yOffset, m: rows, n: columns)
+            } else {
+                int4.encode(commandBuffer: cb,
+                    weights: view.buffer, weightsOffset: Int(view.offset),
+                    scales: view.buffer, scalesOffset: Int(view.scaleOffset),
+                    biases: view.buffer, biasesOffset: Int(view.biasOffset),
+                    x: x, xOffset: xOffset, y: y, yOffset: yOffset, m: rows, n: columns)
+            }
+        }
+
+        var cb = try makeBuffer("layer=0")
+        flintEmbedding.encodeRows(commandBuffer: cb, table: model.embedding,
+                                  tokens: state.tokens, residual: state.residual.values,
+                                  rows: T, width: UInt32(D))
+        var pendingDelta: MTLBuffer?
+
+        for L in 0..<cfg.numLayers {
+            let isFull = cfg.fullAttentionLayerMask[L] == 1
+            let isLast = L == cfg.numLayers - 1
+            let headDim = isFull ? cfg.fullHeadDim : cfg.headDim
+            let numKV = isFull ? cfg.numFullKVHeads : cfg.numKVHeads
+            let qDim = UInt32(cfg.numHeads * headDim)
+            let kvDim = UInt32(numKV * headDim)
+            let inNorm = try model.inputNorm(layer: L)
+            let postAttn = try model.postAttnNorm(layer: L)
+            if let delta = pendingDelta {
+                state.residual.addNorm(cb, delta: delta, mirror: state.attentionOut,
+                                       weight: inNorm.buffer, weightOffset: Int(inNorm.offset),
+                                       output: state.normed, count: D, eps: eps, rows: T)
+                pendingDelta = nil
+            } else {
+                state.residual.norm(cb, weight: inNorm.buffer, weightOffset: Int(inNorm.offset),
+                                    output: state.normed, count: D, eps: eps, rows: T)
+            }
+
+            let q = try model.qProj(layer: L)
+            let k = try model.kProj(layer: L)
+            let v = try model.vProj(layer: L)
+            let o = try model.oProj(layer: L)
+            let qNorm = try model.qNorm(layer: L)
+            let kNorm = try model.kNorm(layer: L)
+            let sinks = try model.attentionSinks(layer: L)
+            let fusedProjection = bits(q, rows: qDim, columns: UInt32(D)) == 4
+                && bits(k, rows: kvDim, columns: UInt32(D)) == 4
+                && bits(v, rows: kvDim, columns: UInt32(D)) == 4
+            for row in 0..<T {
+                let position = startPosition + row
+                let kSlot = kv.kSlot(layer: L, position: position)
+                let vSlot = kv.vSlot(layer: L, position: position)
+                let xOffset = row * D * half
+                let qOffset = row * state.attentionStride * half
+                if isLast {
+                    // Only this layer's K/V rows are needed: nothing reads its output.
+                    project(cb, k, x: state.normed, xOffset: xOffset, y: kSlot.buffer, yOffset: kSlot.offset,
+                            rows: kvDim, columns: UInt32(D))
+                    project(cb, v, x: state.normed, xOffset: xOffset, y: vSlot.buffer, yOffset: vSlot.offset,
+                            rows: kvDim, columns: UInt32(D))
+                } else if fusedProjection {
+                    fusedQKVGEMV.encode(commandBuffer: cb,
+                        qWeights: q.buffer, qWeightsOffset: Int(q.offset),
+                        qScales: q.buffer, qScalesOffset: Int(q.scaleOffset),
+                        qBiases: q.buffer, qBiasesOffset: Int(q.biasOffset),
+                        kWeights: k.buffer, kWeightsOffset: Int(k.offset),
+                        kScales: k.buffer, kScalesOffset: Int(k.scaleOffset),
+                        kBiases: k.buffer, kBiasesOffset: Int(k.biasOffset),
+                        vWeights: v.buffer, vWeightsOffset: Int(v.offset),
+                        vScales: v.buffer, vScalesOffset: Int(v.scaleOffset),
+                        vBiases: v.buffer, vBiasesOffset: Int(v.biasOffset),
+                        x: state.normed, xOffset: xOffset,
+                        qOut: state.queries, qOutOffset: qOffset,
+                        kOut: kSlot.buffer, kOutOffset: kSlot.offset,
+                        vOut: vSlot.buffer, vOutOffset: vSlot.offset,
+                        qRows: qDim, kvRows: kvDim, n: UInt32(D))
+                } else {
+                    project(cb, q, x: state.normed, xOffset: xOffset, y: state.queries, yOffset: qOffset,
+                            rows: qDim, columns: UInt32(D))
+                    project(cb, k, x: state.normed, xOffset: xOffset, y: kSlot.buffer, yOffset: kSlot.offset,
+                            rows: kvDim, columns: UInt32(D))
+                    project(cb, v, x: state.normed, xOffset: xOffset, y: vSlot.buffer, yOffset: vSlot.offset,
+                            rows: kvDim, columns: UInt32(D))
+                }
+                if !isLast {
+                    rms.encodeBF16WPerHead(commandBuffer: cb, x: state.queries, xOffset: qOffset,
+                        weight: qNorm.buffer, weightOffset: Int(qNorm.offset),
+                        out: state.queries, outOffset: qOffset,
+                        headDim: UInt32(headDim), numHeads: cfg.numHeads, eps: eps)
+                }
+                rms.encodeBF16WPerHead(commandBuffer: cb, x: kSlot.buffer, xOffset: kSlot.offset,
+                    weight: kNorm.buffer, weightOffset: Int(kNorm.offset),
+                    out: kSlot.buffer, outOffset: kSlot.offset,
+                    headDim: UInt32(headDim), numHeads: numKV, eps: eps)
+                if !isFull {
+                    if !isLast {
+                        rope.encodeDefaultNeox(commandBuffer: cb, data: state.queries, dataOffset: qOffset,
+                            position: UInt32(position), headDim: UInt32(headDim),
+                            numHeads: UInt32(cfg.numHeads), theta: Float(cfg.ropeTheta))
+                    }
+                    rope.encodeDefaultNeox(commandBuffer: cb, data: kSlot.buffer, dataOffset: kSlot.offset,
+                        position: UInt32(position), headDim: UInt32(headDim),
+                        numHeads: UInt32(numKV), theta: Float(cfg.ropeTheta))
+                }
+                if isLast { continue }
+                if isFull {
+                    attention.encodeFull(commandBuffer: cb,
+                        q: state.queries, qOffset: qOffset,
+                        k: kSlot.buffer, kOffset: 0, v: vSlot.buffer, vOffset: 0,
+                        out: state.context, outOffset: qOffset,
+                        headDim: UInt32(headDim), numQHeads: UInt32(cfg.numHeads),
+                        numKVHeads: UInt32(numKV), seqLen: UInt32(position + 1),
+                        scale: Float(cfg.attentionScale),
+                        sinks: sinks.buffer, sinksOffset: Int(sinks.offset))
+                } else {
+                    let ringCapacity = kv.ringCapacity(layer: L)
+                    let activeRing = ringCapacity > 0 && position + 1 > ringCapacity ? UInt32(ringCapacity) : 0
+                    attention.encodeSWA(commandBuffer: cb,
+                        q: state.queries, qOffset: qOffset,
+                        k: kSlot.buffer, kOffset: 0, v: vSlot.buffer, vOffset: 0,
+                        out: state.context, outOffset: qOffset,
+                        headDim: UInt32(headDim), numQHeads: UInt32(cfg.numHeads),
+                        numKVHeads: UInt32(numKV), seqLen: UInt32(position + 1),
+                        window: UInt32(cfg.slidingWindow), scale: Float(cfg.attentionScale),
+                        sinks: sinks.buffer, sinksOffset: Int(sinks.offset), ringCapacity: activeRing)
+                }
+                project(cb, o, x: state.context, xOffset: qOffset, y: state.attentionOut,
+                        yOffset: row * D * half, rows: UInt32(D), columns: qDim)
+            }
+            if isLast {
+                cb.commit()
+                try waitForCompletion(cb)
+                break
+            }
+
+            let sharedProjection = sharedExpertProjections[L]!
+            func encodeSharedRows(_ target: MTLCommandBuffer, x: MTLBuffer) throws {
+                for row in 0..<T {
+                    try shared.encode(commandBuffer: target,
+                        x: x, xOffset: row * D * half,
+                        gate: sharedProjection.gate, up: sharedProjection.up, down: sharedProjection.down,
+                        y: state.sharedOut, yOffset: row * D * half,
+                        scratchGate: state.sharedGate, scratchGateOffset: row * state.sharedStride * half,
+                        scratchUp: state.sharedUp, scratchUpOffset: row * state.sharedStride * half,
+                        scratchAct: state.sharedAct, scratchActOffset: row * state.sharedStride * half)
+                }
+            }
+
+            if L < 2 {
+                state.residual.addNorm(cb, delta: state.attentionOut, mirror: state.denseX,
+                                       weight: postAttn.buffer, weightOffset: Int(postAttn.offset),
+                                       output: state.denseX, count: D, eps: eps, rows: T)
+                try encodeSharedRows(cb, x: state.denseX)
+                pendingDelta = state.sharedOut
+                continue
+            }
+
+            // Moe layer: attention add + post-attention norm, route every row.
+            state.residual.addNorm(cb, delta: state.attentionOut, mirror: state.routedX,
+                                   weight: postAttn.buffer, weightOffset: Int(postAttn.offset),
+                                   output: state.routedX, count: D, eps: eps, rows: T)
+            let routerWeight = try model.router(layer: L)
+            state.router.encode(commandBuffer: cb, weight: routerWeight.buffer,
+                weightOffset: Int(routerWeight.offset), hidden: state.residual.normalized,
+                indices: state.routeIDs, weights: state.routeWeights, hiddenSize: D,
+                experts: cfg.numExperts, topK: K, floatInput: true,
+                affineScalesOffset: routerWeight.dtype == 0 ? Int(routerWeight.scaleOffset) : nil,
+                affineBiasesOffset: routerWeight.dtype == 0 ? Int(routerWeight.biasOffset) : nil,
+                rows: T)
+            cb.commit()
+            try waitForCompletion(cb)
+
+            let routeCount = T * K
+            let idPointer = state.routeIDs.contents().bindMemory(to: UInt32.self, capacity: routeCount)
+            let weightPointer = state.routeWeights.contents().bindMemory(to: Float16.self, capacity: routeCount)
+            var routeIDs = [UInt32](), routeWeights = [Float16]()
+            routeIDs.reserveCapacity(routeCount)
+            routeWeights.reserveCapacity(routeCount)
+            for i in 0..<routeCount {
+                routeIDs.append(min(idPointer[i], UInt32(cfg.numExperts - 1)))
+                routeWeights.append(weightPointer[i])
+            }
+            debugFlintPrefillRouteSink?(L, startPosition, routeIDs)
+            let pairs = PrefillRouter.makeTokenExpertPairs(indices: routeIDs, weights: routeWeights,
+                                                           queryCount: T, topK: K)
+            let slotCount = model.routedExpertCacheSlotCount(layer: L) ?? 16
+            let tileExperts = max(1, min(16, slotCount / 2))
+            let schedulerConfig = PrefillRoutedTileSchedulerConfig(maxPendingDepth: 1, tileExperts: tileExperts)
+            guard schedulerConfig.fitsSlotBudget(slotCount: slotCount) else {
+                throw PrefillError.chunkedUnsupported(
+                    "Flint prefill needs at least 2 expert-cache slots, has \(slotCount)")
+            }
+            let routes = try PrefillMoEGrouping.groupTokenExpertPairs(
+                pairs, queryCount: T, topK: K, numExperts: cfg.numExperts,
+                tileExpertCount: tileExperts,
+                expertSortKeys: model.routedExpertPhysicalOffsets(layer: L))
+            let metadata = try prefillGroupedMoE.makeStreamedMetadataBuffers(device: ctx.device, routes: routes)
+            let routedOffsets = model.routedExpertOffsets(layer: L)
+            let routedWidths = model.routedExpertBitWidths(layer: L)
+
+            // The shared expert has no dependence on the routed experts, so it
+            // runs while the first tile is read.
+            let sharedCB = try makeBuffer("layer=\(L) shared")
+            try encodeSharedRows(sharedCB, x: state.routedX)
+            sharedCB.commit()
+
+            struct PendingTile {
+                let index: Int
+                let commandBuffer: MTLCommandBuffer
+                let fetch: PrefillStreamedTileFetchResult
+                let argument: PrefillStreamedTileArgumentBuffer
+            }
+            var inFlight: [PendingTile] = []
+            var lifetime = PrefillStreamedTileSlotLifetime()
+            func drainOldest() throws {
+                guard !inFlight.isEmpty else { return }
+                let tile = inFlight.removeFirst()
+                try withExtendedLifetime((tile.fetch, tile.argument)) {
+                    try waitForCompletion(tile.commandBuffer)
+                }
+                if !tile.fetch.plannedMissSlots.isEmpty { try lifetime.complete(tileIndex: tile.index) }
+            }
+            do {
+                for (tileIndex, tile) in routes.tiles.enumerated() {
+                    let expertIDs = try PrefillStreamedTileBinding.expertIDs(forTile: tileIndex, routes: routes)
+                    var plannedFetch: RoutedExpertFetchPlan?
+                    var avoiding = Set<Int>()
+                    if !inFlight.isEmpty {
+                        avoiding = Set(inFlight.flatMap { $0.fetch.plannedAssignedSlots })
+                        if !avoiding.isEmpty,
+                           let plan = try model.planRoutedExpertsIfPossible(
+                               layer: L, experts: expertIDs, avoidingSlots: avoiding) {
+                            plannedFetch = plan
+                        } else {
+                            while !inFlight.isEmpty { try drainOldest() }
+                            avoiding = []
+                        }
+                    }
+                    try Task.checkCancellation()
+                    let fetch = try await PrefillStreamedTileBinding.fetchBindingForTile(
+                        model: model, layer: L, tileIndex: tileIndex, routes: routes,
+                        plannedFetch: plannedFetch, avoidingSlots: avoiding)
+                    try fetch.binding.validateCoversPairs(routes.sortedPairs,
+                                                          pairStart: Int(tile.pairStart),
+                                                          pairCount: Int(tile.pairCount))
+                    if !fetch.plannedMissSlots.isEmpty {
+                        try lifetime.begin(tileIndex: tileIndex, plannedSlots: fetch.plannedMissSlots)
+                    }
+                    let argument = try prefillGroupedMoE.makeStreamedArgumentBuffer(
+                        device: ctx.device, binding: fetch.binding)
+                    let tileCB = try makeBuffer("layer=\(L) tile=\(tileIndex)")
+                    state.experts.encodeTile(
+                        commandBuffer: tileCB, argumentBuffer: argument.buffer,
+                        views: fetch.binding.views, expertIDs: fetch.binding.expertIDs,
+                        offsets: routedOffsets, widths: routedWidths,
+                        x: state.routedX, sortedPairs: metadata.sortedPairs,
+                        pairStart: Int(tile.pairStart), pairCount: Int(tile.pairCount),
+                        d: D, f: F, topK: K,
+                        acts: state.acts[tileIndex & 1], partials: state.partials)
+                    tileCB.commit()
+                    inFlight.append(PendingTile(index: tileIndex, commandBuffer: tileCB,
+                                                fetch: fetch, argument: argument))
+                    // Depth one: the next tile's read overlaps this tile's compute.
+                    while inFlight.count > 1 { try drainOldest() }
+                }
+                while !inFlight.isEmpty { try drainOldest() }
+            } catch {
+                while !inFlight.isEmpty { try? drainOldest() }
+                try? waitForCompletion(sharedCB)
+                throw error
+            }
+            try waitForCompletion(sharedCB)
+            let tailCB = try makeBuffer("layer=\(L) tail")
+            state.experts.encodeReduce(commandBuffer: tailCB, partials: state.partials,
+                                       sharedOut: state.sharedOut, y: state.routedOut,
+                                       rows: T, d: D, topK: K)
+            pendingDelta = state.routedOut
+            cb = tailCB
+        }
+        kv.advance(by: T)
+        prefillChunkState.markCommitted()
     }
 }

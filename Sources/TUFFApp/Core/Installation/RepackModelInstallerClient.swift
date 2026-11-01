@@ -35,6 +35,14 @@ public final class RepackModelInstallerClient: AppModelInstallerClient, Sendable
                 architectureID: model.architecture.id.rawValue,
                 quantizationLayout: model.architecture.weightLayout.rawValue)
             do {
+                if let size = PrismRemoteInstaller.Size(modelID: id) {
+                    let directory = try await PrismRemoteInstaller.install(size: size, outputDirectory: outputDirectory,
+                        token: ProcessInfo.processInfo.environment["HF_TOKEN"], reserveBytes: descriptor.reserveBytes,
+                        progress: progress)
+                    try await InferenceEngineEnvironment.bind(engine, to: directory)
+                    await engine.release()
+                    return directory
+                }
                 let paths = try RemoteInstallPaths(outputDirectory: outputDirectory.path)
                 let resume = FileManager.default.fileExists(atPath: paths.checkpointFile)
                 let options = RemoteStreamingRepackOptions(
@@ -57,6 +65,10 @@ public final class RepackModelInstallerClient: AppModelInstallerClient, Sendable
             }
         }
         self.runDiscard = { outputDirectory in
+            if let id = descriptor.catalogID, PrismRemoteInstaller.Size(modelID: id) != nil {
+                try PrismRemoteInstaller.discardPartial(outputDirectory: outputDirectory)
+                return
+            }
             try RemoteStreamingRepacker.discardPartial(
                 outputDirectory: outputDirectory.path)
         }
@@ -71,6 +83,14 @@ public final class RepackModelInstallerClient: AppModelInstallerClient, Sendable
     }
 
     public func checkInstallRequirement(outputDirectory: URL) throws -> AppModelInstallRequirement {
+        if let id = descriptor.catalogID, let size = PrismRemoteInstaller.Size(modelID: id) {
+            let needed = size.snapshotBytes + size.outputReservationBytes + 8 * 1024 * 1024
+                + descriptor.engineInstallationTemporaryBytes
+            let requirement = try DiskSpaceChecker.assess(path: outputDirectory.path, bytes: needed,
+                                                           reserveBytes: descriptor.reserveBytes)
+            return AppModelInstallRequirement(probePath: requirement.path,
+                requiredBytes: requirement.requiredBytes, availableBytes: requirement.availableBytes)
+        }
         let saved = try RemoteStreamingRepacker.inspectPersistentInstall(
             outputDirectory: outputDirectory.path,
             repoID: descriptor.repoID,

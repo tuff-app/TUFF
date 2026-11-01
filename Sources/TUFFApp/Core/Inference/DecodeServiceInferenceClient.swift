@@ -8,7 +8,8 @@ import TUFFRuntimeDescriptions
 import TUFFDecodeProtocol
 
 public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
-    AppInferenceMemoryReporting, AppInferenceTranscriptReporting, AppInferenceEngineReporting, @unchecked Sendable {
+    AppSessionInferenceClient, AppInferenceMemoryReporting,
+    AppInferenceTranscriptReporting, AppInferenceEngineReporting, @unchecked Sendable {
     public var currentEngineIdentity: String? {
         connection.withLock { value in
             value.engineInstallation.map {
@@ -27,6 +28,7 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
     }
 
     private let connection = Mutex(Connection())
+    private let inputWriteLock = NSLock()
     private let requiresHandshake: Bool
     private let serviceURLOverride: URL?
     private let inferenceMemory = Mutex<UInt64?>(nil)
@@ -154,6 +156,54 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
 
     public func generate(_ request: AppGenerationRequest)
         -> AsyncThrowingStream<AppInferenceEvent, Error> {
+        makeGenerationStream(request, sessionID: nil, requestID: UUID())
+    }
+
+    public func generate(_ request: AppGenerationRequest, sessionID: UUID,
+                         requestID: UUID) -> AsyncThrowingStream<AppInferenceEvent, Error> {
+        makeGenerationStream(request, sessionID: sessionID, requestID: requestID)
+    }
+
+    /// Starts one raw helper generation for a serving coordinator. Unlike the
+    /// app-facing adapter this preserves the decode-service event envelope,
+    /// including terminal kind, diagnostics, memory and token sequencing.
+    public func startRaw(_ request: DecodeGenerationRequest, sessionID: UUID)
+        -> AsyncThrowingStream<DecodeServiceEvent, Error> {
+        AsyncThrowingStream { continuation in
+            Task.detached(priority: .userInitiated) { [self] in
+                do {
+                    guard let handles = currentHandles() else {
+                        throw AppInferenceError.modelNotLoaded
+                    }
+                    try send(.generateSession(sessionID: sessionID, request: request),
+                             to: handles.input)
+                    while true {
+                        let event = try await handles.responses.next(matching: request.generationID)
+                        if let bytes = event.currentMemoryBytes { inferenceMemory.withLock { $0 = bytes } }
+                        if let bytes = event.visionTowerMappedBytes { inferenceTowerMemory.withLock { $0 = bytes } }
+                        continuation.yield(event)
+                        if event.kind == .finished || event.kind == .cancelled || event.kind == .failed {
+                            continuation.finish()
+                            return
+                        }
+                    }
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { [weak self] termination in
+                if case .cancelled = termination {
+                    // Keep draining the helper's terminal event; ending the
+                    // reader early would leave the request/session occupied.
+                    self?.cancel(requestID: request.generationID)
+                }
+            }
+        }
+    }
+
+    private func makeGenerationStream(_ request: AppGenerationRequest, sessionID: UUID?,
+                                      requestID: UUID)
+        -> AsyncThrowingStream<AppInferenceEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task.detached(priority: .userInitiated) { [self] in
                 do {
@@ -161,66 +211,17 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                     guard let handles = currentHandles() else {
                         throw AppInferenceError.modelNotLoaded
                     }
-                    let generationID = UUID()
-                    generationTranscriptMailbox.reset()
-                    var command = DecodeGenerationRequest(
-                        prompt: request.prompt,
-                        systemPrompt: request.systemPrompt.isEmpty
-                            ? nil : request.systemPrompt,
-                        assistantPrefix: request.assistantPrefix.isEmpty
-                            ? nil : request.assistantPrefix,
-                        history: request.history.map { turn in
-                            DecodeChatTurn(
-                                prompt: turn.prompt,
-                                response: turn.response,
-                                thinking: turn.thinking,
-                                images: turn.images.isEmpty ? nil : turn.images.map {
-                                    DecodeImageAttachment(
-                                        id: $0.id,
-                                        path: $0.fileURL.path,
-                                        displayName: $0.displayName,
-                                        encodedBytes: $0.encodedBytes,
-                                        sha256: $0.sha256)
-                                },
-                                toolRounds: turn.toolRounds.isEmpty
-                                    ? nil : turn.toolRounds.map(Self.decodeToolRound))
-                        },
-                        imageAttachments: request.imageAttachments.map {
-                            DecodeImageAttachment(
-                                id: $0.id,
-                                path: $0.fileURL.path,
-                                displayName: $0.displayName,
-                                 encodedBytes: $0.encodedBytes,
-                                 sha256: $0.sha256)
-                        },
-                        maxNewTokens: request.maxNewTokens,
-                        maxContextTokens: request.maxContextTokens,
-                        reasoning: DecodeChatReasoning(
-                            rawValue: request.reasoning.rawValue) ?? .off,
-                        reasoningEffort: request.reasoningEffort.flatMap {
-                            DecodeGPTOSSReasoningEffort(rawValue: $0.rawValue)
-                        },
-                        preserveThinking: request.preserveThinking,
-                        temperature: request.temperature,
-                        topK: request.topK,
-                        topP: request.topP,
-                        repetitionPenalty: request.repetitionPenalty,
-                        seed: request.seed,
-                        runtimeOptions: Self.decodeRuntimeOptions(request.runtimeOptions),
-                        generationID: generationID)
-                    command.tools = request.tools.isEmpty ? nil : request.tools
-                    command.currentRounds = request.currentRounds.isEmpty
-                        ? nil : request.currentRounds.map(Self.decodeToolRound)
-                    command.conversationKey = request.conversationKey
-                    command.preservesFullHistory = request.preservesFullHistory
-                    try handles.input.write(contentsOf: DecodeFrameCodec.encode(
-                        DecodeServiceCommand.generate(command)))
+                    let generationID = requestID
+                    if sessionID == nil { generationTranscriptMailbox.reset() }
+                    let command = DecodeGenerationTranslation.decodeRequest(
+                        request, generationID: generationID)
+                    let serviceCommand: DecodeServiceCommand = sessionID.map {
+                        .generateSession(sessionID: $0, request: command)
+                    } ?? .generate(command)
+                    try send(serviceCommand, to: handles.input)
 
-                    var expectedSequence: UInt64 = 1
-                    var lastMetricYield = Date.distantPast
-                    var hasYieldedVisibleText = false
-                    // Preserve incremental text between throttled publications.
-                    var pendingVisibleText = ""
+                    var translator = DecodeGenerationEventTranslator(
+                        options: request.runtimeOptions, mailbox: generationTranscriptMailbox)
                     while true {
                         let event = try await handles.responses.next(matching: generationID)
                         // Only when the event carries a figure: an event
@@ -233,84 +234,16 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                             inferenceTowerMemory.withLock { $0 = tower }
                         }
                         guard event.generationID == generationID else { continue }
-
-                        if event.kind == .memory {
-                            // The stored reading is not observed by the UI, so
-                            // yield an event that causes it to redraw.
-                            continuation.yield(.memorySample)
-                            continue
+                        if event.kind == .finished,
+                           let installation = connection.withLock({ $0.engineInstallation }) {
+                            await InferenceEngineEnvironment.markKnownGood(installation, for: request.modelDirectory)
                         }
-                        if event.kind == .prefill || event.kind == .snapshot {
-                            guard event.sequence == expectedSequence else {
-                                throw AppInferenceError.unknown(
-                                    "decode service event sequence changed from \(expectedSequence) to \(event.sequence)")
-                            }
-                            expectedSequence &+= 1
-                        }
-                        if event.kind == .prefill,
-                           let done = event.prefillDone,
-                           let total = event.prefillTotal {
-                            continuation.yield(.prefillProgress(done: done, total: total))
-                            continue
-                        }
-                        if event.kind == .snapshot {
-                            if let thinking = event.thinkingDelta, !thinking.isEmpty {
-                                continuation.yield(.thinking(AppTokenEvent(
-                                    index: max(0, event.tokenCount - 1),
-                                    textDelta: thinking,
-                                    elapsedDecodeSeconds: event.decodeSeconds)))
-                            }
-                            generationTranscriptMailbox.append(event.textDelta)
-                            if event.textDelta.isEmpty { continue }
-                            pendingVisibleText += event.textDelta
-                            let now = Date()
-                            let beginsVisibleText = !hasYieldedVisibleText
-                                && event.textDelta.contains { !$0.isWhitespace }
-                            if beginsVisibleText
-                                || now.timeIntervalSince(lastMetricYield) >= 0.5 {
-                                lastMetricYield = now
-                                hasYieldedVisibleText = hasYieldedVisibleText || beginsVisibleText
-                                continuation.yield(.token(AppTokenEvent(
-                                    index: max(0, event.tokenCount - 1),
-                                    textDelta: pendingVisibleText,
-                                    elapsedDecodeSeconds: event.decodeSeconds)))
-                                pendingVisibleText = ""
-                            }
-                            continue
-                        }
-
-                        if !pendingVisibleText.isEmpty {
-                            continuation.yield(.token(AppTokenEvent(
-                                index: max(0, event.tokenCount - 1),
-                                textDelta: pendingVisibleText,
-                                elapsedDecodeSeconds: event.decodeSeconds)))
-                            pendingVisibleText = ""
-                        }
-                        let diagnostics = Self.diagnostics(
-                            event, options: request.runtimeOptions)
-                        switch event.kind {
-                        case .finished:
-                            if let installation = connection.withLock({ $0.engineInstallation }) {
-                                await InferenceEngineEnvironment.markKnownGood(installation, for: request.modelDirectory)
-                            }
-                            if let calls = event.toolCalls, !calls.isEmpty {
-                                continuation.yield(.toolCalls(calls.map {
-                                    AppToolCall(id: $0.id, name: $0.name, arguments: $0.arguments)
-                                }))
-                            }
-                            continuation.yield(.finished(diagnostics))
-                            continuation.finish()
-                        case .cancelled:
-                            continuation.yield(.cancelled(diagnostics))
-                            continuation.finish()
-                        case .failed:
-                            let error = event.errorKind == "malformedToolCall"
-                                ? AppInferenceError.malformedToolCall(event.error ?? "")
-                                : AppInferenceError.unknown(event.error ?? "decode service failed")
-                            continuation.yield(.failed(error, partial: diagnostics))
-                            continuation.finish(throwing: error)
-                        default:
-                            continue
+                        let output = try translator.consume(event)
+                        for translated in output.events { continuation.yield(translated) }
+                        switch output.terminal {
+                        case nil: continue
+                        case .finished, .cancelled: continuation.finish()
+                        case .failed(let error): continuation.finish(throwing: error)
                         }
                         return
                     }
@@ -319,19 +252,50 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                 }
             }
             continuation.onTermination = { [weak self] termination in
-                task.cancel()
                 // A finished stream already has a matching terminal event.
                 // Sending a global cancel here could land after the broker has
                 // admitted the next request and cancel that request instead.
-                if case .cancelled = termination { self?.cancel() }
+                if case .cancelled = termination {
+                    if sessionID != nil { self?.cancel(requestID: requestID) }
+                    else { task.cancel(); self?.cancel() }
+                }
             }
+        }
+    }
+
+    public func cancel(requestID: UUID) {
+        guard let input = currentHandles()?.input else { return }
+        try? send(.cancelRequest(requestID), to: input)
+    }
+
+    public func cancelWarmup() {
+        guard let input = currentHandles()?.input else { return }
+        try? send(.cancelWarmup, to: input)
+    }
+
+    public func endSession(_ sessionID: UUID, requestID: UUID) async throws {
+        guard let handles = currentHandles() else { throw AppInferenceError.modelNotLoaded }
+        try send(.endSession(sessionID: sessionID, requestID: requestID), to: handles.input)
+        let event = try await handles.responses.next(matching: requestID)
+        switch event.kind {
+        case .unloaded: return
+        case .failed:
+            throw AppInferenceError.unknown(event.error ?? "The chat session could not be closed.")
+        default:
+            throw AppInferenceError.unknown("The decode service returned an invalid session close event.")
         }
     }
 
     public func cancel() {
         guard let input = currentHandles()?.input else { return }
-        try? input.write(contentsOf: DecodeFrameCodec.encode(
-            DecodeServiceCommand.cancel))
+        try? send(.cancel, to: input)
+    }
+
+    private func send(_ command: DecodeServiceCommand, to input: FileHandle) throws {
+        let frame = try DecodeFrameCodec.encode(command)
+        inputWriteLock.lock()
+        defer { inputWriteLock.unlock() }
+        try input.write(contentsOf: frame)
     }
 
     deinit { closeConnection() }
@@ -547,7 +511,7 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
         }
     }
 
-    private static func diagnostics(_ event: DecodeServiceEvent,
+    static func diagnostics(_ event: DecodeServiceEvent,
                                     options: AppRuntimeOptions) -> AppDiagnostics {
         let stop = AppStopReason(rawValue: event.stopReason ?? "")
             ?? (event.kind == .cancelled
@@ -574,7 +538,7 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
         return diagnostics
     }
 
-    static func decodeToolRound(_ round: AppToolRound) -> DecodeToolRound {
+    public static func decodeToolRound(_ round: AppToolRound) -> DecodeToolRound {
         DecodeToolRound(
             thinking: round.thinking, content: round.content,
             calls: round.calls.map(\.historical),
@@ -615,7 +579,7 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
             exposedPrefetchWaitMillisecondsPerToken: value.exposedPrefetchWaitMillisecondsPerToken)
     }
 
-    private static func decodeRuntimeOptions(_ options: AppRuntimeOptions)
+    public static func decodeRuntimeOptions(_ options: AppRuntimeOptions)
         -> DecodeRuntimeOptions {
         let layers: [Int]?
         switch options.denseResidencyPolicy {

@@ -28,4 +28,17 @@ struct ServerTerminationSignalTests {
         #expect(await waiter.value == SIGUSR1)
         await signals.cancel()
     }
+    @Test func cancellationBeforeWaitingEndsWithoutSignal() async {
+        let signals = ServerTerminationSignals([])
+        await signals.cancel()
+        #expect(await signals.wait() == nil)
+    }
+
+    @Test func cancellationWakesWaiterWithoutSignal() async {
+        let signals = ServerTerminationSignals([])
+        let waiter = Task { await signals.wait() }
+        await Task.yield()
+        await signals.cancel()
+        #expect(await waiter.value == nil)
+    }
 }

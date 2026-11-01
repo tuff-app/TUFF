@@ -122,9 +122,10 @@ do {
     }
     let families: [(String, Set<String>, Set<String>)] = [
         ("gemma-affine", ["gemma4-e2b", "gemma4-e4b", "gemma4-12b-qat", "gemma4-26b-a4b"], ["affine"]),
-        ("qwen-hybrid-affine", ["qwen36-35b-a3b", "qwen3.8-flash-next", "ornith-1.5-9b", "ornith-1.5-35b-a3b", "ornith-1.5-122b", "ornith-1.5-397b", "qwen3.8-27b"], ["affine"]),
+        ("qwen-hybrid-affine", ["qwen36-35b-a3b", "qwen3.8-flash-next", "ornith-1.5-9b", "ornith-1.5-35b-a3b", "ornith-1.5-122b", "ornith-1.5-397b", "qwen3.8-27b", "ternary-bonsai-2-2b", "ternary-bonsai-2-27b"], ["affine", "prism-q2"]),
         ("gpt-oss-mxfp4", ["gpt-oss-20b", "gpt-oss-120b"], ["mxfp4"]),
-        ("minimax-affine", ["minimax-m2.7"], ["affine"])
+        ("minimax-affine", ["minimax-m2.7"], ["affine"]),
+        ("flint-affine", ["flint-40b-a2.5b"], ["affine"])
     ]
     var releases: [InferenceEngineRelease] = []
     for (id, architectures, layouts) in families {
@@ -146,7 +147,7 @@ do {
         try command("/usr/bin/strip", ["-x", executable.path])
         try command("/usr/bin/codesign", ["--force", "--sign", "-", "--timestamp=none", executable.path])
         try command("/usr/bin/codesign", ["--verify", "--strict", executable.path])
-        for name in ["TUFF_TUFFEngine.bundle", "TUFF_TUFFAppCore.bundle", "swift-transformers_Hub.bundle", "swift-crypto_Crypto.bundle", "swift-nio_NIOPosix.bundle"] {
+        for name in ["TUFF_TUFFEngine.bundle", "TUFF_TUFFAppCore.bundle", "swift-transformers_Hub.bundle", "swift-crypto_Crypto.bundle"] {
             try fm.copyItem(at: familyBinary.appendingPathComponent(name), to: stage.appendingPathComponent(name))
         }
         guard let enumeration = fm.enumerator(at: stage, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]) else { throw PackageFailure("cannot enumerate engine files") }

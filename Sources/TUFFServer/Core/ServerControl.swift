@@ -72,22 +72,9 @@ public struct ServerControl: Sendable {
         return difference == 0
     }
 
-    public static func status(provider: RoutedServerModelProvider,
+    public static func status(provider: HostRoutedModelProvider,
                               version: String) async -> ServerControlStatus {
-        let activity = await provider.scheduler.activity
-        let settings = provider.settings.current
-        return ServerControlStatus(
-            version: version,
-            mode: "router",
-            residentModel: activity.residentModel,
-            transition: activity.transition,
-            activeRequests: activity.activeRequests,
-            queuedRequests: activity.queuedRequests,
-            idleUnloadInSeconds: activity.idleUnloadDeadline.map {
-                max(0, Int($0.timeIntervalSinceNow.rounded(.up)))
-            },
-            defaultModel: settings.defaultModel,
-            unloadDelaySeconds: settings.unloadDelay.seconds)
+        await provider.controlStatus(version: version)
     }
 }
 

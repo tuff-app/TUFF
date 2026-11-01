@@ -107,7 +107,7 @@ package enum PackedExpertsLayoutReader {
                     manifestExpertsPerLayer: manifest.expertsPerLayer,
                     manifestExpertStride: manifest.expertStride,
                     manifestFileSizes: manifest.files.mapValues(\.size),
-                    layout: wire)
+                    layout: wire, densePrefixLayers: manifest.arch.family == "flint" ? 2 : 0)
             }
         } catch {
             throw ModelError.indexCorrupt(detail: "layout.json: \(error)")

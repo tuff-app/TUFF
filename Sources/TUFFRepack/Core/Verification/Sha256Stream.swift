@@ -50,6 +50,7 @@ struct Sha256Stream {
         defer { buf.deallocate() }
         var off: off_t = 0
         while true {
+            try Task.checkCancellation()
             let got = pread(fd, buf.baseAddress, tileBytes, off)
             if got < 0, errno == EINTR { continue }
             if got < 0 {

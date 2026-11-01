@@ -111,6 +111,7 @@ import TUFFRepackCore
             switch descriptor.family {
             case .gemma4: #expect(descriptor.chatDialect == .gemma)
             case .qwen36, .qwen4Exp: #expect(descriptor.chatDialect == .chatml)
+            case .flint: #expect(descriptor.chatDialect == .flint)
             case .gptOss: #expect(descriptor.chatDialect == .harmony)
             case .minimaxM2: #expect(descriptor.chatDialect == .minimax)
             }
@@ -173,6 +174,9 @@ import TUFFRepackCore
             "ornith-1.5-397b",
             "qwen3.8-27b",
             "gemma4-26b-heretic",
+            "flint-40b-a2.5b",
+            "ternary-bonsai-2-2b",
+            "ternary-bonsai-2-27b",
         ])
         #expect(AppModelInstallDescriptor.catalog.map(\.installDirectoryName) == [
             "gemma4-e2b.gturbo",
@@ -190,6 +194,9 @@ import TUFFRepackCore
             "ornith-397b.gturbo",
             "qwen38-27b.gturbo",
             "gemma4-heretic.gturbo",
+            "flint-40b.gturbo",
+            "bonsai-2-2b.gturbo",
+            "bonsai-2-27b.gturbo",
         ])
         #expect(AppModelInstallDescriptor.gemma4E4B.supportsImageInput)
         #expect(MacModelSettings.defaults(
@@ -653,20 +660,33 @@ import TUFFRepackCore
         #expect(model.loadState.isReady)
     }
 
+    /// A client that serves one model at a time cannot switch models under a
+    /// running chat. (A pooled client can; see AppModelPooledClientTests.)
     @MainActor
-    @Test func loadedModelBlocksSelectionWhileGenerating() {
-        let model = makeModel(
-            selectedDirectory: temporaryInstallPath("busy-gemma"),
-            selectedInstaller: MockModelInstallerClient(descriptor: .default),
-            otherDirectory: temporaryInstallPath("busy-qwen"),
-            otherInstaller: MockModelInstallerClient(descriptor: .qwen36))
-        let qwen = try! #require(model.installs.first { $0.descriptor == .qwen36 })
+    @Test func singleModelClientBlocksSelectionWhileGenerating() async throws {
+        let selectedDirectory = try makeCompleteModelInstall("busy-gemma")
+        let otherDirectory = try makeCompleteModelInstall("busy-qwen", stampedAs: .qwen36)
+        defer {
+            try? FileManager.default.removeItem(at: selectedDirectory)
+            try? FileManager.default.removeItem(at: otherDirectory)
+        }
+        let other = ModelInstallCoordinator(
+            descriptor: .qwen36, directoryURL: otherDirectory,
+            client: MockModelInstallerClient(descriptor: .qwen36))
+        let client = MockInferenceClient(response: "one two three", tokenDelayNanos: 200_000_000)
+        let model = makeAppModel(modelDirectory: selectedDirectory, client: client,
+                                 installer: MockModelInstallerClient(descriptor: .default),
+                                 otherInstalls: [other])
+        model.loadState = .ready(modelDirectory: selectedDirectory, loadSeconds: 1)
+        model.promptText = "go"
+        model.run()
+        #expect(model.isRunning)
 
-        model.runState = .running
-
-        #expect(!model.canSelectModel(qwen))
-        model.selectModel(qwen)
+        #expect(!model.canSelectModel(other))
+        model.selectModel(other)
         #expect(model.selectedModelID == AppModelInstallDescriptor.default.id)
+        model.cancel()
+        for _ in 0..<400 where model.isRunning { try? await Task.sleep(nanoseconds: 5_000_000) }
     }
 
     @MainActor

@@ -23,6 +23,7 @@ enum ResidentWriter {
         // 3. For each entry, copy the weight + scales + biases from the source
         // shards in tile-bounded pwrites.
         for e in plan.entries {
+            try Task.checkCancellation()
             try copyOne(srcTensor: e.sourceWeight, dstFd: fd, dstPath: plan.path,
                         dstOffset: e.fileOffset, sizeBytes: e.sourceWeight.sizeBytes,
                         transform: e.weightTransform,
@@ -44,7 +45,8 @@ enum ResidentWriter {
         try Posix.fsync(fd, path: plan.path)
         let size = try Posix.fileSize(fd: fd, path: plan.path)
         // 4. Hash the finished file by streaming.
-        let sha = try WriterCore.hashEntireFile(path: plan.path, size: size, audit: audit)
+        let sha = try WriterCore.hashEntireFile(path: plan.path, size: size, audit: audit,
+                                                cancellationCheck: { try Task.checkCancellation() })
         let rel = (plan.path as NSString).lastPathComponent
         let outFile = RepackAudit.OutputFile(relativePath: rel, size: size, sha256: sha)
         audit.outputFiles.append(outFile)

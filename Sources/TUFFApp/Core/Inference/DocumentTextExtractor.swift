@@ -152,6 +152,36 @@ public enum DocumentTextExtractor {
         return [Section(page: nil, text: content)]
     }
 
+    /// Like `extractSections(from:)` for bytes the caller already read through
+    /// a descriptor it verified; `name` only supplies the type.
+    public static func extractSections(data: Data, name: URL,
+                                       maximumPDFPages: Int = 1_000) throws -> [Section] {
+        let displayName = name.lastPathComponent
+        guard canExtract(from: name) else {
+            throw DocumentExtractionError.unsupportedType(name.pathExtension.lowercased())
+        }
+        if name.pathExtension.lowercased() == "pdf" {
+            guard let document = PDFDocument(data: data) else {
+                throw DocumentExtractionError.unreadable(displayName)
+            }
+            var sections: [Section] = []
+            for index in 0..<min(document.pageCount, maximumPDFPages) {
+                guard let content = document.page(at: index)?.string?
+                    .trimmingCharacters(in: .whitespacesAndNewlines), !content.isEmpty else { continue }
+                sections.append(Section(page: index + 1, text: content))
+            }
+            guard !sections.isEmpty else { throw DocumentExtractionError.empty(displayName) }
+            return sections
+        }
+        guard let content = String(data: data, encoding: .utf8) else {
+            throw DocumentExtractionError.unreadable(displayName)
+        }
+        guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw DocumentExtractionError.empty(displayName)
+        }
+        return [Section(page: nil, text: content)]
+    }
+
     /// The document as it is added to a prompt. The delimiters are plain text so
     /// every model reads them the same way, and the name is kept so the answer
     /// can refer to the file.

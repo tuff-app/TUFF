@@ -10,6 +10,7 @@ public enum ModelFamily: String, Sendable, Equatable {
     case gptOss = "gpt-oss"
     case minimaxM2 = "minimax-m2"
     case qwen4Exp = "qwen4-exp"
+    case flint = "flint"
 
     /// Whether this family's image input runs Qwen's vision tower: 27 blocks
     /// at hidden 1152, patch 16, spatial merge 2, and the `<|vision_start|>`
@@ -20,7 +21,7 @@ public enum ModelFamily: String, Sendable, Equatable {
     public var usesQwenVisionTower: Bool {
         switch self {
         case .qwen36, .qwen4Exp: true
-        case .gemma4, .gptOss, .minimaxM2: false
+        case .gemma4, .gptOss, .minimaxM2, .flint: false
         }
     }
 
@@ -28,7 +29,7 @@ public enum ModelFamily: String, Sendable, Equatable {
     public var acceptsImageInput: Bool {
         switch self {
         case .gemma4, .qwen36, .qwen4Exp: true
-        case .gptOss, .minimaxM2: false
+        case .gptOss, .minimaxM2, .flint: false
         }
     }
 }
@@ -48,6 +49,9 @@ public enum ModelVariant: String, Sendable, Equatable {
     case ornith15_122B = "ornith-1.5-122b"
     case ornith15_397B = "ornith-1.5-397b"
     case qwen38_27B = "qwen3.8-27b"
+    case bonsai2_2B = "ternary-bonsai-2-2b"
+    case bonsai2_27B = "ternary-bonsai-2-27b"
+    case flint40B = "flint-40b-a2.5b"
 
     package static func legacyDefault(for family: ModelFamily) -> ModelVariant {
         switch family {
@@ -56,6 +60,7 @@ public enum ModelVariant: String, Sendable, Equatable {
         case .gptOss: return .gptOss_20B
         case .minimaxM2: return .minimaxM27
         case .qwen4Exp: return .qwen38FlashNext
+        case .flint: return .flint40B
         }
     }
 }
@@ -615,14 +620,15 @@ public struct ArchConfig: Sendable, Equatable {
     /// Qwen3.5 block contract used by the new Qwen and Ornith checkpoints.
     private static func qwen35Contract(variant: ModelVariant, hidden: Int, layers: Int,
                                        intermediate: Int, heads: Int, kvHeads: Int,
-                                       valueHeads: Int, experts: Int = 0, topK: Int = 0) -> ArchConfig {
+                                       valueHeads: Int, experts: Int = 0, topK: Int = 0,
+                                       tied: Bool = false) -> ArchConfig {
         ArchConfig(hiddenSize: hidden, intermediateSize: intermediate,
             moeIntermediateSize: experts > 0 ? intermediate : 0,
             numHeads: heads, numKVHeads: kvHeads, numFullKVHeads: kvHeads,
             headDim: 256, fullHeadDim: 256, vocabSize: 248_320, slidingWindow: 0,
             finalLogitSoftcap: 0, ropeTheta: 10_000_000, fullRopeTheta: 10_000_000,
             partialRotaryFactor: 0.25, numLayers: layers, numExperts: experts,
-            topKExperts: topK, tieWordEmbeddings: false, attentionKEqV: false,
+            topKExperts: topK, tieWordEmbeddings: tied, attentionKEqV: false,
             fullAttentionLayerMask: qwen4ExpLayerMask(count: layers, interval: 4),
             hiddenActivation: "silu", family: .qwen36, variant: variant,
             feedForwardKind: experts > 0 ? .mixtureOfExperts : .dense,
@@ -647,6 +653,12 @@ public struct ArchConfig: Sendable, Equatable {
         hidden: 4096, layers: 60, intermediate: 1024, heads: 32, kvHeads: 2, valueHeads: 64,
         experts: 512, topK: 10)
     public static let qwen38_27B = qwen35Contract(variant: .qwen38_27B,
+        hidden: 5120, layers: 64, intermediate: 17408, heads: 24, kvHeads: 4, valueHeads: 48)
+    /// The publisher's pinned 2B text backbone; Q2/Hadamard execution and
+    /// model installation require additional validation and are not implied.
+    public static let bonsai2_2B = qwen35Contract(variant: .bonsai2_2B,
+        hidden: 2048, layers: 24, intermediate: 6144, heads: 8, kvHeads: 2, valueHeads: 16, tied: true)
+    public static let bonsai2_27B = qwen35Contract(variant: .bonsai2_27B,
         hidden: 5120, layers: 64, intermediate: 17408, heads: 24, kvHeads: 4, valueHeads: 48)
 
     /// MiniMax M2.7 4-bit MLX checkpoint. All decoder layers use full GQA,
@@ -854,6 +866,21 @@ public struct ArchConfig: Sendable, Equatable {
         (0..<count).map { $0.isMultiple(of: 2) ? 0 : 1 }
     }
 
+    /// Recursive Flint uses two dense 6144-wide MLPs followed by 47 routed
+    /// layers with a 1024-wide shared expert and 512-wide routed experts.
+    public static let flint40B = ArchConfig(
+        hiddenSize: 2048, intermediateSize: 1024, moeIntermediateSize: 512,
+        numHeads: 32, numKVHeads: 4, numFullKVHeads: 4, headDim: 128, fullHeadDim: 128,
+        vocabSize: 150144, slidingWindow: 513, finalLogitSoftcap: 0,
+        ropeTheta: 10000, fullRopeTheta: 10000, partialRotaryFactor: 1,
+        numLayers: 49, numExperts: 256, topKExperts: 6, tieWordEmbeddings: false,
+        attentionKEqV: false,
+        fullAttentionLayerMask: (0..<49).map { $0 < 2 || $0 % 4 == 1 || $0 == 48 ? 1 : 0 },
+        hiddenActivation: "silu", family: .flint, variant: .flint40B,
+        feedForwardKind: .mixtureOfExperts, attentionScale: 1 / Double(128).squareRoot(),
+        embeddingScaledBySqrtHidden: false, routerScaled: false, ffnSandwichNorms: false,
+        sharedExpertGated: false, ropeNeoxSubdim: true, attentionSinks: true)
+
     /// Variant registry used by both v1.1 manifests and the legacy-family
     /// resolver. Family alone is intentionally not a registry key because
     /// multiple checkpoints can share prompt behavior without sharing shapes.
@@ -869,6 +896,9 @@ public struct ArchConfig: Sendable, Equatable {
         .ornith15_122B: .ornith15_122B,
         .ornith15_397B: .ornith15_397B,
         .qwen38_27B: .qwen38_27B,
+        .bonsai2_2B: .bonsai2_2B,
+        .bonsai2_27B: .bonsai2_27B,
+        .flint40B: .flint40B,
         .gptOss_20B: .gptOss_20B,
         .gptOss_120B: .gptOss_120B,
         .minimaxM27: .minimaxM27,
@@ -882,6 +912,8 @@ public struct ArchConfig: Sendable, Equatable {
         return all.filter { $0.value.family == .gptOss }
 #elseif TUFF_ENGINE_MINIMAX
         return all.filter { $0.value.family == .minimaxM2 }
+#elseif TUFF_ENGINE_FLINT
+        return all.filter { $0.value.family == .flint }
 #else
         return all
 #endif
@@ -961,7 +993,7 @@ public struct ArchConfig: Sendable, Equatable {
     public var hasPerLayerInputs: Bool { hiddenSizePerLayerInput > 0 }
     public var hasSharedExpert: Bool {
         feedForwardKind == .dense || family == .gemma4 || family == .qwen36
-            || family == .qwen4Exp
+            || family == .qwen4Exp || family == .flint
     }
     /// Whether norm weights are stored centered at zero and applied as
     /// `1 + w`, rather than centered at one and applied as `w`.
@@ -991,6 +1023,7 @@ public struct ArchConfig: Sendable, Equatable {
 
     /// The feed-forward width of one layer.
     public func ffnIntermediateSize(layer: Int) -> Int {
+        if family == .flint && layer < 2 { return 6144 }
         guard let first = doubleWideFFNFromLayer, layer >= first else {
             return intermediateSize
         }
@@ -1000,7 +1033,7 @@ public struct ArchConfig: Sendable, Equatable {
     /// The widest feed-forward block in the model. Scratch buffers are shared
     /// across layers, so they are sized for the widest one.
     public var maxFFNIntermediateSize: Int {
-        doubleWideFFNFromLayer == nil ? intermediateSize : intermediateSize * 2
+        family == .flint ? 6144 : (doubleWideFFNFromLayer == nil ? intermediateSize : intermediateSize * 2)
     }
     public var firstKVSharedLayer: Int { numLayers - numKVSharedLayers }
     public func layerSharesKV(_ layer: Int) -> Bool {

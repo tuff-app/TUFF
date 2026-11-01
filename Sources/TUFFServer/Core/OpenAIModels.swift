@@ -522,6 +522,11 @@ public enum ServerRequestError: Error, Codable, Equatable, Sendable {
     /// The model would fit on its own, but another TUFF process holds enough
     /// memory that loading it now would overcommit the Mac.
     case modelMemoryBusy(String)
+    /// The shared serving host cannot be reached, or went away mid-request.
+    case hostUnavailable(String)
+    /// The model is held by another client in a configuration this request
+    /// cannot use, and the holder is busy.
+    case modelBusy(String)
 
     public var envelope: OpenAIErrorEnvelope {
         switch self {
@@ -529,6 +534,11 @@ public enum ServerRequestError: Error, Codable, Equatable, Sendable {
             OpenAIErrorEnvelope(message: message, param: "model", code: "model_not_found")
         case .modelMemoryBusy(let message):
             OpenAIErrorEnvelope(message: message, code: "model_memory_busy")
+        case .hostUnavailable(let message):
+            OpenAIErrorEnvelope(message: message, code: "inference_host_unavailable",
+                                type: "server_error")
+        case .modelBusy(let message):
+            OpenAIErrorEnvelope(message: message, code: "model_busy")
         case .invalid(let message, let param, let code):
             OpenAIErrorEnvelope(message: message, param: param, code: code)
         case .unknownModel:

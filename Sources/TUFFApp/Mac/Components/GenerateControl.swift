@@ -6,13 +6,23 @@ struct GenerateControl: View {
     let model: AppModel
     private let controlHeight: CGFloat = 34
 
+    enum Mode: Equatable { case running, loading, otherChatRunning, send }
+
+    static func mode(selectedRunning: Bool, loading: Bool, anyRunning: Bool, canSubmit: Bool) -> Mode {
+        if selectedRunning { return .running }
+        if loading { return .loading }
+        if anyRunning && !canSubmit { return .otherChatRunning }
+        return .send
+    }
+
     var body: some View {
-        if model.isRunning {
-            runningPill
-        } else if model.isLoadingForSubmission {
-            loadingPill
-        } else {
-            generateButton
+        switch Self.mode(selectedRunning: model.isSelectedConversationRunning,
+                         loading: model.isLoadingForSubmission,
+                         anyRunning: model.isRunning, canSubmit: model.canSubmit) {
+        case .running: runningPill
+        case .loading: loadingPill
+        case .otherChatRunning: anotherChatRunningPill
+        case .send: generateButton
         }
     }
 
@@ -62,6 +72,19 @@ struct GenerateControl: View {
         .help("Cancel loading and keep this draft")
         .accessibilityLabel("Cancel model load")
         .accessibilityValue(model.presentation.label)
+    }
+
+    private var anotherChatRunningPill: some View {
+        HStack(spacing: 9) {
+            ProgressView().controlSize(.small)
+            Text("Another chat is running")
+                .appFont(.callout.weight(.medium))
+        }
+        .padding(.horizontal, 16)
+        .frame(minWidth: 170, minHeight: controlHeight)
+        .foregroundStyle(.secondary)
+        .background(.quaternary, in: .capsule)
+        .accessibilityLabel("Another chat is generating")
     }
 
     private var runningPill: some View {

@@ -21,6 +21,9 @@ package typealias ModelError = TUFFModelMetadata.ModelError
 /// `buffer` reference is shared across many `TensorView` instances and
 /// addressed by byte offsets.
 public struct TensorView: @unchecked Sendable {
+    /// Resident index name, when the view came from a named resident tensor.
+    /// Used to resolve per-projection metadata such as Prism sign vectors.
+    public let name: String?
     public let buffer: MTLBuffer
     public let offset: UInt64
     public let length: UInt64
@@ -37,7 +40,8 @@ public struct TensorView: @unchecked Sendable {
                 scaleOffset: UInt64, scaleLength: UInt64,
                 biasOffset: UInt64, biasLength: UInt64,
                 shape: (UInt32, UInt32, UInt32, UInt32),
-                dtype: UInt8) {
+                dtype: UInt8, name: String? = nil) {
+        self.name = name
         self.buffer = buffer
         self.offset = offset
         self.length = length

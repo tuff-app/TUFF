@@ -102,6 +102,8 @@ public enum MetalKernelGroup: String, CaseIterable, Sendable, Comparable {
     case linearAttention = "gdn"
     case sparseAttention = "qsa"
     case residualStreams = "streams"
+    case prismHadamard = "prism"
+    case flint
     case vision
 
     /// Modules whose kernels this group provides, in compile order.
@@ -118,6 +120,8 @@ public enum MetalKernelGroup: String, CaseIterable, Sendable, Comparable {
         case .linearAttention: ["gdn"]
         case .sparseAttention: ["qsa"]
         case .residualStreams: ["hyper_connection", "ngram_ple"]
+        case .prismHadamard: ["prism_hadamard", "prism_affine2_gemm"]
+        case .flint: ["flint"]
         case .vision: ["vision"]
         }
     }
@@ -127,6 +131,8 @@ public enum MetalKernelGroup: String, CaseIterable, Sendable, Comparable {
         switch self {
         // gdn's input projection reuses dequant_int4_gemv_simd_body.
         case .linearAttention: ["dequant_int4"]
+        // Flint's batched expert kernels reuse the decode expert row helpers.
+        case .flint: ["moe"]
         default: []
         }
     }
@@ -147,6 +153,10 @@ public enum MetalKernelGroup: String, CaseIterable, Sendable, Comparable {
             return groups
         }
         if config.numExperts > 0 { groups.insert(.mixtureOfExperts) }
+        if config.family == .flint { groups.insert(.flint) }
+        if config.variant == .bonsai2_2B || config.variant == .bonsai2_27B {
+            groups.insert(.prismHadamard)
+        }
         if sharedExpertWeightBits == 8 || config.sharedExpertGated { groups.insert(.int8) }
         if config.hasLinearAttentionLayers { groups.insert(.linearAttention) }
         if config.attentionIndexer.isEnabled,
@@ -387,6 +397,9 @@ public final class MetalContext: @unchecked Sendable {
         "per_layer_embedding",
         "hyper_connection",
         "ngram_ple",
+        "prism_hadamard",
+        "prism_affine2_gemm",
+        "flint",
         "fused",
         "prefill",
         "gdn",
@@ -410,6 +423,9 @@ public final class MetalContext: @unchecked Sendable {
         "hyper_connection": "Metal/Primitives",
         "ngram_ple": "Metal/Primitives",
         "per_layer_embedding": "Metal/Primitives",
+        "prism_hadamard": "Metal/Primitives",
+        "prism_affine2_gemm": "Metal/Primitives",
+        "flint": "Metal/Flint",
         "rmsnorm": "Metal/Primitives",
         "rope": "Metal/Primitives",
         "tensorops": "Metal/TensorCore",
@@ -612,6 +628,7 @@ public final class MetalContext: @unchecked Sendable {
         let elapsed = ContinuousClock.now - started
         pipelineCacheLock.lock()
         pipelineCache[key] = p
+        GPUOpProfiler.registerPipeline(p, name: name)
         pipelineSeconds += Double(elapsed.components.seconds)
             + Double(elapsed.components.attoseconds) / 1e18
         pipelineCacheLock.unlock()

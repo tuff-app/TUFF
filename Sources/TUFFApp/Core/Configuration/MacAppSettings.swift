@@ -192,6 +192,10 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     /// sandbox with no network. Off until the person turns it on.
     var runFilesInSandbox: Bool = false
     var fileSearchEnabled: Bool = false
+    var codingWriteEnabled: Bool = false
+    var codingCommandEnabled: Bool = false
+    var codingNetworkEnabled: Bool = false
+    var codingFolderID: String? = nil
     var searchProvider: AppSearchProviderKind = .duckDuckGo
 
     // Source compatibility for the v1 app and focused tests. These map only to
@@ -253,6 +257,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         case runWebInSandbox
         case runFilesInSandbox
         case fileSearchEnabled
+        case codingWriteEnabled, codingCommandEnabled, codingNetworkEnabled, codingFolderID
         case searchProvider
     }
 
@@ -356,6 +361,10 @@ struct MacAppSettings: Codable, Equatable, Sendable {
                 Bool.self, forKey: .webSearchEnabled) ?? false
             fileSearchEnabled = try container.decodeIfPresent(
                 Bool.self, forKey: .fileSearchEnabled) ?? false
+            codingWriteEnabled = try container.decodeIfPresent(Bool.self, forKey: .codingWriteEnabled) ?? false
+            codingCommandEnabled = try container.decodeIfPresent(Bool.self, forKey: .codingCommandEnabled) ?? false
+            codingNetworkEnabled = try container.decodeIfPresent(Bool.self, forKey: .codingNetworkEnabled) ?? false
+            codingFolderID = try container.decodeIfPresent(String.self, forKey: .codingFolderID)
             searchProvider = (try? container.decodeIfPresent(
                 AppSearchProviderKind.self, forKey: .searchProvider)) ?? .duckDuckGo
             return

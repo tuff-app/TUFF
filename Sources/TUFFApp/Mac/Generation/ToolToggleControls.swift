@@ -108,6 +108,23 @@ struct FolderAccessPanel: View {
                     }
                 }
             }
+            if !model.toolStore.folders.isEmpty {
+                Divider()
+                Picker("Workspace", selection: $model.codingFolderID) {
+                    Text("None").tag("")
+                    ForEach(model.toolStore.folders) { folder in
+                        Text(folder.displayName).tag(folder.id.uuidString)
+                    }
+                }
+                Toggle("Write and edit files", isOn: $model.codingWriteEnabled)
+                    .disabled(!model.fileSearchEnabled)
+                Toggle("Run commands", isOn: $model.codingCommandEnabled)
+                    .disabled(!model.fileSearchEnabled)
+                Toggle("Allow command network access", isOn: $model.codingNetworkEnabled)
+                    .disabled(!model.fileSearchEnabled || !model.codingCommandEnabled)
+                Text("Choose a workspace to let the model list and read its files directly, including hidden files. Commands are confined to the workspace. Write access requires Write and edit files; network access is off unless enabled. Search can use all added folders.")
+                    .appFont(.caption).foregroundStyle(.secondary)
+            }
             HStack {
                 Button("Add Folder…", action: addFolders)
                 Spacer()
@@ -124,6 +141,8 @@ struct FolderAccessPanel: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+        .disabled(model.isRunning)
+        .help(model.isRunning ? "Folder and coding permissions can be changed after the current answer finishes." : "")
     }
 
     private func folderRow(_ folder: AppSearchFolder) -> some View {

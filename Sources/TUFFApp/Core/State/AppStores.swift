@@ -15,14 +15,107 @@ public enum AppRunState: Equatable, Sendable {
 @MainActor
 @Observable
 public final class AppConversationStore {
-    public var promptText = ""
-    public var imageAttachments: [AppImageAttachment] = []
-    public var documentAttachments: [AppDocumentAttachment] = []
-    public var imageAttachmentError: String?
-    var addingImagesCount = 0
-    public var outputPromptText = ""
-    public var outputImageAttachments: [AppImageAttachment] = []
-    public var outputDocumentAttachments: [AppDocumentAttachment] = []
+    private struct DraftState {
+        var promptText = ""
+        var images: [AppImageAttachment] = []
+        var documents: [AppDocumentAttachment] = []
+        var imageError: String?
+        var documentNotice: String?
+        var addingImagesCount = 0
+        var isEmpty: Bool {
+            promptText.isEmpty && images.isEmpty && documents.isEmpty
+                && imageError == nil && documentNotice == nil
+        }
+    }
+    private var draftByConversation: [UUID: DraftState] = [:]
+    private var unscopedDraft = DraftState()
+    private var draftState: DraftState {
+        get {
+            if let selectedConversationID {
+                return draftByConversation[selectedConversationID] ?? DraftState()
+            }
+            return unscopedDraft
+        }
+        set {
+            if let selectedConversationID { draftByConversation[selectedConversationID] = newValue }
+            else { unscopedDraft = newValue }
+        }
+    }
+    public var promptText: String {
+        get { draftState.promptText }
+        set { var state = draftState; state.promptText = newValue; draftState = state }
+    }
+    public var imageAttachments: [AppImageAttachment] {
+        get { draftState.images }
+        set { var state = draftState; state.images = newValue; draftState = state }
+    }
+    public var documentAttachments: [AppDocumentAttachment] {
+        get { draftState.documents }
+        set { var state = draftState; state.documents = newValue; draftState = state }
+    }
+    public var imageAttachmentError: String? {
+        get { draftState.imageError }
+        set { var state = draftState; state.imageError = newValue; draftState = state }
+    }
+    public var documentAttachmentNotice: String? {
+        get { draftState.documentNotice }
+        set { var state = draftState; state.documentNotice = newValue; draftState = state }
+    }
+    var addingImagesCount: Int {
+        get { draftState.addingImagesCount }
+        set { var state = draftState; state.addingImagesCount = newValue; draftState = state }
+    }
+    private struct OutputState {
+        var promptText = ""
+        var assistantPrefix = ""
+        var images: [AppImageAttachment] = []
+        var documents: [AppDocumentAttachment] = []
+        var text = ""
+        var thinking = ""
+        var toolActivities: [AppToolActivity] = []
+        var toolRounds: [AppToolRound] = []
+        var sources: [AppSource] = []
+        var capabilities: AppChatCapabilities = .none
+        var turnIsRecorded = false
+    }
+
+    private var outputByConversation: [UUID: OutputState] = [:]
+    private var unscopedOutput = OutputState()
+    private var outputWriteTargetID: UUID?
+    private var sessionIDs: [UUID: UUID] = [:]
+
+    private var outputState: OutputState {
+        get {
+            if let id = outputWriteTargetID ?? selectedConversationID {
+                return outputByConversation[id] ?? OutputState()
+            }
+            return unscopedOutput
+        }
+        set {
+            if let id = outputWriteTargetID ?? selectedConversationID {
+                outputByConversation[id] = newValue
+            } else {
+                unscopedOutput = newValue
+            }
+        }
+    }
+
+    public var outputPromptText: String {
+        get { outputState.promptText }
+        set { var state = outputState; state.promptText = newValue; outputState = state }
+    }
+    public var outputAssistantPrefix: String {
+        get { outputState.assistantPrefix }
+        set { var state = outputState; state.assistantPrefix = newValue; outputState = state }
+    }
+    public var outputImageAttachments: [AppImageAttachment] {
+        get { outputState.images }
+        set { var state = outputState; state.images = newValue; outputState = state }
+    }
+    public var outputDocumentAttachments: [AppDocumentAttachment] {
+        get { outputState.documents }
+        set { var state = outputState; state.documents = newValue; outputState = state }
+    }
     /// Hard links this session's runs staged so the transcript keeps showing
     /// what was sent. Released when the conversation itself moves on, not when
     /// a message is folded into history: a chat whose images could not be saved
@@ -32,15 +125,36 @@ public final class AppConversationStore {
     /// `conversation`. The slot is kept afterwards — the copy commands and the
     /// diagnostics still describe the last run — so the transcript needs to be
     /// told, or it draws the same exchange twice.
-    public internal(set) var outputTurnIsRecorded = false
-    public var outputText = ""
-    public var outputThinkingText = ""
+    public internal(set) var outputTurnIsRecorded: Bool {
+        get { outputState.turnIsRecorded }
+        set { var state = outputState; state.turnIsRecorded = newValue; outputState = state }
+    }
+    public var outputText: String {
+        get { outputState.text }
+        set { var state = outputState; state.text = newValue; outputState = state }
+    }
+    public var outputThinkingText: String {
+        get { outputState.thinking }
+        set { var state = outputState; state.thinking = newValue; outputState = state }
+    }
     /// Tool work for the answer in the output slot: what is running or ran,
     /// the finished rounds, and the sources found so far.
-    public var outputToolActivities: [AppToolActivity] = []
-    public var outputToolRounds: [AppToolRound] = []
-    public var outputSources: [AppSource] = []
-    public var outputCapabilities: AppChatCapabilities = .none
+    public var outputToolActivities: [AppToolActivity] {
+        get { outputState.toolActivities }
+        set { var state = outputState; state.toolActivities = newValue; outputState = state }
+    }
+    public var outputToolRounds: [AppToolRound] {
+        get { outputState.toolRounds }
+        set { var state = outputState; state.toolRounds = newValue; outputState = state }
+    }
+    public var outputSources: [AppSource] {
+        get { outputState.sources }
+        set { var state = outputState; state.sources = newValue; outputState = state }
+    }
+    public var outputCapabilities: AppChatCapabilities {
+        get { outputState.capabilities }
+        set { var state = outputState; state.capabilities = newValue; outputState = state }
+    }
     public var conversation: [AppChatTurn] = []
     public var runIdentity = 0
     public private(set) var conversations: [AppConversationRecord] = []
@@ -85,6 +199,10 @@ public final class AppConversationStore {
 
     public func startNewConversation(modelID: String, now: Date = Date()) {
         let record = AppConversationRecord(modelID: modelID, createdAt: now, updatedAt: now)
+        if selectedConversationID == nil, !unscopedDraft.isEmpty {
+            draftByConversation[record.id] = unscopedDraft
+            unscopedDraft = DraftState()
+        }
         discardEmptyConversations(keeping: record.id)
         conversations.insert(record, at: 0)
         selectedConversationID = record.id
@@ -128,14 +246,6 @@ public final class AppConversationStore {
         guard conversations.contains(where: { $0.id == id }) else { return }
         discardEmptyConversations(keeping: id)
         selectedConversationID = id
-        clearPendingTurn()
-        outputPromptText = ""
-        outputImageAttachments = []
-        outputDocumentAttachments = []
-        outputText = ""
-        outputThinkingText = ""
-        clearOutputTools()
-        outputTurnIsRecorded = false
         restoreSelectedTurns()
         persistArchive()
     }
@@ -186,6 +296,9 @@ public final class AppConversationStore {
     public func deleteConversation(id: UUID) {
         guard let index = conversations.firstIndex(where: { $0.id == id }) else { return }
         conversations.remove(at: index)
+        outputByConversation.removeValue(forKey: id)
+        draftByConversation.removeValue(forKey: id)
+        pendingTurns.removeValue(forKey: id)
         if selectedConversationID == id {
             selectedConversationID = conversations.first?.id
             outputPromptText = ""
@@ -218,7 +331,12 @@ public final class AppConversationStore {
 
     /// The turn that has been sent but not yet answered, and the chat it went
     /// into. Nil whenever no run is in flight.
-    private var pendingTurn: (conversationID: UUID, turnID: UUID)?
+    private struct PendingTurn {
+        let turnID: UUID
+        let attachments: [AppConversationAttachment]
+        let stagedAttachments: [AppImageAttachment]
+    }
+    private var pendingTurns: [UUID: PendingTurn] = [:]
 
     /// Saves a message the moment it is sent, before a single token comes back.
     ///
@@ -245,8 +363,25 @@ public final class AppConversationStore {
         } else {
             let record = AppConversationRecord(
                 modelID: modelID, createdAt: now, updatedAt: now)
+            // The caller filled the output slot before the chat existed.
+            // Carry that slot to the new chat instead of dropping it with the
+            // slot of whichever chat was selected.
+            // The composer draft (text, files, images) travels the same way:
+            // what was composed is what is being sent.
+            let pending = outputState
+            let draft: DraftState
+            if let previous = selectedConversationID {
+                outputByConversation.removeValue(forKey: previous)
+                draft = draftByConversation.removeValue(forKey: previous) ?? DraftState()
+            } else {
+                unscopedOutput = OutputState()
+                draft = unscopedDraft
+                unscopedDraft = DraftState()
+            }
             conversations.insert(record, at: 0)
             selectedConversationID = record.id
+            outputByConversation[record.id] = pending
+            draftByConversation[record.id] = draft
             index = 0
         }
 
@@ -277,16 +412,14 @@ public final class AppConversationStore {
         }
         conversations[index].updatedAt = now
         moveConversationToFront(at: index)
-        pendingTurn = (conversationID: conversations[0].id, turnID: turn.id)
-        pendingImageAttachments = durableAttachments
-        pendingStagedAttachments = attachments
+        let conversationID = conversations.first {
+            $0.turns.contains(where: { $0.id == turn.id })
+        }?.id ?? conversations[0].id
+        pendingTurns[conversationID] = PendingTurn(
+            turnID: turn.id, attachments: durableAttachments,
+            stagedAttachments: attachments)
         persistArchive()
     }
-
-    /// The images `beginTurn` saved, kept so `completeTurn` can hand the
-    /// transcript the durable copies rather than the run's staged links.
-    private var pendingImageAttachments: [AppConversationAttachment] = []
-    private var pendingStagedAttachments: [AppImageAttachment] = []
 
     /// Files the answer, whatever the run produced, and folds the turn into
     /// history.
@@ -314,9 +447,10 @@ public final class AppConversationStore {
         sources: [AppSource] = [],
         now: Date = Date()
     ) {
-        guard let pending = pendingTurn,
+        let targetID = outputWriteTargetID ?? selectedConversationID
+        guard let targetID, let pending = pendingTurns[targetID],
               let index = conversations.firstIndex(
-                where: { $0.id == pending.conversationID }),
+                where: { $0.id == targetID }),
               let turnIndex = conversations[index].turns.firstIndex(
                 where: { $0.id == pending.turnID }) else { return }
         conversations[index].turns[turnIndex].response = response
@@ -330,22 +464,36 @@ public final class AppConversationStore {
         // those, and the turn has to keep showing — and re-sending — its images
         // long after that. When nothing durable was written, the staged copies
         // are all there is, which is the same reach the display had before.
-        var recorded = conversations.first { $0.id == pending.conversationID }?
+        var recorded = conversations.first { $0.id == targetID }?
             .turns.first { $0.id == pending.turnID }?.chatTurn
             ?? AppChatTurn(prompt: "", response: response)
-        let resolved = pendingImageAttachments.compactMap { try? repository?.resolve($0) }
-        recorded.images = resolved.count == pendingStagedAttachments.count
-            ? resolved : pendingStagedAttachments
-        conversation.append(recorded)
+        let resolved = pending.attachments.compactMap { try? repository?.resolve($0) }
+        recorded.images = resolved.count == pending.stagedAttachments.count
+            ? resolved : pending.stagedAttachments
+        if selectedConversationID == targetID { conversation.append(recorded) }
         outputTurnIsRecorded = true
-        clearPendingTurn()
+        clearPendingTurn(conversationID: targetID)
         persistArchive()
     }
 
-    private func clearPendingTurn() {
-        pendingTurn = nil
-        pendingImageAttachments = []
-        pendingStagedAttachments = []
+    private func clearPendingTurn(conversationID: UUID? = nil) {
+        let id = conversationID ?? outputWriteTargetID ?? selectedConversationID
+        if let id { pendingTurns.removeValue(forKey: id) }
+    }
+
+    func beginOutputUpdate(for conversationID: UUID?) { outputWriteTargetID = conversationID }
+    func endOutputUpdate() { outputWriteTargetID = nil }
+    public func sessionID(for conversationID: UUID) -> UUID {
+        if let existing = sessionIDs[conversationID] { return existing }
+        let id = UUID()
+        sessionIDs[conversationID] = id
+        return id
+    }
+
+    func existingSessionID(for conversationID: UUID) -> UUID? { sessionIDs[conversationID] }
+    var existingSessionIDs: [UUID: UUID] { sessionIDs }
+    func forgetSessionID(_ sessionID: UUID, for conversationID: UUID) {
+        if sessionIDs[conversationID] == sessionID { sessionIDs.removeValue(forKey: conversationID) }
     }
 
     /// A whole exchange at once, for a caller that already has the answer.
@@ -380,10 +528,16 @@ public final class AppConversationStore {
     /// use buries the real chats under them. A chat with a turn in it is never
     /// touched.
     private func discardEmptyConversations(keeping keptID: UUID?) {
-        let discarded = conversations.filter { $0.turns.isEmpty && $0.id != keptID }
+        let discarded = conversations.filter {
+            $0.turns.isEmpty && $0.id != keptID
+                && (draftByConversation[$0.id]?.isEmpty ?? true)
+        }
         guard !discarded.isEmpty else { return }
         conversations.removeAll { $0.turns.isEmpty && $0.id != keptID }
         for record in discarded {
+            outputByConversation.removeValue(forKey: record.id)
+            draftByConversation.removeValue(forKey: record.id)
+            pendingTurns.removeValue(forKey: record.id)
             // An empty chat has recorded no turn, so it can own no attachment.
             // Asking anyway costs nothing and cannot strand one.
             try? repository?.deleteAttachments(conversationID: record.id)
@@ -399,7 +553,11 @@ public final class AppConversationStore {
             conversation = []
             return
         }
-        conversation = record.turns.map { persisted in
+        // A pending turn is already displayed by this chat's live output
+        // slot. Restoring it as history duplicates it on a switch back and
+        // appends another copy when the answer finishes.
+        let pendingID = pendingTurns[record.id]?.turnID
+        conversation = record.turns.filter { $0.id != pendingID }.map { persisted in
             var turn = persisted.chatTurn
             turn.images = persisted.attachments.compactMap {
                 try? repository?.resolve($0)
@@ -487,6 +645,10 @@ public final class AppSettingsStore {
     public var runWebInSandbox = false
     public var runFilesInSandbox = false
     public var fileSearchEnabled = false
+    public var codingWriteEnabled = false
+    public var codingCommandEnabled = false
+    public var codingNetworkEnabled = false
+    public var codingFolderID: String?
     public var searchProvider: AppSearchProviderKind = .duckDuckGo
     /// App-wide escape hatch from the hardware and memory gates.
     public var bypassModelRestrictions = false

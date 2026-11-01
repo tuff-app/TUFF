@@ -41,7 +41,8 @@ struct InferenceEngineSettingsView: View {
     private func name(_ id: String) -> String {
         switch id {
         case "gemma-affine": "Gemma"
-        case "qwen-hybrid-affine": "Qwen / Ornith"
+        case "qwen-hybrid-affine": "Qwen / Ornith / Bonsai"
+        case "flint-affine": "Flint"
         case "gpt-oss-mxfp4": "GPT-OSS (Legacy)"
         case "minimax-affine": "MiniMax (Legacy)"
         default: id

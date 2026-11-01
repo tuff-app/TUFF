@@ -33,6 +33,17 @@ import Metal
         let worksheetT32UpperBound = Int(4.9 * 1_048_576.0)
         #expect(layout.totalPersistentBytes <= worksheetT32UpperBound)
     }
+    @Test func prismScalarScratchUsesFloatPrecision() throws {
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        for config in [ArchConfig.bonsai2_2B, .bonsai2_27B] {
+            let layout = PrefillChunkScratchLayout(config: config, chunkTokens: 32)
+            let scratch = try PrefillChunkScratchBuffers.allocate(device: device, layout: layout)
+            #expect(layout.gdnScalarElementBytes == MemoryLayout<Float>.stride)
+            #expect(scratch.gdnA.length == layout.gdnAElements * MemoryLayout<Float>.stride)
+            #expect(scratch.gdnB.length == layout.gdnBElements * MemoryLayout<Float>.stride)
+        }
+    }
+
 
     @Test func layoutClampsChunkSizeToRuntimeBounds() {
         #expect(PrefillChunkScratchLayout(config: .gemma4_26B_A4B, chunkTokens: 0).chunkTokens == 1)

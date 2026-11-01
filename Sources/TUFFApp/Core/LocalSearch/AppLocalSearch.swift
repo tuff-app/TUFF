@@ -478,8 +478,7 @@ public struct AppLocalIndexer: Sendable {
                 if let reader {
                     passages = try await reader.passages(for: file, in: folder, limits: limits)
                 } else {
-                    passages = try Self.passages(for: URL(fileURLWithPath: file.path),
-                                                 size: file.size, limits: limits)
+                    passages = try Self.passages(for: file, in: folder, limits: limits)
                 }
             } catch is AppLocalFileChanged {
                 continue
@@ -527,6 +526,9 @@ public struct AppLocalIndexer: Sendable {
         let path: String
         let size: Int
         let mtime: Double
+        /// Identity the Mac's own scan saw; the read must open the same file.
+        var device: Int32? = nil
+        var inode: UInt64? = nil
     }
 
     /// Regular, readable-type files under the folder, without following
@@ -565,24 +567,76 @@ public struct AppLocalIndexer: Sendable {
                     || url.lastPathComponent.lowercased().hasPrefix("readme") else { continue }
             let path = url.path
             guard path.hasPrefix(rootPath), canonicalPath(path) == path else { continue }
+            var identity = stat()
+            guard lstat(path, &identity) == 0, (identity.st_mode & S_IFMT) == S_IFREG else { continue }
             files.append(FoundFile(
                 path: path, size: values.fileSize ?? 0,
-                mtime: values.contentModificationDate?.timeIntervalSinceReferenceDate ?? 0))
+                mtime: values.contentModificationDate?.timeIntervalSinceReferenceDate ?? 0,
+                device: identity.st_dev, inode: identity.st_ino))
             if files.count >= limits.maximumFilesPerFolder { return (files, true) }
         }
         return (files, false)
     }
 
+    /// Opens `file` below the folder one component at a time without following
+    /// symbolic links, requires the descriptor to be the regular, singly
+    /// linked file the scan saw, and returns its bytes. A path swapped for a
+    /// link or another file after the scan reads nothing from outside.
+    static func readVerified(_ file: FoundFile, in folder: AppSearchFolder,
+                             maximumBytes: Int) throws -> Data {
+        guard let canonicalRoot = canonicalPath(folder.path) else { throw AppLocalFileChanged() }
+        let rootPath = canonicalRoot.hasSuffix("/") ? canonicalRoot : canonicalRoot + "/"
+        guard file.path.hasPrefix(rootPath) else { throw AppLocalFileSkip(reason: "outside the folder") }
+        let components = file.path.dropFirst(rootPath.count)
+            .split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard !components.isEmpty,
+              components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && !$0.contains("\0") }) else {
+            throw AppLocalFileSkip(reason: "unexpected path")
+        }
+        var parent = Darwin.open(canonicalRoot, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard parent >= 0 else { throw AppLocalFileChanged() }
+        defer { close(parent) }
+        for component in components.dropLast() {
+            let next = component.withCString { openat(parent, $0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) }
+            guard next >= 0 else { throw AppLocalFileChanged() }
+            close(parent); parent = next
+        }
+        let fd = components.last!.withCString { openat(parent, $0, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC) }
+        guard fd >= 0 else { throw AppLocalFileChanged() }
+        defer { close(fd) }
+        var info = stat()
+        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { throw AppLocalFileChanged() }
+        guard info.st_nlink == 1 else { throw AppLocalFileSkip(reason: "hard-linked file") }
+        if let device = file.device, let inode = file.inode {
+            guard info.st_dev == device, info.st_ino == inode else { throw AppLocalFileChanged() }
+        }
+        guard Int(info.st_size) == file.size else { throw AppLocalFileChanged() }
+        guard file.size <= maximumBytes else { throw AppLocalSearchError.index("larger than the indexing limit") }
+        var data = Data(count: file.size)
+        var offset = 0
+        while offset < file.size {
+            let n = data.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress!.advanced(by: offset), file.size - offset) }
+            if n < 0 { if errno == EINTR { continue }; throw AppLocalFileChanged() }
+            if n == 0 { throw AppLocalFileChanged() }
+            offset += n
+        }
+        return data
+    }
+
     /// Passages of about `passageCharacters`, split on line boundaries, with
     /// their line range, or their PDF page.
-    static func passages(for url: URL, size: Int, limits: AppLocalIndexLimits) throws
+    static func passages(for file: FoundFile, in folder: AppSearchFolder,
+                         limits: AppLocalIndexLimits) throws
         -> [(Int?, Int?, Int?, String)] {
+        let url = URL(fileURLWithPath: file.path)
         let isPDF = url.pathExtension.lowercased() == "pdf"
-        if size > (isPDF ? limits.maximumPDFBytes : limits.maximumTextFileBytes) {
+        let maximum = isPDF ? limits.maximumPDFBytes : limits.maximumTextFileBytes
+        if file.size > maximum {
             throw AppLocalSearchError.index("larger than the indexing limit")
         }
+        let data = try readVerified(file, in: folder, maximumBytes: maximum)
         let sections = try DocumentTextExtractor.extractSections(
-            from: url, maximumPDFPages: limits.maximumPDFPages)
+            data: data, name: url, maximumPDFPages: limits.maximumPDFPages)
         var passages: [(Int?, Int?, Int?, String)] = []
         for section in sections {
             var buffer: [Substring] = []

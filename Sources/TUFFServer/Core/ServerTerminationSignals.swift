@@ -24,11 +24,13 @@ public actor ServerTerminationSignals {
         }
     }
 
-    public func wait() async -> Int32 {
+    /// Returns nil when shutdown closes the stream without a signal, such as
+    /// when an idle serving host retires itself.
+    public func wait() async -> Int32? {
         for await signal in stream {
             return signal
         }
-        preconditionFailure("termination signal stream ended without a signal")
+        return nil
     }
 
     public func cancel() {

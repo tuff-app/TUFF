@@ -68,8 +68,13 @@ public enum RouterServerRuntime {
         let installed = ServerInstalledModels(modelsRoot: modelsRoot)
         let source = ServerSettingsSource(
             url: arguments.background ? settingsURL : nil, fallback: settings)
-        let residency = TUFFResidencyRegistry(
-            directory: TUFFResidencyRegistry.directory(applicationSupport: support))
+        let profile: ServingHostProfile
+        do {
+            profile = try ServingHostProfile.forCurrentProcess()
+        } catch {
+            write("error: could not open the serving host profile: \(error)")
+            return 1
+        }
         let tokenURL = ServerControlToken.fileURL(applicationSupport: support)
         let token: String
         do {
@@ -81,19 +86,12 @@ public enum RouterServerRuntime {
         }
 
         let port = settings.port
-        let provider = RoutedServerModelProvider(
-            installed: installed,
-            settings: source,
-            residency: residency,
-            controlPort: { port },
-            loader: { descriptor, directory in
-                try await ServerBackendLoaderRegistry.load(
-                    descriptor: descriptor, directory: directory, installed: installed)
-            })
+        let link = HostServingLink(profile: profile)
+        let provider = HostRoutedModelProvider(installed: installed, settings: source, link: link)
         let control = ServerControl(
             token: token,
             status: { await ServerControl.status(provider: provider, version: TUFFVersion.current) },
-            unloadIfIdle: { await provider.scheduler.unloadIfIdle() })
+            unloadIfIdle: { await provider.unloadIfIdle() })
         let server = TUFFHTTPServer(provider: provider, control: control)
         let signals = ServerTerminationSignals()
         do {
@@ -102,6 +100,14 @@ public enum RouterServerRuntime {
             write("error: could not listen on 127.0.0.1:\(port): \(error)")
             await signals.cancel()
             return 1
+        }
+        // Attaching marks this process as the API adapter in the host's status
+        // and starts the host when none runs. A failure is retried with the
+        // first request that needs it.
+        do {
+            _ = try await link.attach()
+        } catch {
+            write("warning: the inference host is not reachable yet: \(error)")
         }
         let names = installed.available().map(\.apiModelID).joined(separator: ",")
         print("TUFFServer \(TUFFVersion.current) routing at http://127.0.0.1:\(port) "

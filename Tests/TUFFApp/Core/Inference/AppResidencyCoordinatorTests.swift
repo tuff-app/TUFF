@@ -4,6 +4,43 @@ import TUFFModelCatalog
 @testable import TUFFAppCore
 
 @Suite(.serialized) struct AppResidencyCoordinatorTests {
+    @Test func imageWorkspaceBlocksOtherModelsOnlyWhileInUse() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("TUFFVisionAdmission-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let registry = TUFFResidencyRegistry(directory: root)
+        let coordinator = AppResidencyCoordinator(registry: registry, budgetBytes: 100, reclaim: { _ in false })
+        let owner = try registry.reserve(.init(owner: .app, modelID: "owner", estimatedBytes: 30), budgetBytes: 100)
+        let other = try registry.reserve(.init(owner: .app, modelID: "other", estimatedBytes: 20), budgetBytes: 100)
+        #expect(throws: AppInferenceError.self) { try coordinator.reserveVision(allowing: [owner]) }
+        other.release()
+        let image = try coordinator.reserveVision(allowing: [owner])
+        #expect(throws: TUFFResidencyRegistry.MemoryBusy.self) {
+            try registry.reserve(.init(owner: .app, modelID: "new", estimatedBytes: 1), budgetBytes: 100)
+        }
+        image.release()
+        let new = try registry.reserve(.init(owner: .app, modelID: "new", estimatedBytes: 20), budgetBytes: 100)
+        new.release()
+        owner.release()
+    }
+    @Test func installedVisionCompanionDoesNotReserveWholeTextBudget() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("TUFFTextAdmission-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pack = root.appendingPathComponent("model.gturbo")
+        let vision = root.appendingPathComponent("model.vision.gturbo")
+        try FileManager.default.createDirectory(at: pack, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: vision, withIntermediateDirectories: true)
+        try JSONEncoder().encode(["modelID": TUFFModelCatalog.gemma4_E2B.source.manifestModelID])
+            .write(to: pack.appendingPathComponent("manifest.json"))
+        let registry = TUFFResidencyRegistry(directory: root.appendingPathComponent("leases"))
+        let budget = UInt64(16) * 1_073_741_824
+        let coordinator = AppResidencyCoordinator(registry: registry, budgetBytes: budget, reclaim: { _ in false })
+        let text = try await coordinator.reserve(directory: pack, context: 1024, slots: 16)
+        #expect(text.record.estimatedBytes < budget)
+        let peer = try registry.reserve(.init(owner: .app, modelID: "other-text", estimatedBytes: 1),
+                                        budgetBytes: budget)
+        peer.release()
+        text.release()
+    }
     @Test func renamedAndCustomPacksAlwaysHoldLeases() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("TUFFAppResidency-\(UUID())")
         let pack = root.appendingPathComponent("private-name")

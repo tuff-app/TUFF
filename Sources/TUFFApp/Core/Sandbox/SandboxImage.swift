@@ -35,11 +35,11 @@ struct SandboxImagePin: Equatable, Sendable {
 
     /// The image this version of TUFF runs: the index the maintainer's
     /// workflow (`.github/workflows/image.yml` in tuff-app/sandbox) published as
-    /// `ghcr.io/tuff-app/tuff-sandbox:2` from the `sandbox-v2` tag. A new
+    /// `ghcr.io/tuff-app/tuff-sandbox:3` from the `sandbox-v3` tag. A new
     /// image means a new digest here (PUBLISHING.md in tuff-app/sandbox).
     static let release = SandboxImagePin(
         reference: "ghcr.io/tuff-app/tuff-sandbox",
-        digest: "sha256:d94fbffa97f79aefa0f458e2e6b06b713521e3f22dd95892d2488187c7de5d4a", source: .registry)
+        digest: "sha256:34e950fac80834e569c3781b233b3f0ea21e2cd0be646fcdd04225db48b99528", source: .registry)
 
     /// For developers and tests before an image is published: when both
     /// `TUFF_SANDBOX_DEV_IMAGE` (a name in the local image store, such as the

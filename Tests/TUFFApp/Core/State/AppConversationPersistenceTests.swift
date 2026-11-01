@@ -1,8 +1,105 @@
 import Foundation
 import Testing
 @testable import TUFFAppCore
+import Synchronization
+
+private final class SessionCleanupClient: AppSessionInferenceClient, Sendable {
+    struct State: Sendable { var ended: [UUID] = []; var fail = false; var hold = false }
+    let state = Mutex(State())
+    func generate(_ request: AppGenerationRequest) -> AsyncThrowingStream<AppInferenceEvent, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+    func generate(_ request: AppGenerationRequest, sessionID: UUID, requestID: UUID)
+        -> AsyncThrowingStream<AppInferenceEvent, Error> { generate(request) }
+    func cancel() {}
+    func cancel(requestID: UUID) {}
+    func endSession(_ sessionID: UUID, requestID: UUID) async throws {
+        let failure = state.withLock { value in value.ended.append(sessionID); return value.fail }
+        while state.withLock({ $0.hold }) { try await Task.sleep(for: .milliseconds(5)) }
+        if failure { throw CocoaError(.fileWriteUnknown) }
+    }
+}
+
 
 @Suite(.serialized) struct AppConversationPersistenceTests {
+    @MainActor
+    @Test func deletingChatEndsSessionAndRetainsIdentityOnFailure() async throws {
+        let store = AppConversationStore(), client = SessionCleanupClient()
+        store.recordCompletedTurn(AppChatTurn(prompt: "hello", response: "hi"), attachments: [], modelID: "test")
+        let record = try #require(store.selectedConversation)
+        let session = store.sessionID(for: record.id)
+        client.state.withLock { $0.fail = true }
+        let model = makeAppModel(client: client, installer: MockModelInstallerClient(descriptor: .default),
+                                 conversationStore: store)
+        model.deleteConversation(record)
+        for _ in 0..<200 where client.state.withLock({ $0.ended.isEmpty }) {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(client.state.withLock { $0.ended } == [session])
+        #expect(store.existingSessionID(for: record.id) == session)
+        client.state.withLock { $0.fail = false }
+        model.reclaimIdleConversationSessions()
+        for _ in 0..<200 where store.existingSessionID(for: record.id) != nil {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(store.existingSessionID(for: record.id) == nil)
+        #expect(client.state.withLock { $0.ended } == [session, session])
+    }
+
+    @MainActor
+    @Test func rebindingChatEndsOldSession() async throws {
+        let store = AppConversationStore(), client = SessionCleanupClient()
+        store.recordCompletedTurn(AppChatTurn(prompt: "hello", response: "hi"), attachments: [],
+                                  modelID: AppModelInstallDescriptor.default.settingsProfileKey)
+        let id = try #require(store.selectedConversationID)
+        let session = store.sessionID(for: id)
+        let qwen = ModelInstallCoordinator(descriptor: .qwen36,
+            directoryURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString),
+            client: MockModelInstallerClient(descriptor: .qwen36))
+        let model = makeAppModel(client: client, installer: MockModelInstallerClient(descriptor: .default),
+                                 otherInstalls: [qwen], conversationStore: store)
+        model.selectModel(qwen)
+        for _ in 0..<200 where store.existingSessionID(for: id) != nil {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(client.state.withLock { $0.ended } == [session])
+        #expect(store.existingSessionID(for: id) == nil)
+        #expect(store.sessionID(for: id) != session)
+    }
+
+    @MainActor
+    @Test func idleCleanupBlocksNewTurnsUntilAcknowledged() async throws {
+        let directory = try makeCompleteModelInstall("session-cleanup-gate")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = AppConversationStore(), client = SessionCleanupClient()
+        store.recordCompletedTurn(AppChatTurn(prompt: "hello", response: "hi"), attachments: [],
+                                  modelID: AppModelInstallDescriptor.default.settingsProfileKey)
+        let id = try #require(store.selectedConversationID)
+        let session = store.sessionID(for: id)
+        let model = makeAppModel(client: client, installer: MockModelInstallerClient(descriptor: .default),
+                                 conversationStore: store)
+        model.setModelURL(directory)
+        model.promptText = "next"
+        model.loadState = .ready(modelDirectory: directory, loadSeconds: 0)
+        #expect(model.canRun)
+        client.state.withLock { $0.hold = true }
+        model.reclaimIdleConversationSessions()
+        for _ in 0..<200 where client.state.withLock({ $0.ended.isEmpty }) {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(client.state.withLock { $0.ended } == [session])
+        #expect(!model.canRun)
+        #expect(!model.canSubmit)
+        #expect(store.existingSessionID(for: id) == session)
+        client.state.withLock { $0.hold = false }
+        for _ in 0..<200 where store.existingSessionID(for: id) != nil {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(store.existingSessionID(for: id) == nil)
+        #expect(model.canRun)
+        #expect(store.sessionID(for: id) != session)
+    }
+
     @Test func localChatRootUsesScopedApplicationSupport() {
         let root = AppConversationRepository.defaultRootURL(environment:
             ["TUFF_APPLICATION_SUPPORT_ROOT": "/tmp/tuff-isolation-fixture"])

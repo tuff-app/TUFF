@@ -142,6 +142,7 @@ final class ResidentBufferSet {
     func prepareDenseLayer(_ layer: Int) throws { try denseLayers?.prepare(layer: layer) }
 
     private let buffers: [ResidentBuffer]
+    var metalBuffers: [MTLBuffer] { buffers.map(\.buffer) }
     private let regionByTensorName: [String: Int]
 
     init(fileURL: URL,

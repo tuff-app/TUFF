@@ -83,17 +83,25 @@ import TUFFModelCatalog
     }
 
     /// A conversation cannot be rewound underneath a run that is reading it.
-    @Test func rewindingIsRefusedWhileRunning() throws {
+    @MainActor
+    @Test func rewindingIsRefusedWhileRunning() async throws {
         let (root, store) = makeStore()
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = makeAppModel(conversationStore: store)
+        let client = MockInferenceClient(response: "one two three", tokenDelayNanos: 200_000_000)
+        let model = makeAppModel(client: client, conversationStore: store)
+        model.modelPathText = FileManager.default.temporaryDirectory.path
+        model.loadState = .ready(modelDirectory: FileManager.default.temporaryDirectory, loadSeconds: 1)
         record(store, "first", "one")
         let turn = try #require(model.conversation.first)
-        model.runState = .running
+        model.promptText = "next"
+        model.run()
+        #expect(model.isSelectedConversationRunning)
 
         #expect(!model.canRewind(to: turn))
         #expect(!model.editMessage(turn))
-        #expect(model.conversation.count == 1)
+        #expect(model.conversation.contains { $0.id == turn.id })
+        model.cancel()
+        for _ in 0..<400 where model.isRunning { try? await Task.sleep(nanoseconds: 5_000_000) }
     }
 
     // MARK: - System prompt

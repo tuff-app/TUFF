@@ -19,6 +19,9 @@
     "ornith-1.5-122b": {"name": "Ornith 1.5 122B Q4", "max_decode_tokens_per_second": 100},
     "qwen3.8-27b": {"name": "Qwen3.8 27B Q4", "max_decode_tokens_per_second": 150},
     "ornith-1.5-397b": {"name": "Ornith 1.5 397B Q4", "max_decode_tokens_per_second": 100},
-    "gemma4-26b-heretic": {"name": "Gemma 4 26B-A4B Heretic Q4", "max_decode_tokens_per_second": 200}
+    "gemma4-26b-heretic": {"name": "Gemma 4 26B-A4B Heretic Q4", "max_decode_tokens_per_second": 200},
+    "flint-40b-a2.5b": {"name": "Recursive Flint 40B A2.5B", "max_decode_tokens_per_second": 30},
+    "ternary-bonsai-2-2b": {"name": "Ternary Bonsai 2 2B", "max_decode_tokens_per_second": 150},
+    "ternary-bonsai-2-27b": {"name": "Ternary Bonsai 2 27B", "max_decode_tokens_per_second": 30}
   }
 }

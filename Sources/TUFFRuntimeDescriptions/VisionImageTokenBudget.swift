@@ -24,7 +24,7 @@ public enum VisionImageTokenBudget {
         switch family {
         case .gemma4, .qwen36, .qwen4Exp:
             VisionConfig(family: family).maximumPooledTokens + markerTokensPerImage
-        case .gptOss, .minimaxM2:
+        case .gptOss, .minimaxM2, .flint:
             0
         }
     }

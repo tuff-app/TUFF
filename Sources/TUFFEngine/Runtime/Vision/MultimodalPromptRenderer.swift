@@ -60,7 +60,7 @@ public enum MultimodalPromptRenderer {
             case .gemma4: return .gemma4
             case .qwen36: return .qwen36
             case .qwen4Exp: return .qwen4Exp
-            case .gptOss, .minimaxM2:
+            case .gptOss, .minimaxM2, .flint:
                 preconditionFailure("This model family does not accept image input")
             }
         }

@@ -10,6 +10,7 @@ enum RepackModelFamily: String, Sendable, Equatable {
     case gptOss = "gpt-oss"
     case minimaxM2 = "minimax-m2"
     case qwen4Exp = "qwen4-exp"
+    case flint = "flint"
 }
 
 enum RepackModelVariant: String, Sendable, Equatable {
@@ -27,6 +28,9 @@ enum RepackModelVariant: String, Sendable, Equatable {
     case ornith15_122B = "ornith-1.5-122b"
     case ornith15_397B = "ornith-1.5-397b"
     case qwen38_27B = "qwen3.8-27b"
+    case bonsai2_2B = "ternary-bonsai-2-2b"
+    case bonsai2_27B = "ternary-bonsai-2-27b"
+    case flint40B = "flint-40b-a2.5b"
 }
 
 /// Which dense Gemma a checkpoint is, from its own shape.
@@ -136,6 +140,20 @@ struct ArchInfo: Sendable, Equatable {
         let data = try Data(contentsOf: URL(fileURLWithPath: configPath))
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw RepackError.configJsonInvalid(path: configPath, detail: "not a JSON object")
+        }
+        // These architectures cannot be interpreted as an ordinary Qwen or
+        // Gemma checkpoint. In particular, Prism's projection and embedding
+        // weights are in a rotated basis and require explicit transforms.
+        // Fail before any generic text_config fallback can misidentify them.
+        switch root["model_type"] as? String {
+        case "prism_hadamard_qwen35":
+            throw RepackError.configJsonInvalid(path: configPath,
+                detail: "Prism Hadamard packs require a dedicated 2-bit and Hadamard runtime; this build cannot repack them")
+        case "flint":
+            throw RepackError.configJsonInvalid(path: configPath,
+                detail: "Flint requires its own attention and expert runtime; this build cannot repack it")
+        default:
+            break
         }
         if (root["model_type"] as? String) == "gpt_oss" {
             return try loadGPTOSS(configPath: configPath, config: root)
@@ -536,6 +554,30 @@ struct ArchInfo: Sendable, Equatable {
                 path: configPath,
                 detail: "gemma4 dense config does not match the pinned E4B architecture baseline")
         }
+    }
+
+    /// Read a pinned Prism backbone after its embedded transforms are checked.
+    /// This does not enable generic dispatch.
+    static func loadValidatedPrism(_ snapshot: PrismSnapshot) throws -> ArchInfo {
+        let data = try Data(contentsOf: URL(fileURLWithPath: snapshot.configPath))
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let text = root["text_config"] as? [String: Any] else {
+            throw RepackError.configJsonInvalid(path: snapshot.configPath, detail: "missing Prism text_config")
+        }
+        let hidden = (text["hidden_size"] as? NSNumber)?.intValue
+        let layers = (text["num_hidden_layers"] as? NSNumber)?.intValue
+        let tied = (text["tie_word_embeddings"] as? Bool) ?? false
+        let selected: RepackModelVariant
+        switch (hidden, layers, snapshot.hadamard.blockSize, tied) {
+        case (2048, 24, 512, true): selected = .bonsai2_2B
+        case (5120, 64, 1024, false): selected = .bonsai2_27B
+        default:
+            throw RepackError.configJsonInvalid(path: snapshot.configPath, detail: "unsupported Prism architecture")
+        }
+        guard (snapshot.hadamard.tiedOutput ?? false) == tied else {
+            throw RepackError.configJsonInvalid(path: snapshot.configPath, detail: "Prism tied-output metadata disagrees")
+        }
+        return try loadQwen36(configPath: snapshot.configPath, tc: text, dense: true, variant: selected)
     }
 
     // MARK: - Qwen 3.6 MoE (`model_type == "qwen3_5_moe"`)

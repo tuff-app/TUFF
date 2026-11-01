@@ -62,7 +62,7 @@ final class FusedQKVGEMV {
                        vWeights: MTLBuffer, vWeightsOffset: Int = 0,
                        vScales: MTLBuffer, vScalesOffset: Int = 0,
                        vBiases: MTLBuffer, vBiasesOffset: Int = 0,
-                       x: MTLBuffer,
+                       x: MTLBuffer, xOffset: Int = 0,
                        qOut: MTLBuffer, qOutOffset: Int = 0,
                        kOut: MTLBuffer, kOutOffset: Int = 0,
                        vOut: MTLBuffer, vOutOffset: Int = 0,
@@ -87,7 +87,7 @@ final class FusedQKVGEMV {
         enc.setBuffer(vWeights, offset: vWeightsOffset, index: 6)
         enc.setBuffer(vScales, offset: vScalesOffset, index: 7)
         enc.setBuffer(vBiases, offset: vBiasesOffset, index: 8)
-        enc.setBuffer(x, offset: 0, index: 9)
+        enc.setBuffer(x, offset: xOffset, index: 9)
         enc.setBuffer(qOut, offset: qOutOffset, index: 10)
         enc.setBuffer(kOut, offset: kOutOffset, index: 11)
         enc.setBuffer(vOut, offset: vOutOffset, index: 12)

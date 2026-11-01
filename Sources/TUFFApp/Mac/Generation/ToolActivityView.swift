@@ -9,14 +9,36 @@ struct ToolActivityEntry: Identifiable, Equatable {
     let name: String
     let detail: String
     let summary: String
+    let resultText: String
     let state: AppToolActivity.State
 
     var title: String {
         let running = state == .running
+        if state == .failed || state == .refused || state == .cancelled {
+            let action: String
+            switch AppToolName(rawValue: name) {
+            case .webSearch?: action = "Web search"
+            case .readWebpage?: action = "Page read"
+            case .searchFiles?: action = "File search"
+            case .listFiles?: action = "File listing"
+            case .readFile?: action = "File read"
+            case .writeFile?: action = "File write"
+            case .editFile?: action = "File edit"
+            case .runCommand?: action = "Command"
+            case nil: action = "Tool call"
+            }
+            let suffix = state == .failed ? "failed" : (state == .refused ? "not run" : "stopped")
+            return "\(action) \(suffix)"
+        }
         switch AppToolName(rawValue: name) {
         case .webSearch?: return running ? "Searching the web" : "Searched the web"
         case .readWebpage?: return running ? "Reading a web page" : "Read a web page"
         case .searchFiles?: return running ? "Searching your files" : "Searched your files"
+        case .listFiles?: return running ? "Listing files" : "Listed files"
+        case .readFile?: return running ? "Reading a file" : "Read a file"
+        case .writeFile?: return running ? "Writing a file" : "Wrote a file"
+        case .editFile?: return running ? "Editing a file" : "Edited a file"
+        case .runCommand?: return running ? "Running a command" : "Ran a command"
         case nil: return name.isEmpty ? "Retried a tool call" : "Tool call"
         }
     }
@@ -34,7 +56,7 @@ struct ToolActivityEntry: Identifiable, Equatable {
     static func entries(from activities: [AppToolActivity]) -> [ToolActivityEntry] {
         activities.map {
             ToolActivityEntry(id: $0.id, name: $0.name, detail: $0.detail,
-                              summary: $0.summary, state: $0.state)
+                              summary: $0.summary, resultText: $0.resultText, state: $0.state)
         }
     }
 
@@ -50,7 +72,7 @@ struct ToolActivityEntry: Identifiable, Equatable {
                 return ToolActivityEntry(
                     id: round.id.uuidString + call.id, name: call.name,
                     detail: AppToolAnswerSession.detail(for: call), summary: result.summary,
-                    state: state)
+                    resultText: result.modelText, state: state)
             }
         }
     }
@@ -88,6 +110,7 @@ struct ToolActivityView: View {
                     }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.top, 8)
         } label: {
             HStack(spacing: 6) {
@@ -111,11 +134,11 @@ struct ToolActivityView: View {
             in: RoundedRectangle(cornerRadius: 10))
         .accessibilityLabel("Tool activity")
         .accessibilityValue(headline)
-        .accessibilityHint("Shows what was searched and the sources found")
+        .accessibilityHint("Shows tool calls, results, and any sources")
     }
 
     /// The newest running call, or a summary of what ran.
-    private var headline: String {
+    var headline: String {
         if let running = entries.last(where: { $0.state == .running }) {
             return running.detail.isEmpty ? running.title + "…"
                 : "\(running.title): \(running.detail)"
@@ -123,19 +146,30 @@ struct ToolActivityView: View {
         let kinds = Set(entries.compactMap { AppToolName(rawValue: $0.name) })
         let usedWeb = kinds.contains(.webSearch) || kinds.contains(.readWebpage)
         let usedFiles = kinds.contains(.searchFiles)
+        let usedWorkspace = kinds.contains(.listFiles) || kinds.contains(.readFile)
+            || kinds.contains(.writeFile) || kinds.contains(.editFile)
+        let usedCommand = kinds.contains(.runCommand)
         let done: String
-        switch (usedWeb, usedFiles) {
+        if entries.count > 1 && (usedWorkspace || usedCommand) {
+            if usedWeb || usedFiles { done = "Used search and workspace tools" }
+            else if usedWorkspace && usedCommand { done = "Worked with files and ran commands" }
+            else if usedCommand { done = "Ran commands" }
+            else { done = "Worked with files" }
+        } else { switch (usedWeb, usedFiles) {
         case (true, true): done = "Searched the web and your files"
         case (true, false): done = kinds.contains(.webSearch) ? "Searched the web" : "Read a web page"
         case (false, true): done = "Searched your files"
         case (false, false): done = entries.last?.title ?? "Used tools"
-        }
+        } }
         if entries.contains(where: { $0.state == .failed }) { return done + ", with errors" }
         return done
     }
 
     private var headlineSymbol: String {
         entries.contains { $0.state == .failed } ? "exclamationmark.triangle"
+            : entries.contains { $0.name == AppToolName.runCommand.rawValue } ? "terminal"
+            : entries.contains { [AppToolName.listFiles.rawValue, AppToolName.readFile.rawValue,
+                                   AppToolName.writeFile.rawValue, AppToolName.editFile.rawValue].contains($0.name) } ? "folder"
             : entries.contains { $0.name == AppToolName.searchFiles.rawValue }
                 && !entries.contains { $0.name == AppToolName.webSearch.rawValue }
                 ? "doc.text.magnifyingglass" : "globe"
@@ -151,15 +185,35 @@ struct ToolActivityView: View {
                 Text(entry.detail.isEmpty ? entry.title : "\(entry.title): \(entry.detail)")
                     .foregroundStyle(.primary)
                     .lineLimit(2)
-                if !entry.summary.isEmpty {
+                if !entry.summary.isEmpty && entry.summary != "Completed" {
                     Text(entry.summary)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                if !entry.resultText.isEmpty {
+                    ToolResultDisclosure(text: entry.resultText)
+                }
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .appFont(.caption)
         .textSelection(.enabled)
+    }
+}
+
+/// Each call owns its own disclosure so output is available without dumping
+/// every result into the transcript by default.
+private struct ToolResultDisclosure: View {
+    let text: String
+    @State private var expanded = false
+    var body: some View {
+        DisclosureGroup("Result", isExpanded: $expanded) {
+            Text(text)
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

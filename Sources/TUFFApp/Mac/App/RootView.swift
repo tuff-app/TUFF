@@ -307,7 +307,6 @@ struct RootView: View {
     /// Whether the New Chat button does anything. A chat that has not been
     /// written to yet is already a new chat.
     private var canStartNewChat: Bool {
-        guard !model.isRunning else { return false }
         guard navigation.destination == .chat else { return true }
         return model.hasOutputTranscript
             || model.conversationStore.selectedConversation == nil

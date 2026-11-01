@@ -52,11 +52,12 @@ struct SearchSettingsView: View {
                     Button("Remove All Folders and Delete Index…", role: .destructive) {
                         confirmingRemoval = true
                     }
+                    .disabled(model.isRunning)
                 }
             }
             Section("Limits") {
                 let limits = AppToolLimits.standard
-                Text("Each answer may use up to \(limits.maximumToolRounds) rounds of tools, \(limits.maximumWebRequests) web requests and \(limits.maximumFileSearches) file searches, within \(Int(limits.maximumToolSeconds)) seconds. Pages are read up to \(AppWebPageReader.maximumBytes / 1_048_576) MB. Results are shortened to fit the model's context.")
+                Text("Each answer may use up to \(limits.maximumToolRounds) rounds of tools (12 with write or command access), \(limits.maximumWebRequests) web requests and \(limits.maximumFileSearches) file searches, within \(Int(limits.maximumToolSeconds)) seconds. Pages are read up to \(AppWebPageReader.maximumBytes / 1_048_576) MB. Results are shortened to fit the model's context.")
                     .appFont(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

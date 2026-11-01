@@ -7,14 +7,36 @@ import TUFFInferenceTypes
 public struct AppChatCapabilities: Codable, Equatable, Hashable, Sendable {
     public var web: Bool
     public var files: Bool
+    /// Raw list_files/read_file over an explicitly chosen coding workspace.
+    /// Separate from `files` (index search) so enabling Local Files never
+    /// grants unfiltered reads.
+    public var workspaceRead: Bool
+    public var fileWrite: Bool
+    public var command: Bool
+    public var commandNetwork: Bool
 
-    public init(web: Bool = false, files: Bool = false) {
+    public init(web: Bool = false, files: Bool = false, workspaceRead: Bool = false, fileWrite: Bool = false, command: Bool = false, commandNetwork: Bool = false) {
         self.web = web
         self.files = files
+        self.workspaceRead = workspaceRead
+        self.fileWrite = fileWrite
+        self.command = command
+        self.commandNetwork = commandNetwork
     }
 
     public static let none = AppChatCapabilities()
-    public var isEmpty: Bool { !web && !files }
+    public var isEmpty: Bool { !web && !files && !workspaceRead && !fileWrite && !command }
+
+    private enum CodingKeys: String, CodingKey { case web, files, workspaceRead, fileWrite, command, commandNetwork }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        web = try c.decodeIfPresent(Bool.self, forKey: .web) ?? false
+        files = try c.decodeIfPresent(Bool.self, forKey: .files) ?? false
+        workspaceRead = try c.decodeIfPresent(Bool.self, forKey: .workspaceRead) ?? false
+        fileWrite = try c.decodeIfPresent(Bool.self, forKey: .fileWrite) ?? false
+        command = try c.decodeIfPresent(Bool.self, forKey: .command) ?? false
+        commandNetwork = try c.decodeIfPresent(Bool.self, forKey: .commandNetwork) ?? false
+    }
 }
 
 /// A call the model made, exactly as the structured decoder parsed it. The
@@ -46,6 +68,40 @@ public enum AppToolResultStatus: String, Codable, Equatable, Sendable {
     case refused
     /// Stopped by the user before it finished.
     case cancelled
+}
+
+/// A command produced output but did not complete successfully. Keeping the
+/// captured text separate from the reason lets the transcript mark the call
+/// failed without hiding diagnostics from the model or the person.
+public struct AppCommandFailure: Error, Equatable, Sendable, CustomStringConvertible {
+    public enum Reason: Equatable, Sendable {
+        case exit(Int32)
+        case signal(Int32)
+        case timedOut(Int)
+        case statusUnavailable(Int32)
+
+        public var summary: String {
+            switch self {
+            case .exit(let code): "Exit status \(code)"
+            case .signal(let signal): "Terminated by signal \(signal)"
+            case .timedOut(let seconds):
+                "Command timed out after \(seconds) second\(seconds == 1 ? "" : "s")"
+            case .statusUnavailable(let code):
+                "Could not determine command status (waitpid error \(code))"
+            }
+        }
+    }
+
+    public let output: String
+    public let reason: Reason
+
+    public init(output: String, reason: Reason) {
+        self.output = output
+        self.reason = reason
+    }
+
+    public var summary: String { reason.summary }
+    public var description: String { output.isEmpty ? "[\(summary)]" : output }
 }
 
 /// One tool result. `modelText` is exactly what the model read, kept so the

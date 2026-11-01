@@ -342,6 +342,7 @@ public actor ServerModelSession: ServerInferenceBackend {
 
     private let context: MetalContext
     private let model: Model
+    private let residentWarmup: ResidentWarmup?
     private let tokenizer: GFTokenizer
     private let runner: ModelForwardRunner
     private let scratch: RawCompletionScratch
@@ -561,6 +562,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         self.prefixSnapshots = promptCacheMode == .off ? nil : prefixSnapshots
         self.context = context
         self.model = model
+        self.residentWarmup = model.startResidentWarmup()
         self.tokenizer = tokenizer
         self.chatDialect = tokenizer.dialect
         self.modelVariant = model.config.variant
@@ -582,7 +584,7 @@ public actor ServerModelSession: ServerInferenceBackend {
 
     // An unload waits for a snapshot still being written, so an idle model
     // that is released right after reading a new system prompt keeps it.
-    deinit { prefixSnapshots?.flush() }
+    deinit { residentWarmup?.cancel(); prefixSnapshots?.flush() }
 
     public func generate(
         _ request: ValidatedChatRequest,
@@ -593,6 +595,7 @@ public actor ServerModelSession: ServerInferenceBackend {
     }
 
     public func prepare(_ request: ValidatedChatRequest) async throws -> ServerPreparedRequest {
+        residentWarmup?.cancel()
         var phases = ServerInferencePhaseTimings()
         var promptIDs: [Int32]?
         if !request.imageFiles.isEmpty {
@@ -798,6 +801,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         _ prepared: ServerPreparedRequest,
         onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
     ) async throws -> ServerCompletion {
+        residentWarmup?.cancel()
         let request = prepared.request
         var phases = ServerInferencePhaseTimings(prepared.timingSeconds)
         var completionStarted = false

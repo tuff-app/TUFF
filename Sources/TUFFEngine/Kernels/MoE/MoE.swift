@@ -28,6 +28,21 @@ public struct MoEExpertOffsets {
     }
 }
 
+/// Affine packed widths for the three projections in one routed layer.
+struct MoEExpertBitWidths {
+    let gate: UInt32
+    let up: UInt32
+    let down: UInt32
+
+    init(gate: UInt32 = 4, up: UInt32 = 4, down: UInt32 = 4) {
+        precondition([4, 8].contains(gate) && [4, 8].contains(up) && [4, 8].contains(down))
+        self.gate = gate
+        self.up = up
+        self.down = down
+    }
+}
+
+
 final class MoE {
     /// Routed experts the streamed kernels can hold blobs for. Matches
     /// `kMaxStreamedExperts` in `quant_group.metal`.
@@ -71,9 +86,12 @@ final class MoE {
          specializedF: UInt32 = 704,
          specializedNumExperts: UInt32 = 128,
          topKExperts: Int = MoE.defaultStreamedExperts,
-         groupSize: Int = Quantization.groupSize) throws {
+         groupSize: Int = Quantization.groupSize,
+         wideIntermediate: Bool = false,
+         floatIntermediate: Bool = false) throws {
         precondition(Quantization.supportedGroupSizes.contains(groupSize),
                      "unsupported affine group size \(groupSize)")
+        precondition(!floatIntermediate || wideIntermediate)
         precondition(topKExperts > 0 && topKExperts <= Self.maxStreamedExperts,
                      "routed top-k \(topKExperts) exceeds the streamed blob array")
         self.realDecodeD = specializedD
@@ -140,22 +158,28 @@ final class MoE {
         self.routerSelectMiniMaxK8SpecializedPSO = try context.pipeline(
             "router_topk_select_minimax_k8",
             constants: routerConstants)
+        let phase1Name = floatIntermediate ? "flint_moe_phase1_float"
+            : (wideIntermediate ? "flint_moe_phase1_bf16" : "moe_phase1_gate_up_act_u16load")
+        let phase1SubsetName = floatIntermediate ? "flint_moe_phase1_subset_float"
+            : (wideIntermediate ? "flint_moe_phase1_subset_bf16" : "moe_phase1_gate_up_act_subset_u16load")
+        let phase2Name = floatIntermediate ? "flint_moe_phase2_float"
+            : (wideIntermediate ? "flint_moe_phase2_bf16" : "moe_phase2_down_reduce_k8")
         self.phase1U16PSO = try context.pipeline(
-            "moe_phase1_gate_up_act_u16load",
+            phase1Name,
             constants: activationConstants + expertConstants)
         self.phase1U16SpecializedPSO = try context.pipeline(
-            "moe_phase1_gate_up_act_u16load",
+            phase1Name,
             constants: moeConstants)
         self.phase1SubsetU16PSO = try context.pipeline(
-            "moe_phase1_gate_up_act_subset_u16load",
+            phase1SubsetName,
             constants: activationConstants + expertConstants)
         self.phase1SubsetU16SpecializedPSO = try context.pipeline(
-            "moe_phase1_gate_up_act_subset_u16load",
+            phase1SubsetName,
             constants: moeConstants)
         self.phase2ReduceK8PSO = try context.pipeline(
-            "moe_phase2_down_reduce_k8", constants: expertConstants)
+            phase2Name, constants: expertConstants)
         self.phase2ReduceK8SpecializedPSO = try context.pipeline(
-            "moe_phase2_down_reduce_k8",
+            phase2Name,
             constants: moeConstants)
 
         // One float per expert. Fixed at 256 while that was the most any
@@ -166,7 +190,7 @@ final class MoE {
             length: routerLogitCapacity * MemoryLayout<Float>.stride,
             options: .storageModeShared),
               let phase1Function = try? context.function(
-                named: "moe_phase1_gate_up_act_u16load") else {
+                named: phase1Name) else {
             throw MetalError.noDevice
         }
         self.routerLogits = logits
@@ -315,7 +339,8 @@ final class MoE {
         acts: MTLBuffer,
         d: UInt32,
         f: UInt32,
-        topK: UInt32
+        topK: UInt32,
+        bitWidths: MoEExpertBitWidths = MoEExpertBitWidths()
     ) {
         validate(routedBlobs: routedBlobs, topK: topK)
         var dimension = d
@@ -335,6 +360,8 @@ final class MoE {
         encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 4)
         encoder.setBytes(&intermediate, length: MemoryLayout<UInt32>.stride, index: 5)
         encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 6)
+        var widths = bitWidths
+        encoder.setBytes(&widths, length: MemoryLayout<MoEExpertBitWidths>.stride, index: 9)
         encoder.dispatchThreadgroups(
             MTLSize(width: (Int(topK * f) + 7) / 8, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
@@ -353,7 +380,8 @@ final class MoE {
         activeCount: UInt32,
         d: UInt32,
         f: UInt32,
-        topK: UInt32
+        topK: UInt32,
+        bitWidths: MoEExpertBitWidths = MoEExpertBitWidths()
     ) {
         guard activeCount > 0 else { return }
         validate(routedBlobs: routedBlobs, topK: topK)
@@ -380,6 +408,8 @@ final class MoE {
         encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 6)
         encoder.setBuffer(activeSlots, offset: 0, index: 7)
         encoder.setBytes(&active, length: MemoryLayout<UInt32>.stride, index: 8)
+        var widths = bitWidths
+        encoder.setBytes(&widths, length: MemoryLayout<MoEExpertBitWidths>.stride, index: 9)
         encoder.dispatchThreadgroups(
             MTLSize(width: (Int(activeCount * f) + 7) / 8, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
@@ -397,7 +427,8 @@ final class MoE {
         y: MTLBuffer,
         d: UInt32,
         f: UInt32,
-        topK: UInt32
+        topK: UInt32,
+        bitWidths: MoEExpertBitWidths = MoEExpertBitWidths()
     ) {
         validate(routedBlobs: routedBlobs, topK: topK)
         var dimension = d
@@ -417,6 +448,8 @@ final class MoE {
         encoder.setBuffer(y, offset: 0, index: 5)
         encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 6)
         encoder.setBytes(&intermediate, length: MemoryLayout<UInt32>.stride, index: 7)
+        var widths = bitWidths
+        encoder.setBytes(&widths, length: MemoryLayout<MoEExpertBitWidths>.stride, index: 8)
         // One SIMD group per routed expert: the kernel indexes `partial` and
         // the blob array by `sg_idx`, so the threadgroup has to be exactly as
         // wide as the selection. This was 256 — eight SIMD groups — for as

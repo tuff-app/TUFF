@@ -2,6 +2,9 @@ import Foundation
 import Darwin
 
 public enum TUFFModelID: String, Codable, CaseIterable, Sendable {
+    case flint40B = "flint-40b-a2.5b"
+    case bonsai2_2B = "ternary-bonsai-2-2b"
+    case bonsai2_27B = "ternary-bonsai-2-27b"
     case gemma4_E2B = "gemma4-e2b"
     case gemma4_E4B = "gemma4-e4b"
     case gemma4_12B_QAT = "gemma4-12b-qat"
@@ -20,6 +23,7 @@ public enum TUFFModelID: String, Codable, CaseIterable, Sendable {
 }
 
 public enum TUFFModelFamily: String, Codable, Sendable {
+    case flint
     case gemma4
     case qwen36
     case gptOss = "gpt-oss"
@@ -28,6 +32,9 @@ public enum TUFFModelFamily: String, Codable, Sendable {
 }
 
 public enum TUFFArchitectureID: String, Codable, Sendable {
+    case flint40B = "flint-40b-a2.5b"
+    case bonsai2_2B = "ternary-bonsai-2-2b"
+    case bonsai2_27B = "ternary-bonsai-2-27b"
     case gemma4_E2B = "gemma4-e2b"
     case gemma4_E4B = "gemma4-e4b"
     case gemma4_12B_QAT = "gemma4-12b-qat"
@@ -50,6 +57,7 @@ public enum TUFFFeedForwardKind: String, Codable, Sendable {
 }
 
 public enum TUFFWeightLayout: String, Codable, Sendable {
+    case prismQ2 = "prism-q2"
     case affine
     case mxfp4
 }
@@ -72,6 +80,9 @@ public struct TUFFArchitectureProfile: Codable, Equatable, Sendable {
 }
 
 public extension TUFFArchitectureProfile {
+    static let flint40B = TUFFArchitectureProfile(id: .flint40B, family: .flint, feedForwardKind: .mixtureOfExperts, weightLayout: .affine)
+    static let bonsai2_2B = TUFFArchitectureProfile(id: .bonsai2_2B, family: .qwen36, feedForwardKind: .dense, weightLayout: .prismQ2)
+    static let bonsai2_27B = TUFFArchitectureProfile(id: .bonsai2_27B, family: .qwen36, feedForwardKind: .dense, weightLayout: .prismQ2)
     static let gemma4E2B = TUFFArchitectureProfile(
         id: .gemma4_E2B,
         family: .gemma4,
@@ -446,7 +457,7 @@ public struct TUFFModelDescriptor: Codable, Equatable, Sendable, Identifiable {
         switch id {
         case .gemma4_E2B, .gemma4_E4B, .gptOss_20B, .gptOss_120B: 131_072
         case .minimaxM27: 204_800
-        case .gemma4_12B_QAT, .gemma4_26B_A4B, .gemma4_26B_Heretic, .qwen36_35B_A3B, .qwen38FlashNext,
+        case .flint40B, .bonsai2_2B, .bonsai2_27B, .gemma4_12B_QAT, .gemma4_26B_A4B, .gemma4_26B_Heretic, .qwen36_35B_A3B, .qwen38FlashNext,
              .ornith15_9B, .ornith15_35B_A3B, .ornith15_122B, .ornith15_397B, .qwen38_27B: 262_144
         }
     }
@@ -1381,6 +1392,72 @@ public enum TUFFModelCatalog {
         }
     }
 
+    /// The publisher INT4 source remains available for local pack identification;
+    /// the advertised Flint descriptor uses the pinned OptiQ checkpoint below.
+    public static let flint40B = TUFFModelDescriptor(
+        id: .flint40B, selector: "flint-40b", apiModelID: "flint-40b",
+        displayName: "Recursive Flint 40B A2.5B", shortName: "Flint 40B",
+        summary: "40B mixture-of-experts model with streamed INT4 experts.",
+        family: .flint, architecture: .flint40B, installDirectoryName: "flint-40b.gturbo",
+        source: .init(repoID: "RecursiveSI/flint-int4", revision: "3b93f9053b530488405ae9fca51d4900d6ce21f0",
+            sourceIndexSHA256: "319822f10e32a5916b57e23c7f05f9e92b24d02b3a136d02a3846b5edab78109",
+            manifestModelID: "RecursiveSI/flint-int4", approximateDownloadBytes: 23_000_000_000,
+            installedBytes: 23_000_000_000, reserveBytes: oneGiB),
+        hardware: .init(minimumUnifiedMemoryBytes: 16 * oneGiB),
+        memory: .init(qualifiedDefaultWorkingSetBytes: 5 * oneGiB, expertCacheBytesPerSlot: 80_000_000,
+            kvCache: .init(fullAttentionBytesPerToken: 28_672, slidingAttentionBytesPerToken: 71_680, slidingWindowCapacityTokens: 513)),
+        qualification: .requiresRealModelValidation, capabilities: [.textGeneration, .reasoning], reasoningControl: .toggle)
+
+    /// Pinned Flint OptiQ checkpoint (group-64 affine; 8-bit routed experts in
+    /// layers 2-12, 4-bit elsewhere). The largest layer slot is 99.4 MB.
+    public static let flint40BOptiQ = TUFFModelDescriptor(
+        id: .flint40B, selector: "flint-40b", apiModelID: "flint-40b",
+        displayName: "Recursive Flint 40B A2.5B", shortName: "Flint 40B",
+        summary: "40B mixture-of-experts model with streamed 4/8-bit OptiQ experts.",
+        family: .flint, architecture: .flint40B, installDirectoryName: "flint-40b.gturbo",
+        source: .init(repoID: "mlx-community/flint-OptiQ-4bit", revision: "d5efe414b30ee0cf2042ec712321a6fa060c2a53",
+            sourceIndexSHA256: "54bd24dfdb836f9154da82f2273cc52274a230b74c9996379357285d72330fd0",
+            manifestModelID: "mlx-community/flint-OptiQ-4bit", approximateDownloadBytes: 25_600_000_000,
+            installedBytes: 27_500_000_000, reserveBytes: oneGiB),
+        hardware: .init(minimumUnifiedMemoryBytes: 16 * oneGiB),
+        memory: .init(qualifiedDefaultWorkingSetBytes: 5 * oneGiB, expertCacheBytesPerSlot: 100_000_000,
+            kvCache: .init(fullAttentionBytesPerToken: 28_672, slidingAttentionBytesPerToken: 71_680, slidingWindowCapacityTokens: 513)),
+        qualification: .qualified,
+        runtimeDefaults: TUFFModelRuntimeDefaults(expertCacheSlots: 16, temperature: 1.0, topK: 20, topP: 0.95),
+        capabilities: [.textGeneration, .reasoning], reasoningControl: .toggle)
+
+    public static let bonsai2_2B = TUFFModelDescriptor(
+        id: .bonsai2_2B, selector: "bonsai-2-2b", apiModelID: "bonsai-2-2b",
+        displayName: "Ternary Bonsai 2 2B", shortName: "Bonsai 2 2B",
+        summary: "Text-only 2B model using Q2 Hadamard projections.",
+        family: .qwen36, architecture: .bonsai2_2B, installDirectoryName: "bonsai-2-2b.gturbo",
+        source: .init(repoID: "prism-ml/Ternary-Bonsai-2-2B-mlx-2bit", revision: "1c6cbae21f8c38830ce337972b46fdae7b18eaaa",
+            sourceIndexSHA256: "da5095b9f34d7f0d5094090afeeadf124eef821c75136dc28957ce586ae7ac0c",
+            manifestModelID: "prism-ml/Ternary-Bonsai-2-2B-mlx-2bit", approximateDownloadBytes: 1_220_000_000,
+            installedBytes: 600_000_000, reserveBytes: oneGiB),
+        hardware: .init(minimumUnifiedMemoryBytes: eightGiB),
+        memory: .init(qualifiedDefaultWorkingSetBytes: 2 * oneGiB, expertCacheBytesPerSlot: 0,
+            kvCache: .init(fullAttentionBytesPerToken: 12_288)),
+        qualification: .qualified,
+        runtimeDefaults: TUFFModelRuntimeDefaults(temperature: 0.7, topK: 20, topP: 0.8),
+        capabilities: [.textGeneration, .reasoning], reasoningControl: .toggleWithPreservation)
+
+    public static let bonsai2_27B = TUFFModelDescriptor(
+        id: .bonsai2_27B, selector: "bonsai-2-27b", apiModelID: "bonsai-2-27b",
+        displayName: "Ternary Bonsai 2 27B", shortName: "Bonsai 2 27B",
+        summary: "Text-only 27B model using Q2 Hadamard projections.",
+        family: .qwen36, architecture: .bonsai2_27B, installDirectoryName: "bonsai-2-27b.gturbo",
+        source: .init(repoID: "prism-ml/Ternary-Bonsai-2-27B-mlx-2bit", revision: "fcba37d2117a7077eac6b613b2668d14d9779edd",
+            sourceIndexSHA256: "130de5925082c168b7866b2e91b52e44abbafc99017e3ca352b77b5b55a269ed",
+            manifestModelID: "prism-ml/Ternary-Bonsai-2-27B-mlx-2bit", approximateDownloadBytes: 8_620_000_000,
+            installedBytes: 7_800_000_000, reserveBytes: oneGiB),
+        hardware: .init(minimumUnifiedMemoryBytes: 16 * oneGiB),
+        memory: .init(qualifiedDefaultWorkingSetBytes: 10 * oneGiB, expertCacheBytesPerSlot: 0,
+            kvCache: .init(fullAttentionBytesPerToken: 65_536)),
+        qualification: .qualified,
+        runtimeDefaults: TUFFModelRuntimeDefaults(temperature: 0.7, topK: 20, topP: 0.8),
+        capabilities: [.textGeneration, .reasoning], reasoningControl: .toggleWithPreservation)
+
     public static let all: [TUFFModelDescriptor] = [
         gemma4_E2B,
         gemma4_E4B,
@@ -1397,6 +1474,9 @@ public enum TUFFModelCatalog {
         ornith15_397B,
         qwen38_27B,
         gemma4_26B_Heretic,
+        flint40BOptiQ,
+        bonsai2_2B,
+        bonsai2_27B,
     ]
     public static let `default` = gemma4_26B_A4B
 
@@ -1408,7 +1488,11 @@ public enum TUFFModelCatalog {
         all.first { $0.selector == selector || $0.aliases.contains(selector) }
     }
 
+    /// Resolve reviewed local packs for memory admission without advertising
+    /// gated models in the install catalog.
     public static func model(manifestModelID: String) -> TUFFModelDescriptor? {
-        all.first { $0.source.manifestModelID == manifestModelID }
+        (all + [flint40B]).first {
+            $0.source.manifestModelID == manifestModelID
+        }
     }
 }

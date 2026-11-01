@@ -4,7 +4,8 @@ import Foundation
 
 let engineFamily = ProcessInfo.processInfo.environment["TUFF_ENGINE_FAMILY"]
 let familyDefine: String? = ["gemma-affine": "TUFF_ENGINE_GEMMA", "qwen-hybrid-affine": "TUFF_ENGINE_QWEN",
-    "gpt-oss-mxfp4": "TUFF_ENGINE_GPT_OSS", "minimax-affine": "TUFF_ENGINE_MINIMAX"][engineFamily ?? ""]
+    "gpt-oss-mxfp4": "TUFF_ENGINE_GPT_OSS", "minimax-affine": "TUFF_ENGINE_MINIMAX",
+    "flint-affine": "TUFF_ENGINE_FLINT"][engineFamily ?? ""]
 let familySettings: [SwiftSetting] = familyDefine.map { [.define($0)] } ?? []
 let engineSettings = familySettings + ((engineFamily != nil && engineFamily != "gpt-oss-mxfp4")
     ? [.define("TUFF_ENGINE_AFFINE_ONLY")] : [])
@@ -175,8 +176,7 @@ let package = Package(
         .executableTarget(
             name: "TUFFInferenceEngine",
             dependencies: ["TUFFCLIArguments", "TUFFCLIEngine", "TUFFDecodeProtocol",
-                           "TUFFDecodeServiceCore", "TUFFInferenceTypes", "TUFFRuntimeManagement",
-                           "TUFFServerEngine"],
+                           "TUFFDecodeServiceCore", "TUFFInferenceTypes", "TUFFRuntimeManagement"],
             path: "Sources/TUFFInferenceEngine"
         ),
         .target(
@@ -203,6 +203,8 @@ let package = Package(
         .target(
             name: "TUFFAppServer",
             dependencies: [
+                "TUFFAppCore",
+                "TUFFDecodeProtocol",
                 "TUFFModelCatalog",
                 "TUFFServerCore",
             ],
@@ -219,6 +221,14 @@ let package = Package(
             name: "TUFFServer",
             dependencies: ["TUFFServerCore"],
             path: "Sources/TUFFServer/Command"
+        ),
+        // A minimal GUI- or API-role serving client run as its own process by
+        // the opt-in real-host tests, so process death can be observed. It is
+        // not a product and is never packaged.
+        .executableTarget(
+            name: "TUFFServingProbe",
+            dependencies: ["TUFFAppCore", "TUFFAppServer", "TUFFDecodeProtocol", "TUFFServerCore"],
+            path: "Sources/TUFFServingProbe"
         ),
         .executableTarget(
             name: "TUFFMac",
@@ -337,6 +347,9 @@ let package = Package(
             name: "TUFFAppServerTests",
             dependencies: [
                 "TUFFAppServer",
+                "TUFFAppCore",
+                "TUFFDecodeProtocol",
+                "TUFFServerCore",
                 "TUFFModelCatalog",
             ],
             path: "Tests/TUFFAppServer"

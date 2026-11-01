@@ -89,6 +89,21 @@ extension Model {
             downBOff: offset("down_biases"))
     }
 
+    func routedExpertBitWidths(layer: Int) -> MoEExpertBitWidths {
+        let expert = packedExpertsLayout.expert(layer: layer, expert: 0)
+        func bits(_ role: String) -> UInt32 {
+            guard let tensor = expert.subTensors[role] else {
+                preconditionFailure("missing routed expert metadata for role \(role)")
+            }
+            let width = tensor.bits ?? manifest.quant?.routedExpert.weightBits ?? 4
+            guard width == 4 || width == 8 else {
+                preconditionFailure("unsupported routed expert width \(width) for \(role)")
+            }
+            return UInt32(width)
+        }
+        return MoEExpertBitWidths(gate: bits("gate"), up: bits("up"), down: bits("down"))
+    }
+
     public func routedExpertPhysicalOffsets(layer: Int) -> [UInt64] {
         packedExpertsLayout.layers[layer].experts.map(\.offset)
     }

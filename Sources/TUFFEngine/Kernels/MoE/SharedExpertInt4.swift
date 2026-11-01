@@ -118,14 +118,15 @@ public final class SharedExpertRuntime {
     /// expert is grouped at 64 in every architecture.
     public init(context: MetalContext, weightBits: Int,
                 siluActivation: Bool = false,
-                groupSize: Int = Quantization.groupSize) throws {
+                groupSize: Int = Quantization.groupSize,
+                wideInt8: Bool = false) throws {
         self.weightBits = weightBits
         switch weightBits {
         case 4: self.implementation = .int4(try SharedExpertInt4(
             context: context, siluActivation: siluActivation,
             groupSize: groupSize))
         case 8: self.implementation = .int8(try SharedExpertInt8(
-            context: context, siluActivation: siluActivation))
+            context: context, siluActivation: siluActivation, wide: wideInt8))
         default: throw SharedExpertError.unsupportedWeightBits(weightBits)
         }
     }

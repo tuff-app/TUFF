@@ -12,13 +12,12 @@ import SwiftUI
 @Suite(.serialized) @MainActor struct AppWorkspaceSmokeTests {
     @Test func everyDestinationRendersAtTheMinimumWindowSize() throws {
         let client = WorkspaceSmokeLifecycleClient()
-        let broker = SharedInferenceBroker(client: client)
         let model = AppModel(
             modelDirectory: FileManager.default.temporaryDirectory
                 .appendingPathComponent(
                     "TUFFWorkspaceSmoke-\(UUID().uuidString).gturbo",
                     isDirectory: true),
-            client: broker,
+            client: client,
             otherInstalls: [],
             deviceCapabilities: TUFFDeviceCapabilities(
                 unifiedMemoryBytes: 16 * 1_024 * 1_024 * 1_024,
@@ -67,7 +66,7 @@ extension AppWorkspaceSmokeTests {
                 .appendingPathComponent(
                     "TUFFWorkspaceSmoke-\(UUID().uuidString).gturbo",
                     isDirectory: true),
-            client: SharedInferenceBroker(client: WorkspaceSmokeLifecycleClient()),
+            client: WorkspaceSmokeLifecycleClient(),
             otherInstalls: [])
         let backgroundAPI = AppBackgroundAPIController(
             service: WorkspaceSmokeAgent(),

@@ -114,11 +114,54 @@ enum ToolLoopFixtures {
         #expect(AppToolCatalog.definitions(for: .init(web: true)).map(\.name)
             == ["web_search", "read_webpage"])
         #expect(AppToolCatalog.definitions(for: .init(files: true)).map(\.name) == ["search_files"])
+        #expect(AppToolCatalog.definitions(for: .init(workspaceRead: true)).map(\.name) == ["list_files", "read_file"])
         #expect(AppToolCatalog.systemInstructions(for: .none, currentDate: "x").isEmpty)
         let instructions = AppToolCatalog.systemInstructions(for: both, currentDate: "October 5, 2026")
         #expect(instructions.contains("Today is October 5, 2026."))
         #expect(instructions.contains("[1]"))
         #expect(!instructions.contains("\u{2014}"))
+    }
+
+    @Test func workspaceInstructionsMatchEnabledCapabilities() {
+        let readOnly = AppToolCatalog.systemInstructions(for: .init(workspaceRead: true), currentDate: "today")
+        #expect(readOnly.contains("may list and read"))
+        #expect(readOnly.contains("writing and editing are not enabled"))
+        #expect(readOnly.contains("Command execution is not enabled"))
+        #expect(!readOnly.contains("[1]"))
+        let full = AppToolCatalog.systemInstructions(for: .init(files: true, workspaceRead: true, fileWrite: true, command: true), currentDate: "today")
+        #expect(full.contains("smallest exact edit"))
+        #expect(full.contains("command network access is disabled"))
+        #expect(full.contains("do not invent citations"))
+        #expect(full.contains("when the user asks for it"))
+        let networked = AppToolCatalog.systemInstructions(for: .init(command: true, commandNetwork: true), currentDate: "today")
+        #expect(networked.contains("command network access enabled"))
+    }
+
+    @Test func repeatedFailedWorkspaceCallsWaitForAChange() async {
+        let attempts = Mutex(0)
+        let toolbox = AppToolbox(webSearch: { _, _ in throw AppToolValidationError("unused") },
+            readWebpage: { _ in throw AppToolValidationError("unused") }, searchFiles: { _, _ in [] },
+            coding: { call in
+                if case .readFile = call {
+                    let count = attempts.withLock { $0 += 1; return $0 }
+                    if count == 1 { throw AppToolValidationError("missing file") }
+                }
+                return "ok"
+            })
+        let session = AppToolAnswerSession(capabilities: .init(workspaceRead: true, fileWrite: true),
+            toolbox: toolbox, userText: "fix the workspace")
+        func read(_ id: String) -> AppToolCall {
+            .init(id: id, name: "read_file", arguments: .object(["path": .string("a.txt")]))
+        }
+        let write = AppToolCall(id: "write", name: "write_file", arguments: .object([
+            "path": .string("a.txt"), "content": .string("created")]))
+        let round = await session.execute(calls: [read("first"), read("second"), write], thinking: nil,
+                                          content: "", characterBudget: 20_000, onActivity: { _ in })
+        #expect(round.results.map(\.status) == [.failed, .refused, .succeeded])
+        let retry = await session.execute(calls: [read("third")], thinking: nil,
+                                          content: "", characterBudget: 20_000, onActivity: { _ in })
+        #expect(retry.results.first?.status == .succeeded)
+        #expect(attempts.withLock { $0 } == 2)
     }
 
     @Test func validCallsAreAccepted() throws {
@@ -209,7 +252,7 @@ enum ToolLoopFixtures {
                 passages: [AppFilePassage(filePath: "/tmp/plan.md", folderID: UUID(), page: nil,
                                           lineStart: 1, lineEnd: 3, text: secret, score: 1)],
                 searches: searches),
-            userText: "Please search northern region revenue")
+            userText: "Please search \"northern region revenue\"")
         let files = AppToolCall(id: "f", name: "search_files",
                                 arguments: .object(["query": .string("revenue target")]))
         _ = await session.execute(calls: [files], thinking: nil, content: "",
@@ -534,17 +577,91 @@ enum ToolLoopFixtures {
 }
 
 @Suite struct LocalContextWebBoundaryTests {
-    @Test func shortAndEncodedQueriesAreNotAllowedAfterLocalRetrieval() async {
+    private func workspaceToolTurn(name: AppToolName, status: AppToolResultStatus,
+                                   output: String) throws -> AppChatTurn {
+        let argument: JSONValue = switch name {
+        case .runCommand: .object(["command": .string("printf private")])
+        case .readFile: .object(["path": .string("private.txt")])
+        default: .object([:])
+        }
+        let call = AppToolCall(id: "local", name: name.rawValue, arguments: argument)
+        let result = AppToolResult(callID: call.id, name: call.name, status: status,
+                                   modelText: output, summary: "fixture")
+        let round = AppToolRound(calls: [call], results: [result])
+        let turn = AppChatTurn(prompt: "Inspect the workspace", response: "Done",
+                               toolRounds: [round])
+        return try JSONDecoder().decode(AppChatTurn.self, from: JSONEncoder().encode(turn))
+    }
+
+    private func assertHistoricalLocalTurnBlocksSearch(_ turn: AppChatTurn) async {
+        var request = ToolLoopFixtures.request
+        request.history = [turn]
+        let client = ScriptedInferenceClient([
+            ToolLoopFixtures.callRound([ToolLoopFixtures.search("private history marker")]),
+            ToolLoopFixtures.answer("I will keep local output local.")])
+        let queries = QueryLog()
+        _ = await ToolLoopFixtures.run(client, toolbox: ToolLoopFixtures.toolbox(searches: queries),
+                                      capabilities: .init(web: true), request: request,
+                                      userText: "Summarize the project.")
+        #expect(queries.queries.isEmpty)
+        #expect(client.requests.last?.currentRounds.first?.results.first?.status == .refused)
+    }
+
+    @Test func onlyTheWholeMessageALineOrAQuotedPhraseMayBeSearchedOnceAfterLocalRetrieval() async {
+        let queries = QueryLog()
+        let message = "Find Swift actors\nplease use the \"structured concurrency\" docs\nand “task groups” too"
+        let session = AppToolAnswerSession(capabilities: .init(web: true),
+            toolbox: ToolLoopFixtures.toolbox(searches: queries), userText: message,
+            hasLocalContext: true)
+        // Secrets, encodings, a mere substring, a too-short quoted fragment.
+        let refusedFirst = await session.execute(calls: [
+            ToolLoopFixtures.search("secret-123"), ToolLoopFixtures.search("c2VjcmV0", id: "b"),
+            ToolLoopFixtures.search("Swift", id: "c")],
+            thinking: nil, content: "", characterBudget: 20_000, onActivity: { _ in })
+        #expect(refusedFirst.results.map(\.status) == [.refused, .refused, .refused])
+        let allowed = await session.execute(calls: [
+            ToolLoopFixtures.search("Find Swift actors", id: "d"),
+            ToolLoopFixtures.search("structured concurrency", id: "e"),
+            ToolLoopFixtures.search("task groups", id: "f")],
+            thinking: nil, content: "", characterBudget: 20_000, onActivity: { _ in })
+        #expect(allowed.results.map(\.status) == [.succeeded, .succeeded, .succeeded])
+        let repeated = await session.execute(calls: [ToolLoopFixtures.search("Find Swift actors", id: "g")],
+            thinking: nil, content: "", characterBudget: 20_000, onActivity: { _ in })
+        #expect(repeated.results.map(\.status) == [.refused])
+        #expect(queries.queries == ["Find Swift actors", "structured concurrency", "task groups"])
+    }
+
+    @Test func theWholeSingleLineMessageStillWorksAndShortOnesDoNot() async {
         let queries = QueryLog()
         let session = AppToolAnswerSession(capabilities: .init(web: true),
             toolbox: ToolLoopFixtures.toolbox(searches: queries), userText: "Find Swift actors",
             hasLocalContext: true)
-        let round = await session.execute(calls: [ToolLoopFixtures.search("secret-123"),
-                                                  ToolLoopFixtures.search("c2VjcmV0", id: "b"),
-                                                  ToolLoopFixtures.search("Swift actors", id: "c")],
+        let round = await session.execute(calls: [ToolLoopFixtures.search("Swift actors"),
+                                                  ToolLoopFixtures.search("Find Swift actors", id: "b")],
             thinking: nil, content: "", characterBudget: 20_000, onActivity: { _ in })
-        #expect(round.results.map(\.status) == [.refused, .refused, .succeeded])
-        #expect(queries.queries == ["Swift actors"])
+        #expect(round.results.map(\.status) == [.refused, .succeeded])
+        let tiny = AppToolAnswerSession(capabilities: .init(web: true),
+            toolbox: ToolLoopFixtures.toolbox(searches: queries), userText: "a", hasLocalContext: true)
+        let tinyRound = await tiny.execute(calls: [ToolLoopFixtures.search("a")],
+            thinking: nil, content: "", characterBudget: 20_000, onActivity: { _ in })
+        #expect(tinyRound.results.map(\.status) == [.refused])
+        #expect(queries.queries == ["Find Swift actors"])
+    }
+
+    @Test func aFailedCodingToolStillMarksTheAnswerLocal() async {
+        let queries = QueryLog()
+        let toolbox = AppToolbox(
+            webSearch: { query, _ in queries.append(query); throw AppToolValidationError("unused") },
+            readWebpage: { _ in throw AppToolValidationError("unused") },
+            searchFiles: { _, _ in [] },
+            coding: { _ in throw AppToolValidationError("secret-name.txt could not be opened") })
+        let session = AppToolAnswerSession(capabilities: .init(web: true, workspaceRead: true),
+                                           toolbox: toolbox, userText: "Find Swift actors")
+        let read = AppToolCall(id: "r", name: "read_file", arguments: .object(["path": .string("secret-name.txt")]))
+        let round = await session.execute(calls: [read, ToolLoopFixtures.search("secret-name.txt", id: "s")],
+            thinking: nil, content: "", characterBudget: 20_000, onActivity: { _ in })
+        #expect(round.results.map(\.status) == [.failed, .refused])
+        #expect(queries.queries.isEmpty)
     }
 
     @Test func persistedPriorFileSourcesStillProtectTheNextTurn() async throws {
@@ -563,6 +680,18 @@ enum ToolLoopFixtures {
                                       request: request)
         #expect(queries.queries.isEmpty)
         #expect(client.requests.last?.currentRounds.first?.results.first?.status == .refused)
+    }
+
+    @Test func persistedFailedCommandOutputProtectsTheNextTurn() async throws {
+        let turn = try workspaceToolTurn(name: .runCommand, status: .failed,
+                                         output: "private history marker\n[Exit status 7.]")
+        await assertHistoricalLocalTurnBlocksSearch(turn)
+    }
+
+    @Test func persistedReadFileOutputProtectsTheNextTurn() async throws {
+        let turn = try workspaceToolTurn(name: .readFile, status: .succeeded,
+                                         output: "1: private history marker")
+        await assertHistoricalLocalTurnBlocksSearch(turn)
     }
 
     @Test func anAttachedDocumentCannotAuthorizeItsOwnURL() async {

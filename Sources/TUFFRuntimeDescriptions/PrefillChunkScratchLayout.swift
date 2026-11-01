@@ -18,6 +18,8 @@ package struct PrefillChunkScratchLayout: Sendable, Equatable {
     package let gdnQKVDim: Int
     package let gdnValueDim: Int
     package let gdnVHeads: Int
+    /// Prism's alpha and beta projections retain FP32 outputs.
+    package let gdnScalarElementBytes: Int
     /// Non-zero when the shared expert output is scalar-gated (Qwen).
     package let sharedScalarGateElements: Int
     /// Gemma 4 dense PLE dimensions (zero on architectures without PLE).
@@ -58,6 +60,8 @@ package struct PrefillChunkScratchLayout: Sendable, Equatable {
         self.gdnQKVDim = hasLinear ? config.linearAttention.qkvDim : 0
         self.gdnValueDim = hasLinear ? config.linearAttention.valueDim : 0
         self.gdnVHeads = hasLinear ? config.linearAttention.numVHeads : 0
+        self.gdnScalarElementBytes = (config.variant == .bonsai2_2B || config.variant == .bonsai2_27B)
+            ? MemoryLayout<Float>.stride : MemoryLayout<Float16>.stride
         self.sharedScalarGateElements = config.sharedExpertGated ? 1 : 0
         self.plePackedWidth = config.hasPerLayerInputs
             ? config.numLayers * config.hiddenSizePerLayerInput : 0
@@ -96,7 +100,7 @@ package struct PrefillChunkScratchLayout: Sendable, Equatable {
     package var pleGateElements: Int { pleLayerElements }
     package var kStageElements: Int { chunkTokens * maxKVElementsPerToken }
     package var vStageElements: Int { kStageElements }
-    package var attentionOutputElements: Int { attnElements }
+    package var attentionOutputElements: Int { chunkTokens * max(maxQElementsPerToken, gdnValueDim) }
     package var denseXElements: Int { hiddenElements }
     package var routedXElements: Int { hiddenElements }
     package var routerXElements: Int { hiddenElements }
@@ -133,8 +137,7 @@ package struct PrefillChunkScratchLayout: Sendable, Equatable {
             + attnGateElements
             + gdnConvOutElements
             + gdnZElements
-            + gdnAElements
-            + gdnBElements
+            + (gdnAElements + gdnBElements) * (gdnScalarElementBytes / MemoryLayout<Float16>.stride)
             + gdnYElements
             + sharedScalarGateBufferElements
             + pleIdentityElements

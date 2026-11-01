@@ -38,4 +38,19 @@ import Testing
             try ArchInfo.load(configPath: temporary.path, variant: .ornith15_9B)
         }
     }
+
+    @Test func rejectsUnsupportedRotatedAndFlintArchitecturesBeforeFallback() throws {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("tuff-arch-\(UUID()).json")
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        for modelType in ["prism_hadamard_qwen35", "flint"] {
+            let root: [String: Any] = ["model_type": modelType, "text_config": [:]]
+            try JSONSerialization.data(withJSONObject: root).write(to: temporary)
+            do {
+                _ = try ArchInfo.load(configPath: temporary.path)
+                Issue.record("Expected \(modelType) to be rejected")
+            } catch RepackError.configJsonInvalid(_, let detail) {
+                #expect(detail.contains(modelType == "flint" ? "Flint" : "Hadamard"))
+            }
+        }
+    }
 }

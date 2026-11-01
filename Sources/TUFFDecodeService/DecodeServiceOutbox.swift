@@ -12,6 +12,8 @@ final class DecodeServiceOutbox: @unchecked Sendable {
     private struct State {
         var pendingText = ""
         var pendingThinking = ""
+        var pendingBytes = 0
+        var toolCallBytes = 0
         var latestPrefill: PrefillProgress?
         var latestToken: AppTokenEvent?
         var terminal: DecodeServiceEvent?
@@ -25,6 +27,8 @@ final class DecodeServiceOutbox: @unchecked Sendable {
     private var state = State()
     private let generationID: UUID
     private let memorySampler = AppMemorySampler()
+    private let maximumPendingBytes: Int
+    private let onOverflow: @Sendable () -> Void
 
     /// Bytes of image tower currently held mapped, or nil when there is no
     /// vision runtime. Sampled per event so Keep Ready is visible while a run
@@ -32,14 +36,19 @@ final class DecodeServiceOutbox: @unchecked Sendable {
     private let towerBytes: @Sendable () -> UInt64?
 
     init(generationID: UUID,
-         towerBytes: @escaping @Sendable () -> UInt64? = { nil }) {
+         towerBytes: @escaping @Sendable () -> UInt64? = { nil },
+         maximumPendingBytes: Int = 4 * 1_024 * 1_024,
+         onOverflow: @escaping @Sendable () -> Void = {}) {
         self.generationID = generationID
         self.towerBytes = towerBytes
+        self.maximumPendingBytes = max(1, maximumPendingBytes)
+        self.onOverflow = onOverflow
         memorySampler.resetPeak()
     }
 
     func publish(_ event: AppInferenceEvent) {
         condition.lock()
+        var overflow = false
         switch event {
         case .memorySample:
             // The writer samples on its own schedule; an inbound reading is the
@@ -49,13 +58,27 @@ final class DecodeServiceOutbox: @unchecked Sendable {
             state.latestPrefill = PrefillProgress(done: done, total: total)
             condition.signal()
         case .token(let token):
-            state.pendingText += token.textDelta
-            state.latestToken = token
+            let bytes = token.textDelta.utf8.count
+            if !state.terminalCommitted && bytes <= maximumPendingBytes - state.pendingBytes - state.toolCallBytes {
+                state.pendingText += token.textDelta
+                state.pendingBytes += bytes
+                state.latestToken = token
+            } else if !state.terminalCommitted { overflow = true }
         case .thinking(let token):
-            state.pendingThinking += token.textDelta
-            state.latestToken = token
+            let bytes = token.textDelta.utf8.count
+            if !state.terminalCommitted && bytes <= maximumPendingBytes - state.pendingBytes - state.toolCallBytes {
+                state.pendingThinking += token.textDelta
+                state.pendingBytes += bytes
+                state.latestToken = token
+            } else if !state.terminalCommitted { overflow = true }
         case .toolCalls(let calls):
-            state.toolCalls = calls.map(\.historical)
+            let converted = calls.map(\.historical)
+            if !state.terminalCommitted,
+               let bytes = try? JSONEncoder().encode(converted).count,
+               bytes <= maximumPendingBytes - state.pendingBytes {
+                state.toolCalls = converted
+                state.toolCallBytes = bytes
+            } else if !state.terminalCommitted { overflow = true }
         case .finished(let diagnostics):
             if !state.terminalCommitted {
                 state.terminal = terminal(.finished, diagnostics: diagnostics)
@@ -76,8 +99,14 @@ final class DecodeServiceOutbox: @unchecked Sendable {
                 state.terminalCommitted = true
             }
         }
+        if overflow {
+            state.terminal = DecodeServiceEvent(kind: .failed, generationID: generationID,
+                error: "output consumer is too slow")
+            state.terminalCommitted = true
+        }
         if state.terminal != nil { condition.signal() }
         condition.unlock()
+        if overflow { onOverflow() }
     }
 
     func finish(error: Error? = nil) {
@@ -92,7 +121,12 @@ final class DecodeServiceOutbox: @unchecked Sendable {
         condition.unlock()
     }
 
-    func runWriter(to handle: FileHandle) throws {
+    func runWriter(to handle: FileHandle, frameWriter: DecodeServiceFrameWriter? = nil) throws {
+        func write(_ event: DecodeServiceEvent) throws {
+            let frame = try DecodeFrameCodec.encode(event)
+            if let frameWriter { try frameWriter.write(frame) }
+            else { try handle.write(contentsOf: frame) }
+        }
         while true {
             condition.lock()
             if state.terminal == nil, !state.finished {
@@ -107,6 +141,7 @@ final class DecodeServiceOutbox: @unchecked Sendable {
             state.latestPrefill = nil
             state.pendingText = ""
             state.pendingThinking = ""
+            state.pendingBytes = 0
             state.latestToken = nil
             state.terminal = nil
             var prefillSequence: UInt64?
@@ -130,7 +165,7 @@ final class DecodeServiceOutbox: @unchecked Sendable {
                     currentMemoryBytes: memorySampler.sample(),
                     peakMemoryBytes: memorySampler.peakBytes,
                     visionTowerMappedBytes: towerBytes())
-                try handle.write(contentsOf: DecodeFrameCodec.encode(snapshot))
+                try write(snapshot)
                 continue
             }
             if let prefill, let prefillSequence {
@@ -141,7 +176,7 @@ final class DecodeServiceOutbox: @unchecked Sendable {
                     currentMemoryBytes: memorySampler.sample(),
                     peakMemoryBytes: memorySampler.peakBytes,
                     visionTowerMappedBytes: towerBytes())
-                try handle.write(contentsOf: DecodeFrameCodec.encode(snapshot))
+                try write(snapshot)
             }
             if !text.isEmpty || !thinking.isEmpty || token != nil {
                 let elapsed = token?.elapsedDecodeSeconds ?? 0
@@ -156,7 +191,7 @@ final class DecodeServiceOutbox: @unchecked Sendable {
                     currentMemoryBytes: memorySampler.sample(),
                     peakMemoryBytes: memorySampler.peakBytes,
                     visionTowerMappedBytes: towerBytes())
-                try handle.write(contentsOf: DecodeFrameCodec.encode(snapshot))
+                try write(snapshot)
             }
             if var terminal {
                 if terminal.kind == .finished {
@@ -165,7 +200,7 @@ final class DecodeServiceOutbox: @unchecked Sendable {
                     condition.unlock()
                     terminal.toolCalls = calls.isEmpty ? nil : calls
                 }
-                try handle.write(contentsOf: DecodeFrameCodec.encode(terminal))
+                try write(terminal)
             }
             if terminal != nil { return }
             if done { return }

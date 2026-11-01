@@ -36,6 +36,17 @@ public struct Model {
     public var sourceSnapshotHash: String? { manifest.sourceSnapshotHash }
     public var sharedExpertWeightBits: Int { manifest.quant?.sharedExpert.weightBits ?? 8 }
 
+    /// Start a cancellable, non-wiring warm-up only for fully resident dense
+    /// models with room for their file-backed pages alongside other allocations.
+    public func startResidentWarmup() -> ResidentWarmup? {
+        guard ResidentWarmup.eligible(
+            payloadSize: residentIndex.header.residentSize,
+            physicalMemory: ProcessInfo.processInfo.physicalMemory,
+            stagesDenseLayers: residentBuffers.stagesDenseLayers,
+            isDense: config.feedForwardKind == .dense) else { return nil }
+        return ResidentWarmup.start(buffers: residentBuffers.metalBuffers)
+    }
+
     let residentBuffers: ResidentBufferSet
     let residentIndex: ResidentIndex
     let packedExpertsLayout: PackedExpertsLayout
@@ -230,7 +241,7 @@ public struct Model {
         switch config.family {
         case .gemma4:
             return try resident(name: "language_model.model.layers.\(L).router.proj.weight")
-        case .qwen36, .qwen4Exp:
+        case .qwen36, .qwen4Exp, .flint:
             return try resident(name: "language_model.model.layers.\(L).mlp.gate.weight")
         case .gptOss:
             return try resident(name: "language_model.model.layers.\(L).mlp.router.weight")
@@ -254,13 +265,13 @@ public struct Model {
         try resident(name: sharedExpertName("down_proj", layer: L))
     }
     private func sharedExpertName(_ proj: String, layer L: Int) -> String {
-        if config.feedForwardKind == .dense {
+        if config.feedForwardKind == .dense || (config.family == .flint && L < 2) {
             return "language_model.model.layers.\(L).mlp.\(proj).weight"
         }
         switch config.family {
         case .gemma4:
             return "language_model.model.layers.\(L).mlp.\(proj).weight"
-        case .qwen36, .qwen4Exp:
+        case .qwen36, .qwen4Exp, .flint:
             return "language_model.model.layers.\(L).mlp.shared_expert.\(proj).weight"
         case .gptOss:
             return "language_model.model.layers.\(L).mlp.\(proj).weight"
@@ -597,7 +608,16 @@ public struct Model {
             scaleOffset: scaleRel, scaleLength: entry.scaleSize,
             biasOffset:  biasRel,  biasLength:  entry.biasSize,
             shape: entry.shape,
-            dtype: entry.dtype)
+            dtype: entry.dtype, name: name)
+    }
+
+    /// Resolve a named Prism projection's explicit input sign vector. The
+    /// source sidecar guarantees this is the same width as the logical input.
+    func prismSigns(for weight: TensorView) throws -> TensorView {
+        guard let name = weight.name, name.hasSuffix(".weight") else {
+            throw ModelError.indexCorrupt(detail: "Prism weight has no resident tensor name")
+        }
+        return try resident(name: String(name.dropLast(".weight".count)) + ".signs")
     }
 
     // MARK: - Routed expert (lazy)
@@ -661,14 +681,14 @@ public struct Model {
         }
         try file.waitUntilVerified()
         let layerFD = file.descriptor
-        let streamSize = UInt64(packedExpertsLayout.expertsPerLayer)
-            * packedExpertsLayout.expertStride
+        let layerStride = packedExpertsLayout.layers[L].experts[0].size
+        let streamSize = UInt64(packedExpertsLayout.expertsPerLayer) * layerStride
         let layout = StreamLayout(
             path: url.path,
             streamOffset: 0,
             streamSize: streamSize,
             expertsPerLayer: packedExpertsLayout.expertsPerLayer,
-            expertStride: packedExpertsLayout.expertStride,
+            expertStride: layerStride,
             expertOffsets: packedExpertsLayout.layers[L].experts.map(\.offset))
         streamersBox.streamers[L] = try withExtendedLifetime(file) {
             try PreadExpertStreamer(
@@ -678,10 +698,10 @@ public struct Model {
                 cachePolicy: expertCachePolicy,
                 fileDescriptor: layerFD,
                 bypassFilesystemCache: Self.shouldBypassExpertFilesystemCache(
-                    expertStride: packedExpertsLayout.expertStride, minimumSlots: config.topKExperts,
+                    expertStride: layerStride, minimumSlots: config.topKExperts,
                     layers: config.numLayers, physicalMemory: ProcessInfo.processInfo.physicalMemory)
                     || Self.readsExpertsPastFileCache(variant: config.variant,
-                        expertStride: packedExpertsLayout.expertStride,
+                        expertStride: layerStride,
                         expertsPerLayer: packedExpertsLayout.expertsPerLayer,
                         layers: config.numLayers, physicalMemory: ProcessInfo.processInfo.physicalMemory))
         }
@@ -913,6 +933,7 @@ extension Model {
                                                           manifest: Manifest,
                                                           layout: PackedExpertsLayout) throws {
         for layer in layout.layers {
+            if layer.experts.isEmpty { continue }
             let relativePath = "packed_experts/\(layer.file)"
             guard let manifestEntry = manifest.files[relativePath] else {
                 throw ModelError.trustedReceiptInvalid(detail: "manifest missing \(relativePath)")

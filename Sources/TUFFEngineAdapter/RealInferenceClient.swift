@@ -20,6 +20,9 @@ public final class RealInferenceClient: AppModelLifecycleClient, @unchecked Send
 
     private let memorySampler: AppMemorySampler
     private let generationTasks = GenerationTaskRegistry()
+    private let concurrentTasks = ConcurrentGenerationTasks()
+    private let peers = ConcurrentInferencePeers()
+    private let admission = InferenceAdmission()
 
     public init(memorySampler: AppMemorySampler = AppMemorySampler(),
                 residencyCoordinator: AppResidencyCoordinator? = nil) {
@@ -32,17 +35,26 @@ public final class RealInferenceClient: AppModelLifecycleClient, @unchecked Send
                              options: AppRuntimeOptions,
                              forceLogitsHead: Bool,
                              onState: @escaping @Sendable (AppModelLoadState) -> Void) async throws {
-        try await session.ensureLoaded(
-            key: SessionLoadKey(directory: modelDirectory.standardizedFileURL,
-                                maxContext: maxContextTokens,
-                                options: options,
-                                forceLogitsHead: forceLogitsHead),
-            onState: onState)
+        await admission.beginLifecycle()
+        defer { admission.endLifecycle() }
+        try Task.checkCancellation()
+        let key = SessionLoadKey(directory: modelDirectory.standardizedFileURL,
+                                 maxContext: maxContextTokens, options: options,
+                                 forceLogitsHead: forceLogitsHead)
+        if await session.isLoaded(key) { return }
+        concurrentTasks.cancelAll()
+        await concurrentTasks.waitUntilIdle()
+        await peers.removeAll()
+        try await session.ensureLoaded(key: key, onState: onState)
     }
 
     public func unload() async {
+        await admission.beginLifecycle()
+        defer { admission.endLifecycle() }
         cancel()
+        concurrentTasks.cancelAll()
         await waitUntilIdle()
+        await peers.removeAll()
         await session.unload()
     }
 
@@ -50,12 +62,19 @@ public final class RealInferenceClient: AppModelLifecycleClient, @unchecked Send
     /// work. A cancelled stream consumer may finish before its producer does.
     public func waitUntilIdle() async {
         await generationTasks.waitUntilIdle()
+        await concurrentTasks.waitUntilIdle()
     }
 
     public func generate(_ request: AppGenerationRequest) -> AsyncThrowingStream<AppInferenceEvent, Error> {
         AsyncThrowingStream { continuation in
             let generationID = UUID()
+            guard admission.beginLegacy() else {
+                continuation.yield(.failed(.generationInFlight, partial: nil))
+                continuation.finish(throwing: AppInferenceError.generationInFlight)
+                return
+            }
             guard generationTasks.reserve(generationID) else {
+                admission.endLegacy()
                 continuation.yield(.failed(.generationInFlight, partial: nil))
                 continuation.finish(throwing: AppInferenceError.generationInFlight)
                 return
@@ -65,6 +84,7 @@ public final class RealInferenceClient: AppModelLifecycleClient, @unchecked Send
                                   memorySampler: memorySampler,
                                   continuation: continuation)
                 generationTasks.clear(generationID)
+                admission.endLegacy()
             }
             generationTasks.attach(task, to: generationID)
 
@@ -78,6 +98,94 @@ public final class RealInferenceClient: AppModelLifecycleClient, @unchecked Send
         generationTasks.takeCurrent()?.cancel()
     }
 
+    /// Used by the multiplexed helper protocol. A session owns its runner and
+    /// cache; the request ID is used solely for targeted cancellation.
+    public func generate(_ request: AppGenerationRequest, sessionID: UUID,
+                         requestID: UUID) -> AsyncThrowingStream<AppInferenceEvent, Error> {
+        AsyncThrowingStream { continuation in
+            guard admission.beginShared() else {
+                continuation.yield(.failed(.generationInFlight, partial: nil))
+                continuation.finish(throwing: AppInferenceError.generationInFlight)
+                return
+            }
+            guard concurrentTasks.reserve(requestID: requestID, sessionID: sessionID) else {
+                admission.endShared()
+                continuation.yield(.failed(.generationInFlight, partial: nil))
+                continuation.finish(throwing: AppInferenceError.generationInFlight)
+                return
+            }
+            let task = Task(priority: .userInitiated) { [self] in
+                do {
+                    let peer = try await peers.session(for: sessionID, owner: session)
+                    try Task.checkCancellation()
+                    await peer.run(request: request, memorySampler: memorySampler,
+                                   continuation: continuation)
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+                concurrentTasks.clear(requestID: requestID)
+                admission.endShared()
+            }
+            concurrentTasks.attach(task, requestID: requestID)
+            continuation.onTermination = { [concurrentTasks] _ in
+                concurrentTasks.cancel(requestID: requestID)
+            }
+        }
+    }
+
+    public func cancel(requestID: UUID) { concurrentTasks.cancel(requestID: requestID) }
+    public func waitUntilRequestIdle(_ requestID: UUID) async {
+        await concurrentTasks.waitUntilRequestIdle(requestID)
+    }
+    public func cancelAllRequests() { cancel(); concurrentTasks.cancelAll() }
+    public func cancelWarmup() { Task { await session.cancelWarmup() } }
+
+    public func endSession(_ sessionID: UUID) async {
+        guard concurrentTasks.beginEnding(sessionID) else { return }
+        await concurrentTasks.waitUntilSessionIdle(sessionID)
+        await peers.remove(sessionID)
+        concurrentTasks.finishEnding(sessionID)
+    }
+
+}
+
+private actor ConcurrentInferencePeers {
+    private struct Entry {
+        let session: RealInferenceSession
+        let isOwner: Bool
+    }
+    private var sessions: [UUID: Entry] = [:]
+    private var ownerClaimed = false
+
+    func session(for id: UUID, owner: RealInferenceSession) async throws -> RealInferenceSession {
+        if let existing = sessions[id] { return existing.session }
+        let isOwner = !ownerClaimed
+        if isOwner { ownerClaimed = true }
+        let created: RealInferenceSession
+        if isOwner { created = await owner.claimSharedOwner() }
+        else { created = try await owner.makeSharedPeer() }
+        // Only one active request per session is admitted by the registry.
+        sessions[id] = Entry(session: created, isOwner: isOwner)
+        return created
+    }
+
+    func remove(_ id: UUID) async {
+        guard let entry = sessions.removeValue(forKey: id) else { return }
+        if entry.isOwner {
+            await entry.session.resetSharedOwnerSession()
+            ownerClaimed = false
+        } else { await entry.session.unload() }
+    }
+
+    func removeAll() async {
+        let old = Array(sessions.values)
+        sessions.removeAll()
+        ownerClaimed = false
+        for entry in old {
+            if entry.isOwner { await entry.session.resetSharedOwnerSession() }
+            else { await entry.session.unload() }
+        }
+    }
 }
 
 struct SessionLoadKey: Equatable, Sendable {
@@ -119,12 +227,62 @@ struct TokenizerDirectoryCache: Equatable, Sendable {
 /// which is acceptable for the app's single session. The 8 GB rule lives
 /// here: a reload releases the loaded model, runner, and scratch before constructing
 /// replacements, so two models are never alive at once.
+/// The immutable model mapping is shared; each peer constructs its own
+/// runner, KV state, and scratch. Mutable model staging is protected by the
+/// same forward lease in every peer.
+private struct SharedInferenceResources: @unchecked Sendable {
+    let model: Model
+    let context: MetalContext
+    let tokenizer: GFTokenizer
+    let key: SessionLoadKey
+    let lease: FairForwardLease
+    let residencyLease: TUFFResidencyLease
+    let visionRuntime: VisionRuntime?
+    let visionRuntimeError: Error?
+    let residencyCoordinator: AppResidencyCoordinator
+    let ownerResidencyLease: TUFFResidencyLease
+    let visionWorkspaceLease: TUFFResidencyLease?
+}
+
+/// The runtime and model are owned by this session; the shared lease protects
+/// model expert residency until image encoding and its GPU work finish.
+private struct SharedVisionEncode: @unchecked Sendable {
+    let runtime: VisionRuntime
+    let model: Model
+    let fileURL: URL
+    let policy: VisionResidencyPolicy
+}
+
 actor RealInferenceSession {
     private let residencyCoordinator: AppResidencyCoordinator?
     private var residencyLease: TUFFResidencyLease?
 
     init(residencyCoordinator: AppResidencyCoordinator? = nil) {
         self.residencyCoordinator = residencyCoordinator
+    }
+    private init(shared: SharedInferenceResources) throws {
+        self.residencyCoordinator = shared.residencyCoordinator
+        let configuration = try shared.key.options.resolvedRuntimeConfiguration(
+            forceLogitsHead: shared.key.forceLogitsHead)
+        self.loadedKey = shared.key
+        self.ctx = shared.context
+        self.tokenizer = shared.tokenizer
+        self.runner = try ModelForwardRunner(model: shared.model, context: shared.context,
+            maxContext: shared.key.maxContext, runtimeConfiguration: configuration)
+        self.scratch = try RawCompletionScratch(context: shared.context,
+            vocab: shared.model.config.vocabSize,
+            logitSoftcap: Float(shared.model.config.finalLogitSoftcap))
+        self.model = shared.model
+        self.sharedForwardLease = shared.lease
+        self.residencyLease = shared.residencyLease
+        self.visionRuntime = shared.visionRuntime
+        self.visionRuntimeError = shared.visionRuntimeError
+        self.ownerResidencyLease = shared.ownerResidencyLease
+        self.visionWorkspaceLease = shared.visionWorkspaceLease
+        self.conversations = ConversationStateStore(budgetBytes: Self.retainedConversationBudget(
+            model: shared.model, key: shared.key, imagePackInstalled: shared.visionRuntime != nil))
+        self.conversationDomain = Self.conversationDomain(
+            model: shared.model, key: shared.key, runtime: configuration)
     }
     private var loadedKey: SessionLoadKey?
     private var ctx: MetalContext?
@@ -133,6 +291,11 @@ actor RealInferenceSession {
     private var runner: ModelForwardRunner?
     private var scratch: RawCompletionScratch?
     private var model: Model?
+    private var residentWarmup: ResidentWarmup?
+    private var sharedForwardLease: FairForwardLease?
+    private var loadEpoch = UUID()
+    private var visionWorkspaceLease: TUFFResidencyLease?
+    private var ownerResidencyLease: TUFFResidencyLease?
     /// The conversation the runner holds and any retained ones. Replaced with
     /// the session, so nothing outlives the model it was computed by.
     private var conversations = ConversationStateStore(budgetBytes: 0)
@@ -145,10 +308,58 @@ actor RealInferenceSession {
     /// so a reader does not have to await it mid-decode.
     nonisolated let towerBytes = Mutex<UInt64?>(nil)
 
+    /// The owner keeps the model residency lease alive while peer sessions
+    /// exist. The caller must reserve each peer's additional working memory.
+    func makeSharedPeer() async throws -> RealInferenceSession {
+        guard let model, let ctx, let tokenizer, let loadedKey,
+              let residencyCoordinator, let residencyLease else {
+            throw AppInferenceError.modelNotLoaded
+        }
+        residentWarmup?.cancel()
+        residentWarmup = nil
+        let epoch = loadEpoch
+        let peerReservation = try await residencyCoordinator.reserveSession(
+            directory: loadedKey.directory, context: loadedKey.maxContext, options: loadedKey.options)
+        guard epoch == loadEpoch else {
+            peerReservation.release()
+            throw AppInferenceError.modelNotLoaded
+        }
+        let lease = sharedForwardLease ?? FairForwardLease()
+        sharedForwardLease = lease
+        return try RealInferenceSession(shared: SharedInferenceResources(
+            model: model, context: ctx, tokenizer: tokenizer, key: loadedKey,
+            lease: lease, residencyLease: peerReservation,
+            visionRuntime: visionRuntime, visionRuntimeError: visionRuntimeError,
+            residencyCoordinator: residencyCoordinator, ownerResidencyLease: residencyLease,
+            visionWorkspaceLease: visionWorkspaceLease))
+    }
+
     private var visionRuntime: VisionRuntime? {
         didSet { publishTowerBytes() }
     }
     private var visionRuntimeError: Error?
+
+    func isLoaded(_ key: SessionLoadKey) -> Bool { loadedKey == key && runner != nil }
+
+    func cancelWarmup() {
+        residentWarmup?.cancel()
+        residentWarmup = nil
+    }
+
+    /// The first session reuses the already-admitted owner's runner and vision
+    /// runtime. Additional peers receive separately admitted private state.
+    func claimSharedOwner() -> RealInferenceSession {
+        cancelWarmup()
+        if sharedForwardLease == nil { sharedForwardLease = FairForwardLease() }
+        return self
+    }
+
+    func resetSharedOwnerSession() {
+        runner?.reset()
+        let budget = conversations.budgetBytes
+        conversations = ConversationStateStore(budgetBytes: budget)
+        savedChats?.flush()
+    }
 
     /// Called after anything that maps or releases tower regions.
     private func publishTowerBytes() {
@@ -160,6 +371,9 @@ actor RealInferenceSession {
                       onState: @Sendable (AppModelLoadState) -> Void) async throws {
         if loadedKey == key, runner != nil { return }
 
+        loadEpoch = UUID()
+        residentWarmup?.cancel()
+        residentWarmup = nil
         conversations = ConversationStateStore(budgetBytes: 0)
         conversationDomain = nil
         savedChats?.flush()
@@ -170,7 +384,9 @@ actor RealInferenceSession {
         loadedKey = nil
         visionRuntime = nil
         visionRuntimeError = nil
+        visionWorkspaceLease = nil
         residencyLease = nil
+        ownerResidencyLease = nil
 
         let start = Date()
         do {
@@ -246,6 +462,7 @@ actor RealInferenceSession {
 
             let loadedVisionRuntime: VisionRuntime?
             let loadedVisionRuntimeError: Error?
+            var loadedVisionReservation: TUFFResidencyLease?
             do {
                 let runtime = try VisionRuntime.open(
                     textModelURL: key.directory,
@@ -254,6 +471,9 @@ actor RealInferenceSession {
                 // first image, so the wait is where the user asked for it.
                 if key.options.visionResidencyPolicy == .keepReady {
                     onState(.loading(.mappingImageTower))
+                    if let residencyCoordinator, let residencyLease {
+                        loadedVisionReservation = try residencyCoordinator.reserveVision(allowing: [residencyLease])
+                    }
                     try runtime.prewarmWeightRegions()
                 }
                 loadedVisionRuntime = runtime
@@ -261,6 +481,7 @@ actor RealInferenceSession {
             } catch {
                 // A missing or invalid pack only means images are unavailable;
                 // the reason travels to the first image turn.
+                loadedVisionReservation = nil
                 loadedVisionRuntime = nil
                 loadedVisionRuntimeError = error
             }
@@ -282,9 +503,11 @@ actor RealInferenceSession {
                 : nil
             visionRuntime = loadedVisionRuntime
             visionRuntimeError = loadedVisionRuntimeError
+            visionWorkspaceLease = loadedVisionReservation
             context.logLoadStatistics(key.directory.lastPathComponent)
             onState(.ready(modelDirectory: key.directory,
                            loadSeconds: Date().timeIntervalSince(start)))
+            residentWarmup = loadedModel.startResidentWarmup()
         } catch is CancellationError {
             throw CancellationError()
         } catch let appError as AppInferenceError {
@@ -594,6 +817,9 @@ actor RealInferenceSession {
     }
 
     func unload() {
+        loadEpoch = UUID()
+        residentWarmup?.cancel()
+        residentWarmup = nil
         // Unload is also the helper's way out when the app quits, so a chat
         // still being written finishes first instead of being lost.
         savedChats?.flush()
@@ -602,6 +828,7 @@ actor RealInferenceSession {
         conversationDomain = nil
         visionRuntime = nil
         visionRuntimeError = nil
+        visionWorkspaceLease = nil
         model = nil
         runner = nil
         scratch = nil
@@ -609,11 +836,14 @@ actor RealInferenceSession {
         tokenizerDirectoryCache.clear()
         loadedKey = nil
         residencyLease = nil
+        ownerResidencyLease = nil
     }
 
     func run(request: AppGenerationRequest,
              memorySampler: AppMemorySampler,
              continuation: AsyncThrowingStream<AppInferenceEvent, Error>.Continuation) async {
+        residentWarmup?.cancel()
+        residentWarmup = nil
         var prefillConfig = request.runtimeOptions.prefillConfig
         // Image spans only run under chunked prefill, and the app's prefill toggle
         // can select `.off`. Coerce rather than fail after the encodes: whether
@@ -629,8 +859,15 @@ actor RealInferenceSession {
         }
         let progress = ProgressState()
         var completionStarted = false
+        var imageReservation: TUFFResidencyLease?
+        defer { imageReservation?.release() }
         do {
             try request.validate()
+            if !encodableAttachments.isEmpty, visionWorkspaceLease == nil,
+               let residencyCoordinator, let residencyLease {
+                imageReservation = try residencyCoordinator.reserveVision(
+                    allowing: [residencyLease] + (ownerResidencyLease.map { [$0] } ?? []))
+            }
             let executedPrefillMode: PrefillExecutedMode =
                 prefillConfig.mode == .chunked ? .chunked : .off
             let prefillDiagnostics = PrefillExecutionDiagnostics(config: prefillConfig,
@@ -725,11 +962,21 @@ actor RealInferenceSession {
                             "Image \(attachment.displayName) changed after selection.")
                     }
                     defer { publishTowerBytes() }
-                    features[attachment.id] = try visionRuntime.encodeImage(
-                        at: attachment.fileURL,
-                        languageModel: model,
-                        residencyPolicy: request.runtimeOptions.visionResidencyPolicy,
-                        checkCancellation: { try Task.checkCancellation() })
+                    if let lease = sharedForwardLease {
+                        let work = SharedVisionEncode(runtime: visionRuntime, model: model,
+                            fileURL: attachment.fileURL,
+                            policy: request.runtimeOptions.visionResidencyPolicy)
+                        features[attachment.id] = try await lease.withLease {
+                            try work.runtime.encodeImage(at: work.fileURL, languageModel: work.model,
+                                residencyPolicy: work.policy,
+                                checkCancellation: { try Task.checkCancellation() })
+                        }
+                    } else {
+                        features[attachment.id] = try visionRuntime.encodeImage(
+                            at: attachment.fileURL, languageModel: model,
+                            residencyPolicy: request.runtimeOptions.visionResidencyPolicy,
+                            checkCancellation: { try Task.checkCancellation() })
+                    }
                 }
                 let rendered = try Self.renderMultimodalConversation(
                     request: request,
@@ -814,8 +1061,11 @@ actor RealInferenceSession {
             }
 
             completionStarted = true
+            let producer: any LogitProducer = sharedForwardLease.map {
+                LeasedModelRunner(runner: runner, lease: $0)
+            } ?? runner
             let result = try await runRawCompletion(
-                producer: runner, tokenizer: tokenizer, promptIds: promptIds,
+                producer: producer, tokenizer: tokenizer, promptIds: promptIds,
                 multimodalInput: multimodalInput,
                 config: config, context: ctx, scratch: scratch,
                 prefillConfig: prefillConfig, start: completionStart,

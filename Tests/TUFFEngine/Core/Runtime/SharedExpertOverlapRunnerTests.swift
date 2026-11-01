@@ -113,6 +113,50 @@ import TUFFValidationSupport
         for runner in runners { try? FileManager.default.removeItem(at: runner.directory) }
     }
 
+    @Test func failedDecodeWaitsForRegisteredReadBeforeReleasingLease() async throws {
+        let fixture = try makeRunner(.flashNext, overlap: false)
+        defer { remove(fixture) }
+        let registered = DispatchSemaphore(value: 0)
+        let returned = DispatchSemaphore(value: 0)
+        let releaseRead = DispatchSemaphore(value: 0)
+        func wait(_ semaphore: DispatchSemaphore, timeout: DispatchTimeInterval) async -> Bool {
+            await withCheckedContinuation { continuation in
+                DispatchQueue.global().async {
+                    continuation.resume(returning: semaphore.wait(timeout: .now() + timeout) == .success)
+                }
+            }
+        }
+        fixture.runner.decodeLookaheadObserver = { group in
+            group.enter()
+            DispatchQueue.global().async {
+                releaseRead.wait()
+                group.leave()
+            }
+            registered.signal()
+            throw InjectedFailure()
+        }
+        let lease = FairForwardLease()
+        let task = Task.detached {
+            defer { returned.signal() }
+            return try await lease.withLease {
+                try await fixture.runner.produce(token: 1, position: 0, into: fixture.logits)
+            }
+        }
+        let wasRegistered = await wait(registered, timeout: .seconds(30))
+        #expect(wasRegistered, "toy decode must register a streamed expert read")
+        if wasRegistered {
+            #expect(!(await wait(returned, timeout: .milliseconds(100))),
+                    "the failing decode must not release its lease while the read is pending")
+        }
+        releaseRead.signal()
+        do {
+            try await task.value
+            Issue.record("expected injected decode failure")
+        } catch {
+            #expect(error is InjectedFailure)
+        }
+    }
+
     private func index(_ step: PrefillRoutedPhaseStep, in steps: [PrefillRoutedPhaseStep],
                        sourceLocation: SourceLocation = #_sourceLocation) -> Int {
         guard let index = steps.firstIndex(of: step) else {

@@ -32,6 +32,47 @@ import TUFFDecodeProtocol
         #expect(decoded.forceLogitsHead)
     }
 
+    @Test func servingPreparationValidatesDecodedContextAndRuntimeOptions() throws {
+        let valid = try ServingModelPreparation(
+            modelID: "gemma-test", maxContextTokens: 4_096,
+            runtimeOptions: DecodeRuntimeOptions(), forceLogitsHead: false)
+        let encoded = try JSONEncoder().encode(valid)
+        let object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        var invalidContext = object
+        invalidContext["maxContextTokens"] = 0
+        let badContext = try JSONSerialization.data(withJSONObject: invalidContext)
+        #expect(throws: (any Error).self) {
+            try JSONDecoder().decode(ServingModelPreparation.self, from: badContext)
+        }
+
+        var invalidOptions = object
+        var options = try #require(invalidOptions["runtimeOptions"] as? [String: Any])
+        options["expertCacheSlots"] = -1
+        invalidOptions["runtimeOptions"] = options
+        let badOptions = try JSONSerialization.data(withJSONObject: invalidOptions)
+        #expect(throws: (any Error).self) {
+            try JSONDecoder().decode(ServingModelPreparation.self, from: badOptions)
+        }
+    }
+
+    @Test func servingRequestRejectsMismatchedRequestAndGenerationIDsAfterDecode() throws {
+        let generation = UUID()
+        let payload = DecodeGenerationRequest(
+            prompt: "hello", maxNewTokens: 8, maxContextTokens: 128,
+            temperature: 0.2, generationID: generation)
+        let request = try ServingGenerationRequest(
+            modelID: "gemma-test", sessionID: UUID(), requestID: generation,
+            payload: payload)
+        let encoded = try JSONEncoder().encode(request)
+        let object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        var invalid = object
+        invalid["requestID"] = UUID().uuidString
+        let data = try JSONSerialization.data(withJSONObject: invalid)
+        #expect(throws: (any Error).self) {
+            try JSONDecoder().decode(ServingGenerationRequest.self, from: data)
+        }
+    }
+
     /// History carries images now, and the decode service is another process:
     /// an image that does not survive the wire is an image the model cannot see
     /// on the follow-up question.

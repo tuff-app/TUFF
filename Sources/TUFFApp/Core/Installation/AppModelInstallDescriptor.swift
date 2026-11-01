@@ -101,7 +101,9 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
             sourceIndexSHA256: source.sourceIndexSHA256,
             approximateDownloadBytes: source.approximateDownloadBytes,
             installedBytes: source.installedBytes,
-            rangeStagingBytes: UInt64(RemoteChunkPolicy.defaultBytes) * 2,
+            rangeStagingBytes: descriptor.architecture.weightLayout == .prismQ2
+                ? source.approximateDownloadBytes + 8 * 1024 * 1024
+                : UInt64(RemoteChunkPolicy.defaultBytes) * 2,
             reserveBytes: source.reserveBytes)
     }
 
@@ -230,6 +232,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         switch family {
         case .gemma4: .gemma
         case .qwen36, .qwen4Exp: .chatml
+        case .flint: .flint
         case .gptOss: .harmony
         case .minimaxM2: .minimax
         }
@@ -426,7 +429,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         case .gemma4: return .visionCompanion
         case .qwen36: return .qwen36VisionCompanion
         case .gptOss: return nil
-        case .minimaxM2: return nil
+        case .minimaxM2, .flint: return nil
         // Flash Next's tower is Qwen3.6's, but its merger projects into a
         // wider residual, so the two packs are not interchangeable and each
         // family routes to its own.

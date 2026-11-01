@@ -6,6 +6,20 @@ import TUFFModelCatalog
 @testable import TUFFAppCore
 
 @Suite struct MacAppSettingsTests {
+    @Test func workspacePermissionsDefaultOffAndPersist() throws {
+        let data = try JSONEncoder().encode(MacAppSettings())
+        var old = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        for key in ["codingWriteEnabled", "codingCommandEnabled", "codingNetworkEnabled", "codingFolderID"] { old.removeValue(forKey: key) }
+        var settings = try JSONDecoder().decode(MacAppSettings.self, from: JSONSerialization.data(withJSONObject: old))
+        #expect(!settings.codingWriteEnabled && !settings.codingCommandEnabled && !settings.codingNetworkEnabled)
+        settings.codingWriteEnabled = true
+        settings.codingCommandEnabled = true
+        settings.codingNetworkEnabled = true
+        settings.codingFolderID = UUID().uuidString
+        let restored = try JSONDecoder().decode(MacAppSettings.self, from: JSONEncoder().encode(settings))
+        #expect(restored == settings)
+    }
+
     @Test func offlinePauseMigratesAndRoundTripsWithoutChangingWebIntent() throws {
         let original = MacAppSettings()
         let data = try JSONEncoder().encode(original)

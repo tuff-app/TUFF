@@ -6,7 +6,6 @@ import TUFFDecodeProtocol
 import TUFFDecodeServiceCore
 import TUFFInferenceTypes
 import TUFFRuntimeManagement
-import TUFFServerEngine
 
 func argument(after flag: String) -> String? {
     let arguments = CommandLine.arguments
@@ -46,11 +45,7 @@ if CommandLine.arguments.contains("--cli-json") {
 
 Task {
     defer { withExtendedLifetime(lease) {} }
-    if CommandLine.arguments.contains("--server-rpc") {
-        await ServerEngineRPCService.production(input: .standardInput, output: .standardOutput).run()
-    } else {
-        await TUFFDecodeServiceMain.main()
-    }
+    await TUFFDecodeServiceMain.main()
     exit(0)
 }
 dispatchMain()

@@ -3,6 +3,7 @@ import TUFFAppCore
 import TUFFAppServer
 import TUFFAppUpdater
 import TUFFMacPresentation
+import TUFFServerCore
 import SwiftUI
 
 // Run as a regular foreground app even when launched as a bare SwiftPM
@@ -46,7 +47,7 @@ struct TUFFMacApp: App {
     @State private var model: AppModel
     @State private var backgroundAPI = AppBackgroundAPIController()
     @State private var updateController: AppUpdateController
-    private let inferenceBroker: SharedInferenceBroker
+    private let inferenceClient: ServingHostInferenceClient
     private let loadModelRequested: Bool
 
     init() {
@@ -54,17 +55,28 @@ struct TUFFMacApp: App {
         // before anything resolves a model path or opens a pack.
         AppSupportMigration.migrateModels(
             applicationSupport: AppSupportMigration.applicationSupportURL())
-        let inferenceBroker = SharedInferenceBroker(
-            client: DecodeServiceInferenceClient())
+        // One serving pool per profile: this window, the foreground server and
+        // the optional Background API all attach to the same dedicated host.
+        let support = AppSupportMigration.applicationSupportURL()
+        let inferenceClient: ServingHostInferenceClient
+        do {
+            let profile = try ServingHostProfile.forCurrentProcess()
+            inferenceClient = ServingHostInferenceClient(
+                profile: profile,
+                bundleIdentifier: Bundle.main.bundleIdentifier ?? "tuff.unbundled",
+                modelsRoot: support.appendingPathComponent("TUFF/Models", isDirectory: true))
+        } catch {
+            fatalError("The TUFF serving profile could not be prepared: \(error)")
+        }
         let model = AppModel(
-            client: inferenceBroker,
+            client: inferenceClient,
             installer: RepackModelInstallerClient(descriptor: .selected),
             conversationStore: .persistentDefault(),
             visionRuntimeSupported: AppModel.currentDeviceSupportsVisionRuntime,
             settingsPersistenceEnabled: true,
             toolStore: .standard())
         let updateController = AppUpdateController()
-        self.inferenceBroker = inferenceBroker
+        self.inferenceClient = inferenceClient
         self.loadModelRequested = CommandLine.arguments.contains("--load-model")
         _model = State(initialValue: model)
         _updateController = State(initialValue: updateController)
@@ -164,7 +176,7 @@ struct TUFFMacApp: App {
             CommandMenu("Generation") {
                 Button("New Chat") { model.clearOutput() }
                     .keyboardShortcut("n", modifiers: .command)
-                    .disabled(model.isRunning || !model.hasOutputTranscript)
+                    .disabled(model.isSelectedConversationRunning || !model.hasOutputTranscript)
                 Divider()
                 Button("Cancel Generation") { model.cancel() }
                     .keyboardShortcut(".", modifiers: .command)

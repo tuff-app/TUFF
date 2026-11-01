@@ -81,13 +81,7 @@ public struct AppAnswerRunner: Sendable {
                                            userText: userText,
                                            hasLocalContext: hasLocalContext
                                             || !request.imageAttachments.isEmpty
-                                            || request.history.contains { turn in
-                                                !turn.documents.isEmpty || !turn.images.isEmpty
-                                                    || turn.sources.contains { $0.kind == .file }
-                                                    || turn.toolRounds.contains { round in
-                                                        round.results.contains { $0.name == "search_files" && $0.status == .succeeded }
-                                                    }
-                                            })
+                                            || request.history.contains(where: Self.turnContainsLocalContext))
         var current = request
         var malformedRetries = 0
         var generations = 0
@@ -214,5 +208,25 @@ public struct AppAnswerRunner: Sendable {
         let used = (diagnostics.promptTokenCount ?? 0) + diagnostics.generatedTokens
         let free = request.maxContextTokens - used - limits.answerReserveTokens
         return max(0, free) * 3
+    }
+
+    private static func turnContainsLocalContext(_ turn: AppChatTurn) -> Bool {
+        if !turn.documents.isEmpty || !turn.images.isEmpty
+            || turn.sources.contains(where: { $0.kind == .file }) {
+            return true
+        }
+        return turn.toolRounds.contains { round in
+            round.results.contains { result in
+                if result.name == AppToolName.searchFiles.rawValue {
+                    return result.status == .succeeded
+                }
+                guard result.status != .refused,
+                      let name = AppToolName(rawValue: result.name) else { return false }
+                switch name {
+                case .listFiles, .readFile, .writeFile, .editFile, .runCommand: return true
+                case .webSearch, .readWebpage, .searchFiles: return false
+                }
+            }
+        }
     }
 }

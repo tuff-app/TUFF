@@ -31,17 +31,19 @@ import Testing
     }
 
     @MainActor
-    @Test func terminalEventsReturnPhaseToIdleKeepingLastValues() {
-        let model = makeAppModel()
-        model.apply(.token(AppTokenEvent(
-            index: 2, textDelta: "a", elapsedDecodeSeconds: 1.0)))
-        model.apply(.finished(AppDiagnostics(
-            generatedTokens: 3, stopReason: .eos,
-            timeToFirstTokenSeconds: 0.1, decodeSeconds: 1.0, tokensPerSecond: 3,
-            peakMemoryBytes: nil,
-            runtimeOptions: AppRuntimeOptions())))
+    @Test func terminalEventsReturnPhaseToIdleKeepingLastValues() async {
+        let client = MockInferenceClient(response: "one two", tokenDelayNanos: 1_000_000)
+        let model = makeAppModel(client: client)
+        model.modelPathText = FileManager.default.temporaryDirectory.path
+        model.loadState = .ready(modelDirectory: FileManager.default.temporaryDirectory, loadSeconds: 1)
+        model.promptText = "go"
+        model.run()
+        for _ in 0..<400 where model.isRunning {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        #expect(!model.isRunning)
         #expect(model.phase == .idle)
-        #expect(model.liveTokenCount == 3)
+        #expect(model.liveTokenCount > 0)
     }
 
     @MainActor
@@ -65,17 +67,24 @@ import Testing
     }
 
     @MainActor
-    @Test func cancelKeepsPartialLiveMetrics() {
-        let model = makeAppModel()
-        model.apply(.token(AppTokenEvent(
-            index: 1, textDelta: "p", elapsedDecodeSeconds: 0.5)))
-        model.apply(.cancelled(AppDiagnostics(
-            generatedTokens: 2, stopReason: .cancelled,
-            timeToFirstTokenSeconds: nil, decodeSeconds: 0.5, tokensPerSecond: 4,
-            peakMemoryBytes: nil,
-            runtimeOptions: AppRuntimeOptions())))
+    @Test func cancelKeepsPartialLiveMetrics() async {
+        let client = MockInferenceClient(response: "one two three four", tokenDelayNanos: 50_000_000)
+        let model = makeAppModel(client: client)
+        model.modelPathText = FileManager.default.temporaryDirectory.path
+        model.loadState = .ready(modelDirectory: FileManager.default.temporaryDirectory, loadSeconds: 1)
+        model.promptText = "go"
+        model.run()
+        for _ in 0..<400 where model.liveTokenCount == 0 {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        let partial = model.liveTokenCount
+        model.cancel()
+        for _ in 0..<400 where model.isRunning {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        #expect(!model.isRunning)
         #expect(model.phase == .idle)
-        #expect(model.liveTokenCount == 2)
+        #expect(model.liveTokenCount >= partial && partial > 0)
         #expect(model.error == .cancelled)
     }
 }
