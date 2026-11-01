@@ -7,61 +7,53 @@ import Darwin
 @Suite struct ResidentBufferTests {
 
     @Test func warmupRespectsMemoryAndStreamingLimits() {
-        #expect(ResidentWarmup.eligible(payloadSize: 8, physicalMemory: 16, stagesDenseLayers: false, isDense: true))
-        #expect(!ResidentWarmup.eligible(payloadSize: 9, physicalMemory: 16, stagesDenseLayers: false, isDense: true))
-        #expect(!ResidentWarmup.eligible(payloadSize: 1, physicalMemory: 16, stagesDenseLayers: true, isDense: true))
-        #expect(!ResidentWarmup.eligible(payloadSize: 1, physicalMemory: 16, stagesDenseLayers: false, isDense: false))
-        #expect(!ResidentWarmup.eligible(payloadSize: 0, physicalMemory: 16, stagesDenseLayers: false, isDense: true))
-        #expect(!ResidentWarmup.eligible(payloadSize: 1, physicalMemory: 0, stagesDenseLayers: false, isDense: true))
+        #expect(ResidentWarmup.eligible(payloadSize: 8, physicalMemory: 16, stagesDenseLayers: false))
+        #expect(!ResidentWarmup.eligible(payloadSize: 9, physicalMemory: 16, stagesDenseLayers: false))
+        #expect(!ResidentWarmup.eligible(payloadSize: 1, physicalMemory: 16, stagesDenseLayers: true))
+        #expect(!ResidentWarmup.eligible(payloadSize: 0, physicalMemory: 16, stagesDenseLayers: false))
+        #expect(!ResidentWarmup.eligible(payloadSize: 1, physicalMemory: 0, stagesDenseLayers: false))
     }
 
-    @Test func warmupStopsAfterCurrentPageWhenCancelled() {
+    @Test func warmupCoversEveryBufferInChunks() {
         let warmup = ResidentWarmup()
-        var pages: [Int] = []
-        warmup.run(length: 10, startPageOffset: 0, pageSize: 1) { offset in
-            pages.append(offset)
-            if offset == 2 { warmup.cancel() }
+        var chunks: [[Int]] = []
+        warmup.run(lengths: [10, 4], chunkBytes: 4) { chunks.append([$0, $1, $2]); return true }
+        #expect(chunks == [[0, 0, 4], [0, 4, 4], [0, 8, 2], [1, 0, 4]])
+        #expect(warmup.isFinished)
+    }
+
+    @Test func warmupStopsBeforeTheNextChunkWhenCancelled() {
+        let warmup = ResidentWarmup()
+        var chunks = 0
+        warmup.run(lengths: [100], chunkBytes: 10) { _, start, _ in
+            chunks += 1
+            if start == 20 { warmup.cancel() }
+            return true
         }
-        #expect(pages == [0, 1, 2])
+        #expect(chunks == 3)
+        #expect(warmup.isFinished)
     }
 
-    @Test func warmupCoversUnalignedFirstAndLastPages() {
+    @Test func aFailedChunkEndsThePass() {
         let warmup = ResidentWarmup()
-        var offsets: [Int] = []
-        warmup.run(length: 9, startPageOffset: 3, pageSize: 4) { offsets.append($0) }
-        #expect(offsets == [0, 1, 5])
+        var chunks = 0
+        warmup.run(lengths: [100], chunkBytes: 10) { _, _, _ in chunks += 1; return false }
+        #expect(chunks == 1)
     }
 
-    @Test func cancelledWarmupDoesNotStartAnotherPass() {
-        let warmup = ResidentWarmup()
-        warmup.cancel()
-        var read = false
-        warmup.run(length: 4, startPageOffset: 0, pageSize: 1) { _ in read = true }
-        #expect(!read)
-    }
-
-    @Test func cancelDoesNotWaitForAnInFlightPageRead() {
-        let warmup = ResidentWarmup()
-        let entered = DispatchSemaphore(value: 0)
-        let resume = DispatchSemaphore(value: 0)
-        let finished = DispatchSemaphore(value: 0)
-        let lock = NSLock()
-        final class Reads: @unchecked Sendable { var offsets: [Int] = [] }
-        let reads = Reads()
-        DispatchQueue.global().async {
-            warmup.run(length: 4, startPageOffset: 0, pageSize: 1) { offset in
-                lock.lock(); reads.offsets.append(offset); lock.unlock()
-                entered.signal()
-                _ = resume.wait(timeout: .now() + 5)
-            }
-            finished.signal()
-        }
-        #expect(entered.wait(timeout: .now() + 5) == .success)
-        warmup.cancel()
-        resume.signal()
-        #expect(finished.wait(timeout: .now() + 5) == .success)
-        lock.lock(); let actual = reads.offsets; lock.unlock()
-        #expect(actual == [0])
+    @Test func theGPUReadsEveryChunkItIsGiven() throws {
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let toucher = try #require(ResidentWarmup.PageToucher(device: device))
+        let page = toucher.pageSize
+        let buffer = try #require(device.makeBuffer(length: page * 5, options: .storageModeShared))
+        memset(buffer.contents(), 0, buffer.length)
+        // Only the first page of each touched range reports back, so mark the
+        // start of two ranges and check both were read on the GPU.
+        buffer.contents().storeBytes(of: 0xA5, as: UInt8.self)
+        buffer.contents().advanced(by: page * 3).storeBytes(of: 0xA5, as: UInt8.self)
+        #expect(toucher.touch(buffer, start: 0, length: page * 3))
+        #expect(toucher.touch(buffer, start: page * 3, length: page * 2))
+        #expect(toucher.sinkValue == 2)
     }
 
     private static func entry(

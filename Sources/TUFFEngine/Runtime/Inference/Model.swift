@@ -36,15 +36,14 @@ public struct Model {
     public var sourceSnapshotHash: String? { manifest.sourceSnapshotHash }
     public var sharedExpertWeightBits: Int { manifest.quant?.sharedExpert.weightBits ?? 8 }
 
-    /// Start a cancellable, non-wiring warm-up only for fully resident dense
-    /// models with room for their file-backed pages alongside other allocations.
+    /// Start a cancellable, non-wiring GPU warm-up of the resident weights
+    /// when they fit in half of memory alongside other allocations.
     public func startResidentWarmup() -> ResidentWarmup? {
         guard ResidentWarmup.eligible(
             payloadSize: residentIndex.header.residentSize,
             physicalMemory: ProcessInfo.processInfo.physicalMemory,
-            stagesDenseLayers: residentBuffers.stagesDenseLayers,
-            isDense: config.feedForwardKind == .dense) else { return nil }
-        return ResidentWarmup.start(buffers: residentBuffers.metalBuffers)
+            stagesDenseLayers: residentBuffers.stagesDenseLayers) else { return nil }
+        return ResidentWarmup.start(buffers: residentBuffers.metalBuffers, device: device)
     }
 
     let residentBuffers: ResidentBufferSet
