@@ -124,6 +124,8 @@ public struct AppBenchmarkResult: Codable, Equatable, Sendable {
         public var check: Check?
         public var trials: [Trial]
         public var summary: Summary?
+        /// Nil in results from before 10.0.2.
+        public var conditions: AppBenchmarkConditions?
     }
 
     public var completedRuns: [ModelRun] { runs.filter { $0.status == .completed } }

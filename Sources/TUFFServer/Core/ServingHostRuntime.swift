@@ -173,6 +173,7 @@ public final class ServingHostRuntime: @unchecked Sendable {
         catch let error as PrivateServingIPCError {
             switch error {
             case .rejected, .incompatibleBuild, .incompatibleProtocol: throw error
+            case .olderBuild(_, let pid): ServingHostTakeover.retire(pid: pid)
             default: break
             }
         }
@@ -203,6 +204,11 @@ public final class ServingHostRuntime: @unchecked Sendable {
             } catch let error as PrivateServingIPCError {
                 switch error {
                 case .rejected, .incompatibleBuild, .incompatibleProtocol: throw error
+                case .olderBuild(_, let pid):
+                    // Still draining; it ignores the repeat.
+                    ServingHostTakeover.retire(pid: pid)
+                    lastError = error
+                    usleep(50_000)
                 default:
                     lastError = error
                     usleep(50_000)

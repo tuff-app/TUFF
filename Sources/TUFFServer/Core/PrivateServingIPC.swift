@@ -11,6 +11,9 @@ public enum PrivateServingIPCError: Error, Sendable, Equatable, CustomStringConv
     case incompatibleProfile
     case incompatibleProtocol
     case incompatibleBuild(host: String)
+    /// The running host is from an older build. `connectOrLaunch` asks it to
+    /// shut down and starts this build's host.
+    case olderBuild(host: String, pid: pid_t)
     case rejected(String)
     /// The host accepted the connection after committing to an idle exit. The
     /// client is not at fault: it relaunches the host and connects again.
@@ -26,6 +29,8 @@ public enum PrivateServingIPCError: Error, Sendable, Equatable, CustomStringConv
         case .incompatibleProtocol: "Private serving host uses an incompatible protocol"
         case .incompatibleBuild(let host):
             "A TUFF serving host from another build (\(host)) is running. Quit it or wait for it to go idle, then try again."
+        case .olderBuild(let host, _):
+            "A TUFF serving host from an older build (\(host)) is still shutting down. Try again in a moment."
         case .rejected(let reason): "The TUFF serving host refused this client: \(reason)"
         case .hostRetiring: "The TUFF serving host was exiting; reconnecting to a fresh one"
         }
@@ -793,7 +798,11 @@ public final class PrivateServingIPCConnection: @unchecked Sendable {
                 throw PrivateServingIPCError.authentication
             }
             if let expected = expectedBuildIdentity, expected != host.buildIdentity {
+                let pid = ServingHostTakeover.peerPID(descriptor)
                 writer.close()
+                if let pid, ServingHostTakeover.isOlder(host.buildIdentity, than: expected) {
+                    throw PrivateServingIPCError.olderBuild(host: host.buildIdentity, pid: pid)
+                }
                 throw PrivateServingIPCError.incompatibleBuild(host: host.buildIdentity)
             }
             // Keep the authenticated socket open through long generations and

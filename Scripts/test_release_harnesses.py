@@ -21,6 +21,7 @@ import benchmark_reporting as reporting
 import validate_release_models as release_models
 import validate_api_adapters as api_adapters
 import validate_conversation_followups as followups
+import validate_upgrade as upgrade
 
 
 class HarnessTests(unittest.TestCase):
@@ -460,5 +461,35 @@ class AdapterAndFollowupHarnessTests(unittest.TestCase):
                         raise RuntimeError('fixture failure')
                 self.assertFalse(failed_directory.exists())
                 getconf.assert_called_with(['getconf', 'DARWIN_USER_TEMP_DIR'], text=True)
+
+
+class UpgradeHarnessTests(unittest.TestCase):
+    def test_older_app_files_are_left_the_way_9x_left_them(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            upgrade.add_gui_files(root)
+            server = root / 'TUFF/Server'
+            self.assertEqual(server.stat().st_mode & 0o777, 0o755)
+            settings = json.loads((server / 'background-server.json').read_text())
+            self.assertEqual(settings['version'], 1)
+            self.assertEqual((server / 'background-server.json').stat().st_mode & 0o777, 0o644)
+            with self.assertRaisesRegex(upgrade.Failure, 'still mode 755'):
+                upgrade.check_private(server)
+            server.chmod(0o700)
+            upgrade.check_private(server)
+
+    def test_a_cloned_model_is_bound_to_its_new_folder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'installed/gemma4-e2b.gturbo'
+            source.mkdir(parents=True)
+            (source / 'verified-install.json').write_text(json.dumps(
+                {'schemaVersion': 1, 'modelDirectoryPath': str(source)}))
+            models = Path(directory) / 'scoped/TUFF/Models'
+            upgrade.clone_model(source, models)
+            clone = models / 'gemma4-e2b.gturbo'
+            receipt = json.loads((clone / 'verified-install.json').read_text())
+            self.assertEqual(receipt['modelDirectoryPath'], str(clone.resolve()))
+            original = json.loads((source / 'verified-install.json').read_text())
+            self.assertEqual(original['modelDirectoryPath'], str(source))
 
 if __name__=='__main__': unittest.main()

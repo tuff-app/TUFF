@@ -67,9 +67,36 @@ private let machine = AppBenchmarkMachine(
 private let device = TUFFDeviceCapabilities(
     unifiedMemoryBytes: 16 << 30, macOSMajorVersion: 26, appleSiliconGeneration: 2)
 
-private func runner(_ client: ScriptedBenchmarkClient) -> AppBenchmarkRunner {
+private let coolMac = AppBenchmarkSensors(
+    thermalState: { "nominal" }, powerSource: { "ac" }, lowPowerMode: { false })
+
+private func runner(_ client: ScriptedBenchmarkClient,
+                    sensors: AppBenchmarkSensors = coolMac,
+                    cooldown: AppBenchmarkCooldown = .none,
+                    sleep: @escaping @Sendable (Double) async throws -> Void = { _ in }) -> AppBenchmarkRunner {
     AppBenchmarkRunner(client: client, device: device, machine: machine, appBuild: "source",
+                       sensors: sensors, cooldown: cooldown, sleep: sleep,
                        now: { Date(timeIntervalSince1970: 1_800_000_000) })
+}
+
+/// Thermal readings handed out in order; the last one repeats.
+private final class ThermalScript: @unchecked Sendable {
+    private let lock = NSLock()
+    private var states: [String]
+    private(set) var sleeps: [Double] = []
+    init(_ states: [String]) { self.states = states }
+    func next() -> String {
+        lock.lock(); defer { lock.unlock() }
+        return states.count > 1 ? states.removeFirst() : states[0]
+    }
+    func slept(_ seconds: Double) { lock.lock(); sleeps.append(seconds); lock.unlock() }
+}
+
+private final class ProgressLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var events: [AppBenchmarkProgress] = []
+    func append(_ event: AppBenchmarkProgress) { lock.lock(); events.append(event); lock.unlock() }
+    var kinds: [AppBenchmarkProgress.Kind] { lock.lock(); defer { lock.unlock() }; return events.map(\.kind) }
 }
 
 @Suite struct AppBenchmarkSuiteTests {
@@ -202,6 +229,41 @@ private func runner(_ client: ScriptedBenchmarkClient) -> AppBenchmarkRunner {
         #expect(plan.settings.contextTokens == chat.contextTokens)
     }
 
+    @Test func everyModelAfterTheFirstWaitsForTheMacToCoolDown() async {
+        // Model 1 start and end, two warm polls, a cool poll, then model 2
+        // start and end.
+        let script = ThermalScript(["nominal", "fair", "fair", "fair", "nominal", "fair", "serious"])
+        let sensors = AppBenchmarkSensors(thermalState: { script.next() },
+                                          powerSource: { "battery" }, lowPowerMode: { true })
+        let events = ProgressLog()
+        let result = await runner(ScriptedBenchmarkClient(), sensors: sensors,
+                                  cooldown: .init(minimumSeconds: 20, maximumSeconds: 300, pollSeconds: 5),
+                                  sleep: { script.slept($0) })
+            .run(models: [model(TUFFModelCatalog.gemma4_E4B), model(TUFFModelCatalog.gemma4_E2B)],
+                 mode: .quick) { events.append($0) }
+
+        #expect(script.sleeps == [20, 5, 5])
+        #expect(events.kinds.filter { $0 == .coolingDown }.count == 1)
+        let first = result.runs[0].conditions, second = result.runs[1].conditions
+        #expect(first == .init(thermalStateAtStart: "nominal", thermalStateAtEnd: "fair",
+                               powerSource: "battery", lowPowerMode: true, cooldownSeconds: nil))
+        #expect(second?.cooldownSeconds == 30)
+        #expect(second?.thermalStateAtStart == "fair")
+        #expect(second?.thermalStateAtEnd == "serious")
+    }
+
+    @Test func theCooldownGivesUpAtItsLimit() async {
+        let script = ThermalScript(["critical"])
+        let sensors = AppBenchmarkSensors(thermalState: { script.next() },
+                                          powerSource: { "ac" }, lowPowerMode: { false })
+        _ = await runner(ScriptedBenchmarkClient(), sensors: sensors,
+                         cooldown: .init(minimumSeconds: 20, maximumSeconds: 32, pollSeconds: 5),
+                         sleep: { script.slept($0) })
+            .run(models: [model(TUFFModelCatalog.gemma4_E4B), model(TUFFModelCatalog.gemma4_E2B)],
+                 mode: .quick)
+        #expect(script.sleeps == [20, 5, 5, 2])
+    }
+
     @Test func cancellingStopsTheRunAndMarksWhatIsLeft() async {
         let client = ScriptedBenchmarkClient()
         let task = Task {
@@ -243,6 +305,28 @@ private func runner(_ client: ScriptedBenchmarkClient) -> AppBenchmarkRunner {
         let decoded = try AppBenchmarkResult.decoder().decode(AppBenchmarkResult.self, from: json)
         #expect(decoded.id == result.id)
         #expect(AppBenchmarkShare.title(for: result) == "M2, 16 GB: Gemma 4 E4B Q4 on TUFF \(TUFFVersion.current)")
+    }
+
+    @Test func thePostSaysWhenAModelMayHaveRunSlow() async throws {
+        var result = await sampleResult()
+        #expect(!(try AppBenchmarkShare.body(for: result)).contains("slower than usual"))
+        result.runs[0].conditions = .init(thermalStateAtStart: "fair", thermalStateAtEnd: "serious",
+                                          powerSource: "battery", lowPowerMode: false)
+        let body = try AppBenchmarkShare.body(for: result)
+        #expect(body.contains("- Gemma 4 E4B Q4: started warm (fair), ended hot (serious), on battery"))
+    }
+
+    @Test func aResultFromBeforeConditionsStillDecodes() async throws {
+        let result = await sampleResult()
+        var object = try #require(try JSONSerialization.jsonObject(
+            with: AppBenchmarkResult.encoder().encode(result)) as? [String: Any])
+        var runs = try #require(object["runs"] as? [[String: Any]])
+        #expect(runs[0]["conditions"] != nil)
+        runs[0].removeValue(forKey: "conditions")
+        object["runs"] = runs
+        let decoded = try AppBenchmarkResult.decoder().decode(
+            AppBenchmarkResult.self, from: JSONSerialization.data(withJSONObject: object))
+        #expect(decoded.runs[0].conditions == nil)
     }
 
     @Test func aPostTooLongForAURLOpensWithTheTitleOnly() {

@@ -256,8 +256,30 @@ def validate_structure(result: dict) -> list[str]:
                 raise Rejected(f"`{model_id}` is marked completed but is missing trials.")
     if completed == 0:
         raise Rejected("No model completed, so there is nothing to compare.")
+    notes += condition_notes(runs)
     if (finished - started).total_seconds() + 1 < measured:
         raise Rejected("The trials take longer than the whole run.")
+    return notes
+
+
+def condition_notes(runs: list) -> list[str]:
+    """TUFF 10.0.2 and later record how the Mac was running for each model."""
+    notes = []
+    for run in runs:
+        conditions = run.get("conditions")
+        if run.get("status") != "completed" or not isinstance(conditions, dict):
+            continue
+        reasons = []
+        if conditions.get("thermal_state_at_start") not in (None, "nominal"):
+            reasons.append(f"started warm ({conditions['thermal_state_at_start']})")
+        if conditions.get("thermal_state_at_end") in ("serious", "critical"):
+            reasons.append(f"ended hot ({conditions['thermal_state_at_end']})")
+        if conditions.get("power_source") == "battery":
+            reasons.append("ran on battery")
+        if conditions.get("low_power_mode") is True:
+            reasons.append("ran in Low Power Mode")
+        if reasons:
+            notes.append(f"`{run['model'].get('id')}` {', '.join(reasons)}, so it may be slower than usual.")
     return notes
 
 

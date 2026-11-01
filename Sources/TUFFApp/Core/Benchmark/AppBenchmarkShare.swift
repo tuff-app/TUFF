@@ -41,6 +41,14 @@ public enum AppBenchmarkShare {
             }.joined(separator: "\n"))
             lines.append("")
         }
+        let slowed = result.completedRuns.compactMap { run in
+            run.conditions.flatMap { $0.mayBeSlowed ? "- \(run.model.name): \(describe($0))" : nil }
+        }
+        if !slowed.isEmpty {
+            lines.append("These may have run slower than usual:")
+            lines.append(slowed.joined(separator: "\n"))
+            lines.append("")
+        }
         lines += [
             "<!-- Add notes above this line if you like. Please leave the data below as it is. -->",
             "",
@@ -71,6 +79,20 @@ public enum AppBenchmarkShare {
     /// Whether the whole post fits in the URL, or has to be pasted.
     public static func fitsInURL(title: String, body: String) -> Bool {
         discussionURL(title: title, body: body).absoluteString.contains("body=")
+    }
+
+    /// "started warm (fair), on battery, Low Power Mode".
+    static func describe(_ conditions: AppBenchmarkConditions) -> String {
+        var parts: [String] = []
+        if conditions.thermalStateAtStart != "nominal" {
+            parts.append("started warm (\(conditions.thermalStateAtStart))")
+        }
+        if let end = conditions.thermalStateAtEnd, end == "serious" || end == "critical" {
+            parts.append("ended hot (\(end))")
+        }
+        if conditions.powerSource == "battery" { parts.append("on battery") }
+        if conditions.lowPowerMode { parts.append("Low Power Mode") }
+        return parts.joined(separator: ", ")
     }
 
     static func machineLine(_ machine: AppBenchmarkMachine) -> String {

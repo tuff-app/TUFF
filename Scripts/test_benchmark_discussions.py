@@ -64,6 +64,21 @@ class ReviewTests(unittest.TestCase):
         decision = bd.review(post(1), [], NOW)
         self.assertEqual(decision.verdict, "community", decision.reasons)
 
+    def test_a_warm_or_battery_run_is_accepted_with_a_note(self):
+        data = result()
+        self.assertEqual(bd.validate_structure(data), [])
+        data["runs"][0]["conditions"] = {"thermal_state_at_start": "fair",
+                                         "thermal_state_at_end": "serious",
+                                         "power_source": "battery", "low_power_mode": False,
+                                         "cooldown_seconds": 20}
+        notes = bd.validate_structure(data)
+        self.assertEqual(notes, ["`gemma4-26b-a4b` started warm (fair), ended hot (serious), "
+                                 "ran on battery, so it may be slower than usual."])
+        self.assertEqual(bd.review(post(1, data), [], NOW).verdict, "community")
+        data["runs"][0]["conditions"] = {"thermal_state_at_start": "nominal",
+                                         "power_source": "ac", "low_power_mode": False}
+        self.assertEqual(bd.validate_structure(data), [])
+
     def test_malformed_posts_are_rejected_with_a_reason(self):
         cases = {
             "no block": post(1, raw="just text"),

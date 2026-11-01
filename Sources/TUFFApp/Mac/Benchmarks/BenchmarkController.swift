@@ -108,6 +108,8 @@ final class BenchmarkController {
         let modelShare = 1 / Double(max(event.modelCount, 1))
         let stepShare = event.stepCount.map { Double((event.stepIndex ?? 0) + 1) / Double(max($0, 1)) } ?? 0
         switch event.kind {
+        case .coolingDown:
+            states[event.modelID] = .running("Letting the Mac cool down")
         case .modelStarted:
             states[event.modelID] = .running("Loading")
         case .loaded:

@@ -35,6 +35,7 @@ public struct AppBenchmarkModel: Equatable, Sendable, Identifiable {
 /// `--progress-json` stream.
 public struct AppBenchmarkProgress: Codable, Equatable, Sendable {
     public enum Kind: String, Codable, Sendable {
+        case coolingDown = "cooling-down"
         case modelStarted = "model-started"
         case loaded
         case stepStarted = "step-started"
@@ -71,6 +72,9 @@ public final class AppBenchmarkRunner: @unchecked Sendable {
     private let device: TUFFDeviceCapabilities
     private let machine: AppBenchmarkMachine
     private let appBuild: String
+    private let sensors: AppBenchmarkSensors
+    private let cooldown: AppBenchmarkCooldown
+    private let sleep: @Sendable (Double) async throws -> Void
     private let now: @Sendable () -> Date
     private let clock = ContinuousClock()
 
@@ -78,11 +82,19 @@ public final class AppBenchmarkRunner: @unchecked Sendable {
                 device: TUFFDeviceCapabilities = .current(),
                 machine: AppBenchmarkMachine = .current(),
                 appBuild: String = AppBenchmarkRunner.currentBuild(),
+                sensors: AppBenchmarkSensors = .current,
+                cooldown: AppBenchmarkCooldown = .standard,
+                sleep: @escaping @Sendable (Double) async throws -> Void = {
+                    try await Task.sleep(for: .seconds($0))
+                },
                 now: @escaping @Sendable () -> Date = Date.init) {
         self.client = client
         self.device = device
         self.machine = machine
         self.appBuild = appBuild
+        self.sensors = sensors
+        self.cooldown = cooldown
+        self.sleep = sleep
         self.now = now
     }
 
@@ -105,8 +117,20 @@ public final class AppBenchmarkRunner: @unchecked Sendable {
                 runs.append(Self.emptyRun(model, status: .cancelled, error: nil))
                 continue
             }
+            var waited: Double?
+            if index > 0 {
+                var event = base
+                event.kind = .coolingDown
+                progress(event)
+                waited = await coolDown()
+                if Task.isCancelled {
+                    runs.append(Self.emptyRun(model, status: .cancelled, error: nil))
+                    continue
+                }
+            }
+            var conditions = sensors.sample(cooldownSeconds: waited)
             progress(base)
-            let run = await runModel(model, mode: mode) { step, index, count, finished in
+            var run = await runModel(model, mode: mode) { step, index, count, finished in
                 var event = base
                 event.kind = finished ? .stepFinished : .stepStarted
                 event.stepIndex = index
@@ -119,6 +143,8 @@ public final class AppBenchmarkRunner: @unchecked Sendable {
                 event.kind = .loaded
                 progress(event)
             }
+            conditions.thermalStateAtEnd = sensors.thermalState()
+            run.conditions = conditions
             runs.append(run)
             base.kind = .modelFinished
             base.status = run.status
@@ -133,6 +159,25 @@ public final class AppBenchmarkRunner: @unchecked Sendable {
             startedAt: started,
             finishedAt: now(),
             runs: runs)
+    }
+
+    /// Waits the minimum, then while macOS reports the Mac warmer than
+    /// nominal, up to the maximum. Returns the seconds waited.
+    private func coolDown() async -> Double {
+        var waited = 0.0
+        do {
+            if cooldown.minimumSeconds > 0 {
+                try await sleep(cooldown.minimumSeconds)
+                waited = cooldown.minimumSeconds
+            }
+            while cooldown.pollSeconds > 0, waited < cooldown.maximumSeconds,
+                  sensors.thermalState() != "nominal" {
+                let step = min(cooldown.pollSeconds, cooldown.maximumSeconds - waited)
+                try await sleep(step)
+                waited += step
+            }
+        } catch {}
+        return waited
     }
 
     // MARK: - One model
@@ -283,7 +328,7 @@ public final class AppBenchmarkRunner: @unchecked Sendable {
                          weights: descriptor.architecture.weightLayout.rawValue,
                          installedBytes: descriptor.source.installedBytes),
             settings: nil, status: status, error: error,
-            loadSeconds: nil, check: nil, trials: [], summary: nil)
+            loadSeconds: nil, check: nil, trials: [], summary: nil, conditions: nil)
     }
 
     // MARK: - Settings

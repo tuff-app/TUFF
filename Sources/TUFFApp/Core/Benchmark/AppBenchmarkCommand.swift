@@ -252,6 +252,7 @@ public enum AppBenchmarkCommand {
     static func describe(_ event: AppBenchmarkProgress) -> String {
         let position = "[\(event.modelIndex + 1)/\(event.modelCount)] \(event.modelName)"
         switch event.kind {
+        case .coolingDown: return "\(position): letting the Mac cool down"
         case .modelStarted: return "\(position): loading"
         case .loaded: return "\(position): loaded"
         case .stepStarted:

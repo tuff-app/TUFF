@@ -230,6 +230,47 @@ func servingTestRoot(_ name: String) throws -> URL {
         await owner.shutdown()
     }
 
+    @Test func olderHostIsIdentifiedForTakeoverAndNewerIsNot() async throws {
+        let root = try servingTestRoot("older"); defer { try? FileManager.default.removeItem(at: root) }
+        let profile = try ServingHostProfile(applicationSupportURL: root, bundleIdentifier: "test.tuff.older")
+        let owner = try ServingHostRuntime.startOwner(
+            profile: profile, buildIdentity: "tuff-10.0.1",
+            installed: ServerInstalledModels(modelsRoot: root))
+        // The host runs in this process, so its socket peer is this process.
+        #expect(throws: PrivateServingIPCError.olderBuild(host: "tuff-10.0.1", pid: getpid())) {
+            _ = try PrivateServingIPCConnection.connect(
+                profile: profile, clientID: try profile.clientID(), expectedBuildIdentity: "tuff-10.0.2")
+        }
+        #expect(throws: PrivateServingIPCError.incompatibleBuild(host: "tuff-10.0.1")) {
+            _ = try PrivateServingIPCConnection.connect(
+                profile: profile, clientID: try profile.clientID(), expectedBuildIdentity: "tuff-10.0.0")
+        }
+        await owner.shutdown()
+    }
+
+    @Test func buildVersionsCompareNumerically() {
+        #expect(ServingHostTakeover.isOlder("tuff-9.6.0", than: "tuff-10.0.2"))
+        #expect(ServingHostTakeover.isOlder("tuff-10.0.1", than: "tuff-10.0.10"))
+        #expect(ServingHostTakeover.isOlder("tuff-10.0.9", than: "tuff-10.1.0"))
+        #expect(!ServingHostTakeover.isOlder("tuff-10.0.2", than: "tuff-10.0.2"))
+        #expect(!ServingHostTakeover.isOlder("tuff-10.1.0", than: "tuff-10.0.2"))
+        #expect(!ServingHostTakeover.isOlder("old", than: "tuff-10.0.2"))
+        #expect(!ServingHostTakeover.isOlder("tuff-10.0", than: "tuff-10.0.2"))
+        #expect(!ServingHostTakeover.isOlder("tuff-10.0.1", than: "test"))
+    }
+
+    @Test func takeoverOnlySignalsATUFFServer() throws {
+        let sleeper = Process()
+        sleeper.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        sleeper.arguments = ["30"]
+        try sleeper.run()
+        defer { sleeper.terminate(); sleeper.waitUntilExit() }
+        #expect(!ServingHostTakeover.retire(pid: sleeper.processIdentifier))
+        #expect(!ServingHostTakeover.retire(pid: getpid()))
+        #expect(sleeper.isRunning)
+        #expect(ServingHostTakeover.arguments(of: sleeper.processIdentifier) == ["/bin/sleep", "30"])
+    }
+
     @Test func profilesForDifferentRootsOrBundlesNeverShareASocket() throws {
         let one = try servingTestRoot("a"), two = try servingTestRoot("b")
         defer { try? FileManager.default.removeItem(at: one); try? FileManager.default.removeItem(at: two) }
