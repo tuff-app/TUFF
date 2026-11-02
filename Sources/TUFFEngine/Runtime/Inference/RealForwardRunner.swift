@@ -191,6 +191,29 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     private lazy var lookaheadWeights: MTLBuffer = ctx.device.makeBuffer(
         length: max(1, cfg.topKExperts) * MemoryLayout<Float16>.stride,
         options: .storageModeShared)!
+    /// Reads each prefill layer's routed experts, and the next layer's
+    /// predicted ones, into the file cache ahead of the tile fetches. A
+    /// 20-token prompt on Gemma 4 26B A4B reads 1,407 experts (4.7 GB), and
+    /// one tile's fetch at a time reached 1.5 GB/s of an SSD that does
+    /// 3.5 GB/s with several reads in flight. On a 16 GB M2: Qwen 3.6 35B
+    /// short prompts 1.35x and a 1,040-token prompt 22.5 -> 16.7 s; Ornith
+    /// 1.5 35B 1.33x and 25.2 -> 17.5 s; Gemma 4 26B 1.13x and 1.34x; greedy
+    /// output unchanged. `TUFF_PREFILL_READAHEAD=off` turns it off.
+    private let prefillReadsAhead =
+        ProcessInfo.processInfo.environment["TUFF_PREFILL_READAHEAD"] != "off"
+
+    /// Prefill lookahead: layer L+1's router output for every prompt row.
+    private var prefillLookaheadRoutes: (ids: MTLBuffer, weights: MTLBuffer)?
+    private func prefillLookaheadBuffers(ids: MTLBuffer, weights: MTLBuffer) -> (ids: MTLBuffer, weights: MTLBuffer)? {
+        if let existing = prefillLookaheadRoutes, existing.ids.length >= ids.length,
+           existing.weights.length >= weights.length { return existing }
+        guard let newIDs = ctx.device.makeBuffer(length: ids.length, options: .storageModeShared),
+              let newWeights = ctx.device.makeBuffer(length: weights.length, options: .storageModeShared)
+        else { return nil }
+        prefillLookaheadRoutes = (newIDs, newWeights)
+        return prefillLookaheadRoutes
+    }
+
     /// Decode lookahead counters for TUFF_PHASES.
     public var lookaheadPrecision: Double { lookahead.precision }
     public var lookaheadReadsIssued: Int { lookahead.readsIssued }
@@ -2635,6 +2658,52 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                         topK: UInt32(cfg.topKExperts),
                         hiddenStrideElements: UInt32(D))
             }
+            // Prefill lookahead: layer L+1's router over this layer's input
+            // predicts which experts the next layer reads, so those reads go
+            // to the file cache while this layer's tiles run. See
+            // `prefillReadsAhead`.
+            var prefillLookahead: (ids: MTLBuffer, weights: MTLBuffer)?
+            if prefillReadsAhead, !isSpeculativeVerification, !model.stagesDenseLayers, L + 1 < cfg.numLayers,
+               let nextRouter = try? model.router(layer: L + 1),
+               let buffers = prefillLookaheadBuffers(ids: scratch.routeIDs, weights: scratch.routeWeights) {
+                if cfg.usesSigmoidCorrectionRouter {
+                    let correction = try model.routerCorrectionBias(layer: L + 1)
+                    prefillRouter.encodeMiniMaxBlock(
+                        commandBuffer: cb,
+                        weights: nextRouter.buffer, weightsOffset: Int(nextRouter.offset),
+                        scales: nextRouter.buffer, scalesOffset: Int(nextRouter.scaleOffset),
+                        biases: nextRouter.buffer, biasesOffset: Int(nextRouter.biasOffset),
+                        hidden: ffnInput,
+                        effectiveScale: effectiveScaleBuffers[L + 1],
+                        correctionBias: correction.buffer,
+                        correctionBiasOffset: Int(correction.offset),
+                        outIndices: buffers.ids, outWeights: buffers.weights,
+                        queryCount: UInt32(t), numExperts: UInt32(cfg.numExperts),
+                        d: UInt32(D), topK: UInt32(cfg.topKExperts),
+                        hiddenStrideElements: UInt32(D))
+                } else {
+                    let nextScale: (buffer: MTLBuffer, offset: Int)
+                    if cfg.routerScaled {
+                        let view = try model.routerPerExpertScale(layer: L + 1)
+                        nextScale = (view.buffer, Int(view.offset))
+                    } else {
+                        nextScale = (onesPerExpertScale!, 0)
+                    }
+                    prefillRouter.encodeGemma4Block(
+                        commandBuffer: cb,
+                        weights: nextRouter.buffer, weightsOffset: Int(nextRouter.offset),
+                        scales: nextRouter.buffer, scalesOffset: Int(nextRouter.scaleOffset),
+                        biases: nextRouter.buffer, biasesOffset: Int(nextRouter.biasOffset),
+                        hidden: cfg.ffnSandwichNorms ? scratch.routerX : ffnInput,
+                        effectiveScale: effectiveScaleBuffers[L + 1],
+                        perExpertScale: nextScale.buffer, perExpertScaleOffset: nextScale.offset,
+                        outIndices: buffers.ids, outWeights: buffers.weights,
+                        queryCount: UInt32(t), numExperts: UInt32(cfg.numExperts),
+                        d: UInt32(D), topK: UInt32(cfg.topKExperts),
+                        hiddenStrideElements: UInt32(D))
+                }
+                prefillLookahead = buffers
+            }
 
                     cb.commit()
                     try waitForCompletion(cb)
@@ -2656,6 +2725,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                                                    weights: routeWeights,
                                                                    queryCount: t,
                                                                    topK: cfg.topKExperts)
+                    if let prefillLookahead {
+                        let predictedPtr = prefillLookahead.ids.contents()
+                            .bindMemory(to: UInt32.self, capacity: routeCount)
+                        let predicted = Set((0..<routeCount).map {
+                            min(Int(predictedPtr[$0]), cfg.numExperts - 1)
+                        })
+                        let offsets = model.routedExpertPhysicalOffsets(layer: L + 1)
+                        try model.readAheadRoutedExperts(
+                            layer: L + 1, experts: predicted.sorted { offsets[$0] < offsets[$1] },
+                            lowPriority: true)
+                    }
                     let schedulerConfig = Self.prefillRoutedTileSchedulerConfig
                     let routeTileExpertCount: Int
                     if let slotCount = model.routedExpertCacheSlotCount(layer: L) {
@@ -2805,6 +2885,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                         }
                     }
 
+                    // The first tile's experts are read by its own fetch right
+                    // away; the rest of the layer's go to the file cache in the
+                    // background, in tile order, so later fetches copy from
+                    // memory and the SSD keeps several reads in flight.
+                    if prefillReadsAhead, routes.tiles.count > 1, !isSpeculativeVerification {
+                        let firstTile = Int(routes.tiles[0].groupCount)
+                        try model.readAheadRoutedExperts(
+                            layer: L, experts: routes.groups.dropFirst(firstTile).map { Int($0.expert) })
+                    }
                     let routedTileScheduler = PrefillRoutedTileScheduler(config: schedulerConfig)
                     for (tileIndex, tile) in routes.tiles.enumerated() {
                         let expertIDs = try PrefillStreamedTileBinding.expertIDs(

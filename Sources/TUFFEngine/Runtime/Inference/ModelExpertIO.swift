@@ -115,6 +115,16 @@ extension Model {
         return streamer.adviseExpertMisses(experts: experts)
     }
 
+    /// Starts reading a layer's uncached experts into the file cache in the
+    /// background. See `PreadExpertStreamer.readAheadExpertMisses`.
+    public func readAheadRoutedExperts(layer: Int, experts: [Int], concurrency: Int = 8,
+                                       lowPriority: Bool = false) throws {
+        try ensureLayerOpened(layer)
+        let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
+        streamer.readAheadExpertMisses(experts: experts, concurrency: concurrency,
+                                       lowPriority: lowPriority)
+    }
+
     public func routedExpertAdviceByteEstimate(layer: Int,
                                                missCount: Int) throws -> UInt64 {
         guard missCount > 0 else { return 0 }

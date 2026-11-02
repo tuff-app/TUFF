@@ -69,6 +69,10 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     public let cachePolicy: ExpertCachePolicy
 
     private let fd: Int32
+    private let bypassesFileCache: Bool
+    private let readAheadLock = NSLock()
+    private var readAheadGeneration = 0
+    private var readAheadBytes: UInt64 = 0
     private let slotPointers: [UnsafeMutableRawPointer]
     private let slotBuffers: [MTLBuffer]
 
@@ -125,6 +129,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         var closeFDOnFailure = true
         defer { if closeFDOnFailure { close(openedFD) } }
         if bypassFilesystemCache { _ = fcntl(openedFD, F_NOCACHE, 1) }
+        self.bypassesFileCache = bypassFilesystemCache
 
         var fileStats = stat()
         guard fstat(openedFD, &fileStats) == 0,
@@ -432,6 +437,78 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     public func adviseExpertCachePlanMisses(_ plan: ExpertCachePlan) -> ExpertIOAdviceResult {
         let experts = plan.misses.map { plan.experts[$0] }
         return adviseRanges(expertAdviceRanges(experts: experts), requested: experts.count)
+    }
+
+    /// Reads the given experts that are not in a cache slot into the file
+    /// cache in the background, in order, a few at a time, and returns at
+    /// once. The cache-slot reads that follow then copy from memory, and the
+    /// SSD keeps several reads in flight instead of one tile's worth. A later
+    /// call stops what is left of an earlier one. Nothing to do when this
+    /// streamer bypasses the file cache.
+    public func readAheadExpertMisses(experts: [Int], concurrency: Int = 8,
+                                      lowPriority: Bool = false) {
+        guard !bypassesFileCache, concurrency > 0 else { return }
+        cacheLock.lock()
+        let misses = experts.filter { !slotExpert.contains($0) }
+        cacheLock.unlock()
+        let ranges = expertAdviceRanges(experts: misses)
+        guard !ranges.isEmpty else { return }
+        readAheadLock.lock()
+        readAheadGeneration &+= 1
+        let generation = readAheadGeneration
+        readAheadLock.unlock()
+        let work = ReadAheadWork(ranges: ranges)
+        let chunk = 1 << 20
+        for _ in 0..<min(concurrency, ranges.count) {
+            // Strong capture: the file descriptor stays open until every
+            // worker has finished.
+            (lowPriority ? Self.lookaheadQueue : Self.readAheadQueue).async { [self] in
+                let buffer = UnsafeMutableRawPointer.allocate(byteCount: chunk, alignment: Int(getpagesize()))
+                defer { buffer.deallocate() }
+                while let range = nextReadAheadRange(work, generation: generation) {
+                    var done: UInt64 = 0
+                    while done < range.count {
+                        let length = Int(min(UInt64(chunk), range.count - done))
+                        let count = pread(fd, buffer, length, off_t(range.offset + done))
+                        if count < 0, errno == EINTR { continue }
+                        guard count > 0 else { break }
+                        done += UInt64(count)
+                    }
+                    readAheadLock.lock()
+                    readAheadBytes &+= done
+                    readAheadLock.unlock()
+                }
+            }
+        }
+    }
+
+    /// Bytes read ahead into the file cache so far. Diagnostic.
+    public var readAheadBytesRead: UInt64 {
+        readAheadLock.lock()
+        defer { readAheadLock.unlock() }
+        return readAheadBytes
+    }
+
+    private static let readAheadQueue = DispatchQueue(
+        label: "TUFF expert read-ahead", qos: .userInitiated, attributes: .concurrent)
+    /// Predicted experts for a later layer read at utility priority, which
+    /// macOS throttles behind the reads the current layer is waiting on.
+    private static let lookaheadQueue = DispatchQueue(
+        label: "TUFF expert lookahead", qos: .utility, attributes: .concurrent)
+
+    private final class ReadAheadWork: @unchecked Sendable {
+        let ranges: [(offset: UInt64, count: UInt64)]
+        var next = 0
+        init(ranges: [(offset: UInt64, count: UInt64)]) { self.ranges = ranges }
+    }
+
+    private func nextReadAheadRange(_ work: ReadAheadWork, generation: Int)
+        -> (offset: UInt64, count: UInt64)? {
+        readAheadLock.lock()
+        defer { readAheadLock.unlock() }
+        guard generation == readAheadGeneration, work.next < work.ranges.count else { return nil }
+        defer { work.next += 1 }
+        return work.ranges[work.next]
     }
 
     public func adviseExperts(experts: [Int]) -> ExpertIOAdviceResult {
