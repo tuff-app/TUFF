@@ -146,6 +146,15 @@ class ReviewTests(unittest.TestCase):
             "duplicate model": lambda d: d["runs"].append(copy.deepcopy(d["runs"][0])),
             "nothing completed": lambda d: d["runs"][0].update(status="failed"),
             "string number": lambda d: d["runs"][0]["trials"][1].update(prompt_tokens="45"),
+            "huge number": lambda d: d["runs"][0]["trials"][1].update(prompt_tokens=10 ** 400),
+            "no time zone": lambda d: d.update(started_at="2026-10-09T08:00:00"),
+            "not a time": lambda d: d.update(finished_at="soon"),
+            "list model id": lambda d: d["runs"][0]["model"].update(id=[]),
+            "list workload": lambda d: d["runs"][0]["trials"][1].update(workload=[]),
+            "string load time": lambda d: d["runs"][0].update(load_seconds="3"),
+            "string peak memory": lambda d: d["runs"][0]["trials"][1].update(peak_memory_bytes="1"),
+            "check not an object": lambda d: d["runs"][0].update(check=1),
+            "settings not an object": lambda d: d["runs"][0].update(settings="x"),
         }
         for name, change in cases.items():
             with self.subTest(name):

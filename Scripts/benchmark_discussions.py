@@ -138,7 +138,7 @@ def number(value, name: str, minimum: float = 0, maximum: float = math.inf,
         raise Rejected(f"`{name}` is not a number.")
     if integer and not isinstance(value, int):
         raise Rejected(f"`{name}` is not a whole number.")
-    if not math.isfinite(value) or not minimum <= value <= maximum:
+    if (isinstance(value, float) and not math.isfinite(value)) or not minimum <= value <= maximum:
         raise Rejected(f"`{name}` is out of range.")
     return value
 
@@ -149,6 +149,16 @@ def text(value, name: str, pattern: re.Pattern | None = None, limit: int = 120) 
     if pattern and not pattern.match(value):
         raise Rejected(f"`{name}` has an unexpected value.")
     return value
+
+
+def timestamp(value, name: str) -> datetime:
+    try:
+        moment = parse_time(text(value, name))
+    except ValueError:
+        raise Rejected(f"`{name}` is not a timestamp.") from None
+    if moment.tzinfo is None:
+        raise Rejected(f"`{name}` has no time zone.")
+    return moment
 
 
 def version_tuple(value: str) -> tuple[int, int, int]:
@@ -220,8 +230,8 @@ def validate_structure(result: dict) -> list[str]:
         if machine.get(key) is not None:
             number(machine[key], f"machine.{key}", 0, 256, integer=True)
 
-    started = parse_time(text(result.get("started_at"), "started_at"))
-    finished = parse_time(text(result.get("finished_at"), "finished_at"))
+    started = timestamp(result.get("started_at"), "started_at")
+    finished = timestamp(result.get("finished_at"), "finished_at")
     if finished < started:
         raise Rejected("The run finishes before it starts.")
     if started > datetime.now(timezone.utc) + timedelta(days=1):
@@ -236,7 +246,7 @@ def validate_structure(result: dict) -> list[str]:
     for run in runs:
         if not isinstance(run, dict) or not isinstance(run.get("model"), dict):
             raise Rejected("A run is malformed.")
-        model_id = run["model"].get("id")
+        model_id = text(run["model"].get("id"), "model.id")
         if model_id not in CONFIG["models"]:
             raise Rejected(f"Unknown model `{model_id}`.")
         if model_id in seen:
@@ -244,6 +254,11 @@ def validate_structure(result: dict) -> list[str]:
         seen.add(model_id)
         if run.get("status") not in ("completed", "failed", "skipped", "cancelled"):
             raise Rejected("A run has an unknown status.")
+        for key in ("settings", "check"):
+            if run.get(key) is not None and not isinstance(run[key], dict):
+                raise Rejected(f"`{key}` is malformed.")
+        if run.get("load_seconds") is not None:
+            number(run["load_seconds"], "load_seconds", 0, 36_000)
         trials = run.get("trials")
         if not isinstance(trials, list) or len(trials) > MAX_TRIALS:
             raise Rejected("A run's trials are malformed.")
@@ -287,7 +302,7 @@ def validate_trial(trial, model_id: str) -> float:
     if not isinstance(trial, dict):
         raise Rejected("A trial is malformed.")
     workload = trial.get("workload")
-    if workload not in WORKLOAD_MAX_NEW:
+    if not isinstance(workload, str) or workload not in WORKLOAD_MAX_NEW:
         raise Rejected("A trial has an unknown workload.")
     number(trial.get("trial"), "trial", 1, MAX_TRIALS, integer=True)
     prompt = number(trial.get("prompt_tokens"), "prompt_tokens", 1, 70_000, integer=True)
@@ -296,6 +311,8 @@ def validate_trial(trial, model_id: str) -> float:
                        WORKLOAD_MAX_NEW[workload], integer=True)
     prefill = number(trial.get("prefill_seconds"), "prefill_seconds", 0, 36_000)
     decode = number(trial.get("decode_seconds"), "decode_seconds", 0, 36_000)
+    if trial.get("peak_memory_bytes") is not None:
+        number(trial["peak_memory_bytes"], "peak_memory_bytes", 0, 1 << 40, integer=True)
     if cached > prompt:
         raise Rejected("A trial reused more tokens than its prompt had.")
     if workload != "follow-up" and cached > 64:
