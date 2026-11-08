@@ -6,6 +6,7 @@ import TUFFModelCatalog
 public struct RouterServerArguments: Equatable, Sendable {
     public var background: Bool
     public var modelsRoot: String?
+    public var host: String?
     public var port: Int?
     public var defaultModel: String?
     public var unloadDelay: TUFFModelUnloadDelay?
@@ -15,7 +16,7 @@ public struct RouterServerArguments: Equatable, Sendable {
     usage: TUFFServer [options]
            TUFFServer --background
 
-    Serves every installed model on one loopback endpoint. A model loads when a
+    Serves every installed model on one local endpoint. A model loads when a
     request names it and unloads after it has been idle. Requests that name
     `default` use the default model. Each model uses its memory settings from
     the app's Settings > Models, within this Mac's memory budget. /v1/models
@@ -26,7 +27,11 @@ public struct RouterServerArguments: Equatable, Sendable {
                                  ~/Library/Logs/TUFF. The app starts this mode.
       --models-root <dir>        Installed models (default Application
                                  Support/TUFF/Models).
-      --port <1...65535>         Loopback port (default 8080, or the saved setting).
+      --host <address>           Address to listen on (default 127.0.0.1, or the
+                                 saved setting). 0.0.0.0 serves other devices on
+                                 your network, which must then send the API key
+                                 in Application Support/TUFF/Server/api-key.
+      --port <1...65535>         Port (default 8080, or the saved setting).
       --default-model <name>     Model for requests that name `default`.
       --unload-after <seconds|immediately>
                                  Idle time before the model unloads (default 300).
@@ -77,6 +82,13 @@ public struct RouterServerArguments: Equatable, Sendable {
             switch flag {
             case "--models-root":
                 arguments.modelsRoot = value
+            case "--host":
+                let address = value == "localhost" ? TUFFBackgroundServerSettings.loopbackHost : value
+                guard TUFFBackgroundServerSettings.isAddress(address) else {
+                    throw ServerArgumentError.invalid(
+                        "--host must be an IP address, such as 127.0.0.1 or 0.0.0.0")
+                }
+                arguments.host = address
             case "--port":
                 guard let parsed = Int(value), (1...65_535).contains(parsed) else {
                     throw ServerArgumentError.invalid("--port must be between 1 and 65535")
@@ -112,6 +124,7 @@ public struct RouterServerArguments: Equatable, Sendable {
     /// explicit flag taking precedence.
     public func resolvedSettings(saved: TUFFBackgroundServerSettings?) -> TUFFBackgroundServerSettings {
         var settings = saved ?? TUFFBackgroundServerSettings()
+        if let host { settings.host = host }
         if let port { settings.port = port }
         if let defaultModel { settings.defaultModel = defaultModel }
         if let unloadDelay { settings.unloadDelay = unloadDelay }

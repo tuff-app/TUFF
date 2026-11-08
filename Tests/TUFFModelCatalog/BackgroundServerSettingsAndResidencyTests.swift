@@ -27,6 +27,31 @@ import Testing
             try TUFFBackgroundServerSettingsStore.save(.init(port: 0), to: url)
         }
     }
+    @Test func aFileWithoutHostStaysOnLoopback() throws {
+        let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("settings.json")
+        // As 10.2.0 wrote it.
+        try Data(#"{"defaultModel":"gemma4-e2b","enabled":true,"port":8080,"queueLimit":4,"unloadDelay":300,"version":1}"#.utf8).write(to: url)
+        guard case .loaded(let settings) = TUFFBackgroundServerSettingsStore.load(from: url) else {
+            Issue.record("not loaded"); return
+        }
+        #expect(settings.host == "127.0.0.1" && !settings.listensBeyondLoopback && settings.enabled)
+        let network = TUFFBackgroundServerSettings(enabled: true, host: "0.0.0.0")
+        try TUFFBackgroundServerSettingsStore.save(network, to: url)
+        #expect(TUFFBackgroundServerSettingsStore.load(from: url) == .loaded(network))
+        #expect(network.listensBeyondLoopback)
+        #expect(throws: TUFFBackgroundServerSettingsStore.SaveError.invalidSettings) {
+            try TUFFBackgroundServerSettingsStore.save(.init(host: "example.com"), to: url)
+        }
+    }
+    @Test func loopbackAddresses() {
+        for host in ["127.0.0.1", "127.8.9.10", "::1", "0:0:0:0:0:0:0:1"] {
+            #expect(TUFFBackgroundServerSettings.isLoopback(host), "\(host)")
+        }
+        for host in ["0.0.0.0", "::", "192.168.1.20", "128.0.0.1", "::2", "fe80::1", "localhost"] {
+            #expect(!TUFFBackgroundServerSettings.isLoopback(host), "\(host)")
+        }
+    }
     @Test func liveLeaseReleaseAndStaleCleanup() throws {
         let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
         let registry = TUFFResidencyRegistry(directory: root)

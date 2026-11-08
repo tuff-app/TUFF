@@ -990,7 +990,7 @@ enum RawSocketError: Error {
     case timeout
 }
 
-func connectedSocket(port: Int) throws -> Int32 {
+func connectedSocket(port: Int, host: String = "127.0.0.1") throws -> Int32 {
     let descriptor = Darwin.socket(AF_INET, SOCK_STREAM, 0)
     guard descriptor >= 0 else {
         throw RawSocketError.systemCall("socket", errno)
@@ -999,7 +999,7 @@ func connectedSocket(port: Int) throws -> Int32 {
     address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
     address.sin_family = sa_family_t(AF_INET)
     address.sin_port = in_port_t(port).bigEndian
-    address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+    address.sin_addr = in_addr(s_addr: inet_addr(host))
     let result = withUnsafePointer(to: &address) {
         $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
             Darwin.connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))

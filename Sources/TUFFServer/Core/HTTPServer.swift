@@ -20,6 +20,7 @@ public actor TUFFHTTPServer {
     private let group: MultiThreadedEventLoopGroup
     private let provider: any ServerModelProvider
     private let control: ServerControl?
+    private let apiKey: String?
     private let heartbeatInterval: TimeAmount
     private let onRequestError: @Sendable (String) -> Void
     private let attachmentRoot: URL
@@ -29,9 +30,11 @@ public actor TUFFHTTPServer {
     private var shutdownTask: Task<Void, any Error>?
 
     /// A server over any model provider. `control` adds the loopback
-    /// `/tuff/v1/status` and `/tuff/v1/unload` routes.
+    /// `/tuff/v1/status` and `/tuff/v1/unload` routes. `apiKey` admits
+    /// callers that are not on this Mac; without it only loopback is served.
     public init(provider: any ServerModelProvider,
                 control: ServerControl? = nil,
+                apiKey: String? = nil,
                 heartbeatInterval: TimeAmount = .seconds(5),
                 onRequestError: @escaping @Sendable (String) -> Void = { _ in },
                 attachmentRoot: URL = ServerAttachmentDirectory.root,
@@ -40,6 +43,7 @@ public actor TUFFHTTPServer {
         self.group = group
         self.provider = provider
         self.control = control
+        self.apiKey = apiKey
         self.heartbeatInterval = heartbeatInterval
         self.onRequestError = onRequestError
         self.attachmentRoot = attachmentRoot
@@ -47,9 +51,10 @@ public actor TUFFHTTPServer {
         ServerAttachmentDirectory.sweepAbandoned(in: attachmentRoot)
     }
 
-    public func start(port: Int) async throws -> Channel {
+    public func start(host: String = "127.0.0.1", port: Int) async throws -> Channel {
         let provider = self.provider
         let control = self.control
+        let apiKey = self.apiKey
         let heartbeatInterval = self.heartbeatInterval
         let childChannels = self.childChannels
         let onRequestError = self.onRequestError
@@ -73,6 +78,7 @@ public actor TUFFHTTPServer {
                     channel.pipeline.addHandler(ServerHTTPHandler(
                         provider: provider,
                         control: control,
+                        apiKey: apiKey,
                         heartbeatInterval: heartbeatInterval,
                         onRequestError: onRequestError,
                         attachmentRoot: attachmentRoot,
@@ -80,7 +86,7 @@ public actor TUFFHTTPServer {
                 }
             }
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
-        let channel = try await bootstrap.bind(host: "127.0.0.1", port: port).get()
+        let channel = try await bootstrap.bind(host: host, port: port).get()
         self.channel = channel
         return channel
     }
@@ -136,12 +142,13 @@ public actor TUFFHTTPServer {
     }
 }
 
-private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
+final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
 
     private let provider: any ServerModelProvider
     private let control: ServerControl?
+    private let apiKey: String?
     private let heartbeatInterval: TimeAmount
     private let childChannels: ChildChannelRegistry
     private let onRequestError: @Sendable (String) -> Void
@@ -161,14 +168,16 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private var head: HTTPRequestHead?
     private var activeTask: Task<Void, Never>?
 
-    init(provider: any ServerModelProvider,
-         control: ServerControl?,
-         heartbeatInterval: TimeAmount,
-         onRequestError: @escaping @Sendable (String) -> Void,
-         attachmentRoot: URL,
-         childChannels: ChildChannelRegistry) {
+    fileprivate init(provider: any ServerModelProvider,
+            control: ServerControl?,
+            apiKey: String?,
+            heartbeatInterval: TimeAmount,
+            onRequestError: @escaping @Sendable (String) -> Void,
+            attachmentRoot: URL,
+            childChannels: ChildChannelRegistry) {
         self.provider = provider
         self.control = control
+        self.apiKey = apiKey
         self.heartbeatInterval = heartbeatInterval
         self.onRequestError = onRequestError
         self.attachmentRoot = attachmentRoot
@@ -214,6 +223,43 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         return loopbackHosts.contains(String(name))
     }
 
+    // A caller with the API key is served whatever its Host and Origin: a
+    // browser cannot attach the key to a rebound request. Without it, only a
+    // caller on this Mac is served, under the loopback name check.
+    static func refusal(_ head: HTTPRequestHead, fromLoopback: Bool,
+                        apiKey: String?) -> ServerRequestError? {
+        if let apiKey, ServerAPIKey.presented(in: head.headers, matches: apiKey) { return nil }
+        guard fromLoopback else {
+            return .invalid(
+                message: "requests from other devices need this server's API key, "
+                    + "sent as Authorization: Bearer <key> or x-api-key: <key>",
+                param: nil, code: "invalid_api_key")
+        }
+        guard acceptsCaller(head) else {
+            return .invalid(
+                message: "Host or Origin is not a loopback name "
+                    + "(127.0.0.1, localhost or [::1])",
+                param: nil, code: "forbidden_host")
+        }
+        return nil
+    }
+
+    static func isLoopback(peer: SocketAddress?) -> Bool {
+        guard let peer else { return false }
+        switch peer {
+        case .v4(let address):
+            return UInt32(bigEndian: address.address.sin_addr.s_addr) >> 24 == 127
+        case .v6(let address):
+            let bytes = withUnsafeBytes(of: address.address.sin6_addr) { Array($0) }
+            if bytes.dropLast().allSatisfy({ $0 == 0 }) && bytes.last == 1 { return true }
+            // An IPv4 caller on a dual-stack socket: ::ffff:127.x.x.x.
+            return bytes.prefix(10).allSatisfy { $0 == 0 }
+                && bytes[10] == 0xFF && bytes[11] == 0xFF && bytes[12] == 127
+        case .unixDomainSocket:
+            return true
+        }
+    }
+
     // `null`, every other scheme and every other site are refused.
     static func isLoopback(origin: String) -> Bool {
         let lowered = origin.trimmingCharacters(in: .whitespaces).lowercased()
@@ -247,19 +293,19 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             // The parser stages inline images to disk, so it is created only
             // once the request is known to carry a chat body. A body sent
             // elsewhere is counted and dropped.
-            let accepted = Self.acceptsCaller(head)
+            let refusal = Self.refusal(
+                head, fromLoopback: Self.isLoopback(peer: context.channel.remoteAddress),
+                apiKey: apiKey)
+            let accepted = refusal == nil
             bodyParser = accepted && Self.carriesChatBody(head)
                 ? StreamingChatRequestBody(attachmentRoot: attachmentRoot,
                                            visionCapability: provider.parserVisionCapability)
                 : nil
             bodyError = nil
             receivedBodyBytes = 0
-            if !accepted {
+            if let refusal {
                 // Answered at .end, so a refused body is never parsed or staged.
-                bodyError = ServerRequestError.invalid(
-                    message: "Host or Origin is not a loopback name "
-                        + "(127.0.0.1, localhost or [::1])",
-                    param: nil, code: "forbidden_host")
+                bodyError = refusal
             }
         case .body(var part):
             guard !discardingUntilClose else { return }
@@ -883,7 +929,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                             closeAfter: Bool = false) {
         if errorAPI == .messages {
             let type = status.code >= 500 ? "api_error"
-                : error.error.code == "forbidden_host" ? "permission_error" : error.error.type
+                : error.error.code == "forbidden_host" ? "permission_error"
+                : error.error.code == "invalid_api_key" ? "authentication_error" : error.error.type
             let object: [String: Any] = ["type": "error", "error": ["type": type, "message": error.error.message]]
             guard let data = try? JSONSerialization.data(withJSONObject: object) else { return }
             writeData(context, status: status, data: data, closeAfter: closeAfter)
@@ -1008,6 +1055,8 @@ private extension ServerRequestError {
                 .payloadTooLarge
             case "forbidden_host":
                 .forbidden
+            case "invalid_api_key":
+                .unauthorized
             default:
                 .badRequest
             }

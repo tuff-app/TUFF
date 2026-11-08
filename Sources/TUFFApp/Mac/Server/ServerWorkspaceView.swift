@@ -6,13 +6,16 @@ import TUFFModelCatalog
 import TUFFMacPresentation
 
 /// The Background API: a login item that serves every installed model on a
-/// loopback port, whether or not the app is open.
+/// loopback port, or to the local network with an API key, whether or not
+/// the app is open.
 struct ServerWorkspaceView: View {
     let model: AppModel
     @Bindable var controller: AppBackgroundAPIController
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @State private var portText = ""
     @State private var copiedURL = false
+    @State private var copiedKey = false
+    @State private var showsKey = false
     @FocusState private var portIsFocused: Bool
 
     var body: some View {
@@ -20,7 +23,7 @@ struct ServerWorkspaceView: View {
             VStack(alignment: .leading, spacing: 20) {
                 WorkspaceTitle(
                     title: "Server",
-                    subtitle: "Use installed models through an OpenAI-compatible loopback endpoint.")
+                    subtitle: "Use installed models through an OpenAI-compatible local endpoint.")
                 if controller.isAvailable {
                     statusCard
                     configurationCard
@@ -167,7 +170,16 @@ struct ServerWorkspaceView: View {
                     }
             }
             .fixedSize()
-            Text("The server binds only to 127.0.0.1 and has no authentication. Chat and the API share one memory budget, so the API declines a request while Chat holds a model the second would not fit beside.")
+            Toggle("Allow other devices on your network", isOn: Binding(
+                get: { controller.settings.listensBeyondLoopback },
+                set: { value in controller.setNetworkAccess(value) }))
+                .accessibilityHint("Listens on every network interface and requires the API key from other devices")
+            if controller.settings.listensBeyondLoopback {
+                networkAccess
+            }
+            Text(controller.settings.listensBeyondLoopback
+                 ? "Other devices must send the API key as Authorization: Bearer <key> or x-api-key. Requests from this Mac need no key. Anyone with the key can use your models, so only allow this on a network you trust. Chat and the API share one memory budget, so the API declines a request while Chat holds a model the second would not fit beside."
+                 : "The server listens only on 127.0.0.1, so only this Mac can reach it, and it needs no key. Chat and the API share one memory budget, so the API declines a request while Chat holds a model the second would not fit beside.")
                 .appFont(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -175,6 +187,66 @@ struct ServerWorkspaceView: View {
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(cardBackground, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private var networkAccess: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("From other devices")
+                    .appFont(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                let endpoints = controller.networkEndpoints
+                if endpoints.isEmpty {
+                    Text("This Mac has no network address right now.")
+                        .appFont(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(endpoints, id: \.self) { endpoint in
+                    Text(endpoint)
+                        .appFont(.body.monospaced())
+                        .textSelection(.enabled)
+                }
+            }
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("API key")
+                        .appFont(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    if let key = controller.apiKey {
+                        Text(showsKey ? key : String(repeating: "•", count: 24))
+                            .appFont(.body.monospaced())
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                            .accessibilityLabel(showsKey ? key : "Hidden")
+                    } else {
+                        Text("Created when the server starts")
+                            .appFont(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+                if let key = controller.apiKey {
+                    Button(showsKey ? "Hide" : "Show") { showsKey.toggle() }
+                    Button {
+                        copy(key)
+                        copiedKey = true
+                    } label: {
+                        Label(copiedKey ? "Copied" : "Copy Key",
+                              systemImage: copiedKey ? "checkmark" : "key")
+                            .contentTransition(.symbolEffect(.replace))
+                    }
+                    .accessibilityHint("Copies the API key other devices send")
+                    .task(id: copiedKey) {
+                        guard copiedKey else { return }
+                        try? await Task.sleep(for: .seconds(1.5))
+                        copiedKey = false
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
     }
 
     private var activityCard: some View {
@@ -259,7 +331,11 @@ struct ServerWorkspaceView: View {
         let settings = controller.settings
         if !settings.enabled { return "Off" }
         if controller.requiresApproval { return "Waiting for approval in Login Items" }
-        if controller.status != nil { return "Listening on 127.0.0.1:\(settings.port)" }
+        if controller.status != nil {
+            return settings.listensBeyondLoopback
+                ? "Listening on port \(settings.port) for this Mac and your network"
+                : "Listening on 127.0.0.1:\(settings.port)"
+        }
         return "Starting the listener…"
     }
 

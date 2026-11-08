@@ -157,7 +157,8 @@ tuff serve --port 8080
 ```
 
 `tuff serve` runs the same server as the Background API. It only listens on
-your Mac and has no authentication. [OMP setup](docs/OMP.md) is a tested
+your Mac unless you pass `--host 0.0.0.0`, and then other devices need its API
+key ([details](docs/LOCAL_SERVER.md#other-devices-on-your-network)). [OMP setup](docs/OMP.md) is a tested
 coding-agent config.
 
 ## Build from source

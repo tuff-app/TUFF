@@ -72,7 +72,8 @@ public enum TUFFCommand {
     usage:
       tuff prompt <text> [--model <name|path>] [generation options]
       tuff load [model]
-      tuff serve [--default-model <name>] [--unload-after <seconds>] [--port <port>]
+      tuff serve [--default-model <name>] [--unload-after <seconds>]
+                 [--host <address>] [--port <port>]
       tuff bench (--models <name,...> | --all) [--quick] [--share]
       tuff --version
 

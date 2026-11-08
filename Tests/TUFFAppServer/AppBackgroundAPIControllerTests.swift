@@ -63,6 +63,38 @@ import TUFFModelCatalog
         #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("clone.json").path))
     }
 
+    /// Allowing the network restarts the login item on every interface, with
+    /// the key already on disk so the server reads the one the screen shows.
+    @MainActor @Test func networkAccessCreatesTheKeyAndRestarts() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let agent = FixtureAgent(), file = root.appendingPathComponent("settings.json")
+        let controller = AppBackgroundAPIController(service: agent, settingsURL: file)
+        controller.update { $0.enabled = true; $0.port = 65434 }
+        try await settle(controller)
+        #expect(controller.apiKey == nil && controller.networkEndpoints.isEmpty)
+
+        controller.setNetworkAccess(true)
+        try await settle(controller)
+        #expect(agent.calls == ["register", "unregister", "register"])
+        #expect(controller.settings.host == "0.0.0.0")
+        let key = try #require(controller.apiKey)
+        #expect(key.count == 64)
+        let keyFile = root.appendingPathComponent("api-key")
+        let mode = try FileManager.default.attributesOfItem(atPath: keyFile.path)[.posixPermissions] as? Int
+        #expect(mode == 0o600)
+        #expect(controller.networkEndpoints.allSatisfy { $0.hasSuffix(":65434/v1") })
+
+        controller.setNetworkAccess(false)
+        try await settle(controller)
+        #expect(controller.settings.host == "127.0.0.1" && controller.apiKey == nil)
+        #expect(agent.calls.count == 5)
+        // The key is kept, so a client configured once keeps working.
+        controller.setNetworkAccess(true)
+        try await settle(controller)
+        #expect(controller.apiKey == key)
+    }
+
     /// An update changes the binary the login item was pinned to, so the
     /// first launch of a new build registers it again, once.
     @MainActor @Test func aNewBuildRegistersTheLoginItemAgainOnce() async throws {

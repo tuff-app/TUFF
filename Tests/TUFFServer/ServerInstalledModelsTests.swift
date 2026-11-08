@@ -181,6 +181,23 @@ import TUFFDecodeProtocol
         }
     }
 
+    @Test func hostFlagAcceptsAddressesOnly() throws {
+        #expect(try RouterServerArguments.parse([]).resolvedSettings(saved: nil).host == "127.0.0.1")
+        for (input, host) in [("0.0.0.0", "0.0.0.0"), ("192.168.1.20", "192.168.1.20"),
+                              ("::", "::"), ("localhost", "127.0.0.1")] {
+            let parsed = try RouterServerArguments.parse(["--host", input])
+            #expect(parsed.resolvedSettings(saved: nil).host == host)
+        }
+        // An explicit flag wins over the saved setting, and its absence keeps it.
+        let saved = TUFFBackgroundServerSettings(host: "0.0.0.0")
+        #expect(try RouterServerArguments.parse([]).resolvedSettings(saved: saved).host == "0.0.0.0")
+        #expect(try RouterServerArguments.parse(["--host", "127.0.0.1"])
+            .resolvedSettings(saved: saved).host == "127.0.0.1")
+        for input in [["--host", "my-mac.local"], ["--host", ""], ["--host", "300.1.1.1"], ["--host"]] {
+            #expect(throws: ServerArgumentError.self) { try RouterServerArguments.parse(input) }
+        }
+    }
+
     @Test func installedModelsUseCatalogRuntimeDefaultsForThisMac() {
         let sixteen = TUFFDeviceCapabilities(unifiedMemoryBytes: 16 * TUFFModelCatalog.oneGiB,
                                              macOSMajorVersion: 26, appleSiliconGeneration: 2)

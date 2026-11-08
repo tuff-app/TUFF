@@ -1,4 +1,5 @@
 import Foundation
+import NIOHTTP1
 import Security
 
 /// Status the background server reports at `GET /tuff/v1/status`.
@@ -63,10 +64,14 @@ public struct ServerControl: Sendable {
 
     public func authorizes(_ header: String?) -> Bool {
         guard let header, header.hasPrefix("Bearer ") else { return false }
-        let presented = Array(header.dropFirst("Bearer ".count).utf8)
-        let expected = Array(token.utf8)
+        return Self.matches(String(header.dropFirst("Bearer ".count)), token)
+    }
+
+    /// Constant time, so a secret cannot be recovered byte by byte.
+    static func matches(_ presented: String, _ expected: String) -> Bool {
+        let presented = Array(presented.utf8)
+        let expected = Array(expected.utf8)
         guard presented.count == expected.count else { return false }
-        // Constant time, so the token cannot be recovered byte by byte.
         var difference: UInt8 = 0
         for (lhs, rhs) in zip(presented, expected) { difference |= lhs ^ rhs }
         return difference == 0
@@ -105,5 +110,31 @@ public enum ServerControlToken {
                 .trimmingCharacters(in: .whitespacesAndNewlines),
               token.count == 64 else { return nil }
         return token
+    }
+}
+
+/// The key callers on other devices send when the server listens beyond
+/// loopback. It is created the first time it is needed and kept, so clients
+/// stay configured across restarts. Deleting the file makes a new one.
+public enum ServerAPIKey {
+    public static func fileURL(applicationSupport: URL) -> URL {
+        applicationSupport.appendingPathComponent("TUFF/Server/api-key", isDirectory: false)
+    }
+
+    public static func readOrCreate(at url: URL) throws -> String {
+        try ServerControlToken.read(at: url) ?? ServerControlToken.create(at: url)
+    }
+
+    /// `Authorization: Bearer <key>` as OpenAI clients send it, or
+    /// `x-api-key: <key>` as Anthropic clients do.
+    static func presented(in headers: HTTPHeaders, matches key: String) -> Bool {
+        if let header = headers.first(name: "authorization"), header.hasPrefix("Bearer "),
+           ServerControl.matches(String(header.dropFirst("Bearer ".count)), key) {
+            return true
+        }
+        if let header = headers.first(name: "x-api-key"), ServerControl.matches(header, key) {
+            return true
+        }
+        return false
     }
 }

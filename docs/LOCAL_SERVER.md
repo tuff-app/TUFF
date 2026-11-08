@@ -1,11 +1,11 @@
 # Local server
 
 TUFF can serve your installed models to other apps, scripts and coding
-agents through an OpenAI-compatible API. It only listens on `127.0.0.1` and
-has no authentication, so keep it that way. It also refuses requests whose
-`Host` or `Origin` isn't `127.0.0.1`, `localhost` or `[::1]`, so a web page
-can't reach it through DNS rebinding. A proxy in front of it has to pass the
-original `Host`.
+agents through an OpenAI-compatible API. By default it only listens on
+`127.0.0.1` and needs no key. It also refuses requests whose `Host` or
+`Origin` isn't `127.0.0.1`, `localhost` or `[::1]`, so a web page can't reach
+it through DNS rebinding. A proxy in front of it has to pass the original
+`Host`, or send the API key described below.
 
 ## Start it
 
@@ -22,6 +22,34 @@ tuff serve --default-model gemma4-e2b --unload-after 300 --port 8080
 ```
 
 From a clone: `swift run -c release TUFFServer --models-root scratch`.
+
+## Other devices on your network
+
+To use TUFF from another machine, such as Open WebUI on a Docker host, turn on
+**Allow other devices on your network** on the Server screen, or start the
+server with `--host`:
+
+```sh
+tuff serve --host 0.0.0.0 --port 8080
+```
+
+`0.0.0.0` listens on every interface, this Mac's loopback included. A specific
+address, such as `192.168.1.20`, listens only there, and then this Mac has to
+use that address too.
+
+Requests from other devices need the API key, sent as
+`Authorization: Bearer <key>` (OpenAI clients call this the API key) or
+`x-api-key: <key>` (Anthropic clients). Without it they get 401
+`invalid_api_key`. TUFF creates the key the first time it listens beyond
+loopback and keeps it in `~/Library/Application Support/TUFF/Server/api-key`,
+readable only by you. The Server screen shows and copies it. Delete the file
+to get a new one. Requests from this Mac still need no key.
+
+Anyone with the key can use your models, and requests are plain HTTP, so only
+do this on a network you trust. macOS may ask whether TUFF can accept
+incoming connections the first time; allow it.
+
+## Using it
 
 Point your client at `http://127.0.0.1:8080/v1`. `GET /v1/models` lists the
 installed models and their context and output limits. A request for

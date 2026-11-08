@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 import Observation
 import ServiceManagement
@@ -59,6 +60,65 @@ public final class AppBackgroundAPIController {
         update { $0.port = port }
     }
 
+    /// Listens on every interface, so other devices on the network can
+    /// connect with the API key, or on loopback only. The key is created
+    /// before the server restarts, so the one shown is the one it reads.
+    public func setNetworkAccess(_ allowed: Bool) {
+        guard allowed != settings.listensBeyondLoopback else { return }
+        if allowed {
+            do {
+                _ = try ServerAPIKey.readOrCreate(at: apiKeyURL)
+            } catch {
+                message = "Could not create the API key: \(error.localizedDescription)"
+                return
+            }
+        }
+        update {
+            $0.host = allowed ? TUFFBackgroundServerSettings.networkHost
+                : TUFFBackgroundServerSettings.loopbackHost
+        }
+    }
+
+    /// Beside the settings, where `ServerAPIKey.fileURL` puts it.
+    private var apiKeyURL: URL {
+        settingsURL.deletingLastPathComponent().appendingPathComponent("api-key")
+    }
+
+    /// The key other devices send, while the server listens beyond loopback.
+    public var apiKey: String? {
+        guard settings.listensBeyondLoopback else { return nil }
+        return ServerControlToken.read(at: apiKeyURL)
+    }
+
+    /// Endpoints other devices can use: this Mac's IPv4 addresses on its
+    /// active network interfaces, or the bound address when it is one.
+    public var networkEndpoints: [String] {
+        guard settings.listensBeyondLoopback else { return [] }
+        let addresses = settings.host == TUFFBackgroundServerSettings.networkHost
+            ? Self.networkAddresses() : [settings.host]
+        return addresses.map { "http://\($0.contains(":") ? "[\($0)]" : $0):\(settings.port)/v1" }
+    }
+
+    static func networkAddresses() -> [String] {
+        var first: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&first) == 0, let first else { return [] }
+        defer { freeifaddrs(first) }
+        var addresses: [String] = []
+        for entry in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let flags = Int32(entry.pointee.ifa_flags)
+            guard let address = entry.pointee.ifa_addr,
+                  address.pointee.sa_family == sa_family_t(AF_INET),
+                  flags & IFF_UP != 0, flags & IFF_LOOPBACK == 0 else { continue }
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(address, socklen_t(address.pointee.sa_len), &host,
+                              socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 else { continue }
+            let text = String(cString: host)
+            // Link-local addresses are not reachable from a typical network.
+            if !text.hasPrefix("169.254."), !addresses.contains(text) { addresses.append(text) }
+        }
+        return addresses
+    }
+
     public func update(_ change: (inout TUFFBackgroundServerSettings) -> Void) {
         guard isAvailable, !isChanging, let service else { return }
         var candidate = settings
@@ -71,7 +131,8 @@ public final class AppBackgroundAPIController {
             do {
                 try TUFFBackgroundServerSettingsStore.save(candidate, to: settingsURL)
                 settings = candidate
-                if !candidate.enabled || !previous.enabled || previous.port != candidate.port {
+                if !candidate.enabled || !previous.enabled || previous.port != candidate.port
+                    || previous.host != candidate.host {
                     if service.status == .enabled || service.status == .requiresApproval {
                         try await service.unregister()
                     }

@@ -85,19 +85,30 @@ public enum RouterServerRuntime {
             return 1
         }
 
+        let host = settings.host
         let port = settings.port
+        var apiKey: String?
+        if settings.listensBeyondLoopback {
+            do {
+                apiKey = try ServerAPIKey.readOrCreate(
+                    at: ServerAPIKey.fileURL(applicationSupport: support))
+            } catch {
+                write("error: could not create the API key: \(error)")
+                return 1
+            }
+        }
         let link = HostServingLink(profile: profile)
         let provider = HostRoutedModelProvider(installed: installed, settings: source, link: link)
         let control = ServerControl(
             token: token,
             status: { await ServerControl.status(provider: provider, version: TUFFVersion.current) },
             unloadIfIdle: { await provider.unloadIfIdle() })
-        let server = TUFFHTTPServer(provider: provider, control: control)
+        let server = TUFFHTTPServer(provider: provider, control: control, apiKey: apiKey)
         let signals = ServerTerminationSignals()
         do {
-            _ = try await server.start(port: port)
+            _ = try await server.start(host: host, port: port)
         } catch {
-            write("error: could not listen on 127.0.0.1:\(port): \(error)")
+            write("error: could not listen on \(Self.authority(host, port)): \(error)")
             await signals.cancel()
             return 1
         }
@@ -110,7 +121,11 @@ public enum RouterServerRuntime {
             write("warning: the inference host is not reachable yet: \(error)")
         }
         let names = installed.available().map(\.apiModelID).joined(separator: ",")
-        print("TUFFServer \(TUFFVersion.current) routing at http://127.0.0.1:\(port) "
+        if apiKey != nil {
+            print("Other devices on your network can connect. They must send the API key in "
+                + ServerAPIKey.fileURL(applicationSupport: support).path)
+        }
+        print("TUFFServer \(TUFFVersion.current) routing at http://\(Self.authority(host, port)) "
             + "default=\(settings.defaultModel) unload_after=\(settings.unloadDelay.seconds)s "
             + "models=\(names.isEmpty ? "none" : names)")
         _ = await signals.wait()
@@ -121,6 +136,10 @@ public enum RouterServerRuntime {
         }
         await signals.cancel()
         return 0
+    }
+
+    static func authority(_ host: String, _ port: Int) -> String {
+        host.contains(":") ? "[\(host)]:\(port)" : "\(host):\(port)"
     }
 
     private static func write(_ message: String) {

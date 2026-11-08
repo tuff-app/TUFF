@@ -1,5 +1,7 @@
 import Darwin
 import Foundation
+import NIOCore
+import NIOHTTP1
 import Testing
 @testable import TUFFEngine
 @testable import TUFFServerCore
@@ -45,7 +47,10 @@ struct ServerHostCheckTests {
         }
     }
 
-    private static func makeServer(root: URL, unloads: UnloadCount) -> TUFFHTTPServer {
+    private static let apiKey = String(repeating: "k", count: 64)
+
+    private static func makeServer(root: URL, unloads: UnloadCount,
+                                   apiKey: String? = nil) -> TUFFHTTPServer {
         let provider = FixedServerModelProvider(
             modelID: "test-model", backend: AnsweringBackend(), dialect: .gemma,
             visionCapability: "ready", queueLimit: 1)
@@ -61,7 +66,8 @@ struct ServerHostCheckTests {
                 unloads.add()
                 return true
             })
-        return TUFFHTTPServer(provider: provider, control: control, attachmentRoot: root)
+        return TUFFHTTPServer(provider: provider, control: control, apiKey: apiKey,
+                              attachmentRoot: root)
     }
 
     private static func makeRoot() -> URL {
@@ -112,8 +118,9 @@ struct ServerHostCheckTests {
     }
 
     private static func send(port: Int, method: String, path: String,
-                             headers: [String], version: String = "HTTP/1.1") throws -> String {
-        let socket = try connectedSocket(port: port)
+                             headers: [String], version: String = "HTTP/1.1",
+                             address: String = "127.0.0.1") throws -> String {
+        let socket = try connectedSocket(port: port, host: address)
         defer { _ = Darwin.close(socket) }
         try writeAll(socket: socket, text: request(
             method: method, path: path, headers: headers,
@@ -296,6 +303,140 @@ struct ServerHostCheckTests {
         let served = try Self.readResponse(socket)
         #expect(served.hasPrefix("HTTP/1.1 200"))
         #expect(served.contains(#""content":"ok""#))
+        try await server.shutdown()
+    }
+
+    // This Mac's own IPv4 address on a network interface. A connection to it
+    // arrives from that address, not loopback, as another device's would.
+    private static func networkAddress() -> String? {
+        var first: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&first) == 0, let first else { return nil }
+        defer { freeifaddrs(first) }
+        for entry in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let flags = Int32(entry.pointee.ifa_flags)
+            guard let address = entry.pointee.ifa_addr,
+                  address.pointee.sa_family == sa_family_t(AF_INET),
+                  flags & IFF_UP != 0, flags & IFF_LOOPBACK == 0 else { continue }
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(address, socklen_t(address.pointee.sa_len), &host,
+                              socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 else { continue }
+            return String(cString: host)
+        }
+        return nil
+    }
+
+    @Test func callersOffThisMacNeedTheKey() {
+        let head = { (headers: [(String, String)]) in
+            HTTPRequestHead(version: .http1_1, method: .GET, uri: "/v1/models",
+                            headers: HTTPHeaders(headers))
+        }
+        let lan = [("Host", "192.168.1.20:8080")]
+        #expect(ServerHTTPHandler.refusal(head(lan), fromLoopback: false, apiKey: nil)?
+            .envelope.error.code == "invalid_api_key")
+        #expect(ServerHTTPHandler.refusal(head(lan), fromLoopback: false, apiKey: Self.apiKey)?
+            .envelope.error.code == "invalid_api_key")
+        #expect(ServerHTTPHandler.refusal(
+            head(lan + [("Authorization", "Bearer \(Self.apiKey)x")]),
+            fromLoopback: false, apiKey: Self.apiKey) != nil)
+        #expect(ServerHTTPHandler.refusal(
+            head(lan + [("Authorization", "Bearer \(Self.apiKey)")]),
+            fromLoopback: false, apiKey: nil) != nil)
+        for credential in [("Authorization", "Bearer \(Self.apiKey)"), ("x-api-key", Self.apiKey)] {
+            #expect(ServerHTTPHandler.refusal(
+                head(lan + [credential, ("Origin", "http://webui.example")]),
+                fromLoopback: false, apiKey: Self.apiKey) == nil)
+            // A rebound name on this Mac is served too, since a browser
+            // cannot attach the key to a request it was tricked into making.
+            #expect(ServerHTTPHandler.refusal(
+                head([("Host", "attacker.example"), credential]),
+                fromLoopback: true, apiKey: Self.apiKey) == nil)
+        }
+        #expect(ServerHTTPHandler.refusal(head([("Host", "localhost")]),
+                                          fromLoopback: true, apiKey: Self.apiKey) == nil)
+        #expect(ServerHTTPHandler.refusal(head([("Host", "attacker.example")]),
+                                          fromLoopback: true, apiKey: Self.apiKey)?
+            .envelope.error.code == "forbidden_host")
+    }
+
+    @Test func loopbackPeers() throws {
+        #expect(ServerHTTPHandler.isLoopback(peer: try SocketAddress(ipAddress: "127.0.0.1", port: 1)))
+        #expect(ServerHTTPHandler.isLoopback(peer: try SocketAddress(ipAddress: "127.3.0.1", port: 1)))
+        #expect(ServerHTTPHandler.isLoopback(peer: try SocketAddress(ipAddress: "::1", port: 1)))
+        #expect(ServerHTTPHandler.isLoopback(peer: try SocketAddress(ipAddress: "::ffff:127.0.0.1", port: 1)))
+        for address in ["192.168.1.20", "10.0.0.2", "::", "fe80::1", "::ffff:10.0.0.1"] {
+            #expect(!ServerHTTPHandler.isLoopback(peer: try SocketAddress(ipAddress: address, port: 1)),
+                    "\(address)")
+        }
+        #expect(!ServerHTTPHandler.isLoopback(peer: nil))
+    }
+
+    @Test(.enabled(if: networkAddress() != nil, "needs a network interface"))
+    func aServerOnEveryInterfaceServesTheNetworkWithTheKey() async throws {
+        let address = try #require(Self.networkAddress())
+        let root = Self.makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let unloads = UnloadCount()
+        let server = Self.makeServer(root: root, unloads: unloads, apiKey: Self.apiKey)
+        let channel = try await server.start(host: "0.0.0.0", port: 0)
+        let port = try #require(channel.localAddress?.port)
+        let lanHost = "Host: \(address):\(port)"
+
+        for headers in [[lanHost], [lanHost, "Authorization: Bearer \(String(repeating: "x", count: 64))"],
+                        [lanHost, "x-api-key: wrong"], ["Host: 127.0.0.1:\(port)"]] {
+            for (method, path, extra) in Self.routes {
+                let response = try Self.send(port: port, method: method, path: path,
+                                             headers: headers + extra, address: address)
+                #expect(response.hasPrefix("HTTP/1.1 401"), "\(headers) \(path)")
+                if path == "/v1/messages" {
+                    #expect(response.contains(#""type":"authentication_error""#), "\(headers)")
+                } else {
+                    #expect(response.contains("invalid_api_key"), "\(headers) \(path)")
+                }
+                #expect(!response.contains("test-model"), "\(headers) \(path)")
+            }
+        }
+        #expect(unloads.value == 0)
+
+        let bearer = try Self.send(
+            port: port, method: "POST", path: "/v1/chat/completions",
+            headers: [lanHost, "Origin: http://webui.example", "Authorization: Bearer \(Self.apiKey)"],
+            address: address)
+        #expect(bearer.hasPrefix("HTTP/1.1 200"))
+        #expect(bearer.contains(#""content":"ok""#))
+        let anthropic = try Self.send(port: port, method: "POST", path: "/v1/messages",
+                                      headers: [lanHost, "x-api-key: \(Self.apiKey)"],
+                                      address: address)
+        #expect(anthropic.hasPrefix("HTTP/1.1 200"))
+        let models = try Self.send(port: port, method: "GET", path: "/v1/models",
+                                   headers: ["Host: tuff-mac.local:\(port)",
+                                             "Authorization: Bearer \(Self.apiKey)"],
+                                   address: address)
+        #expect(models.hasPrefix("HTTP/1.1 200") && models.contains("test-model"))
+
+        // This Mac still needs no key, and is still protected from rebinding.
+        let local = try Self.send(port: port, method: "POST", path: "/v1/chat/completions",
+                                  headers: ["Host: 127.0.0.1:\(port)"])
+        #expect(local.hasPrefix("HTTP/1.1 200"))
+        let rebound = try Self.send(port: port, method: "POST", path: "/v1/chat/completions",
+                                    headers: ["Host: attacker.example"])
+        #expect(rebound.hasPrefix("HTTP/1.1 403"))
+        try await server.shutdown()
+    }
+
+    // Without a key nothing off this Mac is served, whatever the address.
+    @Test(.enabled(if: networkAddress() != nil, "needs a network interface"))
+    func aServerWithoutAKeyRefusesTheNetwork() async throws {
+        let address = try #require(Self.networkAddress())
+        let root = Self.makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let server = Self.makeServer(root: root, unloads: UnloadCount())
+        let channel = try await server.start(host: "0.0.0.0", port: 0)
+        let port = try #require(channel.localAddress?.port)
+        let response = try Self.send(port: port, method: "POST", path: "/v1/chat/completions",
+                                     headers: ["Host: \(address):\(port)",
+                                               "Authorization: Bearer \(Self.apiKey)"],
+                                     address: address)
+        #expect(response.hasPrefix("HTTP/1.1 401"))
         try await server.shutdown()
     }
 }
