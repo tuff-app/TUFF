@@ -4,6 +4,9 @@ import SwiftMath
 
 public extension NSAttributedString.Key {
     static let tuffLaTeXSource = NSAttributedString.Key("TUFFLaTeXSource")
+    /// Marks the text of one fenced code block, so the transcript can offer
+    /// to copy that block alone. The value tells adjacent blocks apart.
+    static let tuffCodeBlock = NSAttributedString.Key("TUFFCodeBlock")
 }
 
 @MainActor
@@ -119,12 +122,12 @@ public struct ResponseMarkdownRenderer {
                 guard block.kind != .thematicBreak else { continue }
                 let text = String(parsed[run.range].characters)
                 guard !text.isEmpty else { continue }
-                output.append(NSAttributedString(
-                    string: text,
-                    attributes: attributes(
-                        inlineIntent: run.inlinePresentationIntent,
-                        link: run.link,
-                        block: block.kind)))
+                var values = attributes(
+                    inlineIntent: run.inlinePresentationIntent,
+                    link: run.link,
+                    block: block.kind)
+                if block.kind == .code { values[.tuffCodeBlock] = block.identity }
+                output.append(NSAttributedString(string: text, attributes: values))
             }
 
             guard output.length > 0 else { return fallback(source) }
@@ -156,6 +159,20 @@ public struct ResponseMarkdownRenderer {
             ], range: citation.range)
         }
         return rendered
+    }
+
+    /// The code blocks of a rendered answer, in order, without the newline
+    /// the Markdown parser leaves at the end of each.
+    public static func codeBlocks(in attributed: NSAttributedString) -> [(range: NSRange, code: String)] {
+        var blocks: [(range: NSRange, code: String)] = []
+        attributed.enumerateAttribute(
+            .tuffCodeBlock, in: NSRange(location: 0, length: attributed.length)
+        ) { value, range, _ in
+            guard value != nil else { return }
+            let code = (attributed.string as NSString).substring(with: range)
+            blocks.append((range, code.hasSuffix("\n") ? String(code.dropLast()) : code))
+        }
+        return blocks
     }
 
     public func plainText(_ source: String) -> String {

@@ -296,6 +296,17 @@ private actor EchoBackend: ServerInferenceBackend {
         try await server.shutdown()
     }
 
+    /// A backlog below the cap overflowed the listen queue on a burst of
+    /// connects, which macOS 27 answers with RST (drumih/turbo-fieldfare#151).
+    @Test func theListenBacklogHoldsEveryAllowedConnection() async throws {
+        let server = TUFFHTTPServer(
+            modelID: "test-model", queueLimit: 1, backend: EchoBackend())
+        let channel = try await server.start(port: 0)
+        let backlog = try await channel.getOption(ChannelOptions.backlog).get()
+        #expect(Int(backlog) >= TUFFHTTPServer.maximumConnections)
+        try await server.shutdown()
+    }
+
     /// Accepted sockets were unbounded: each costs a descriptor and can pin a
     /// staging directory, so the count has to be capped.
     @Test func connectionsBeyondTheCapAreClosed() async throws {

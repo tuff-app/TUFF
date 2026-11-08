@@ -22,6 +22,26 @@ struct ChatMLTemplateTests {
 
     private typealias Message = GFTokenizer.Message
 
+    @Test("Leading system and developer messages render as one system turn")
+    func leadingInstructionsAreJoined() throws {
+        let split = try tok.applyChatTemplate([
+            Message(role: .system, content: "Be brief."),
+            Message(role: .developer, content: "  Answer in French. "),
+            Message(role: .user, content: "Hi"),
+        ])
+        let single = try tok.applyChatTemplate([
+            Message(role: .system, content: "Be brief.\n\nAnswer in French."),
+            Message(role: .user, content: "Hi"),
+        ])
+        #expect(split == single)
+        #expect(throws: GFTokenizerError.self) {
+            try tok.applyChatTemplate([
+                Message(role: .user, content: "Hi"),
+                Message(role: .system, content: "Late."),
+            ])
+        }
+    }
+
     @Test("Fixture resolves to the chatml dialect")
     func dialectDetection() {
         #expect(tok.dialect == .chatml)

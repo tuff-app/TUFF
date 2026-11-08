@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TUFFMacPresentation
 
 /// An `NSTextView` that has no scroll view of its own and reports the height it
 /// needs instead.
@@ -42,6 +43,120 @@ final class MessageTextView: NSTextView {
         reportedHeight = measured
         let handler = onHeightChange
         DispatchQueue.main.async { handler?(measured) }
+    }
+
+    // MARK: Code blocks
+
+    /// Shown at the top right of the code block under the pointer.
+    private lazy var codeCopyButton: NSButton = {
+        let button = NSButton(title: "Copy", image: NSImage(
+            systemSymbolName: "doc.on.doc", accessibilityDescription: nil) ?? NSImage(),
+            target: self, action: #selector(copyHoveredCodeBlock))
+        button.bezelStyle = .accessoryBarAction
+        button.controlSize = .small
+        button.imagePosition = .imageLeading
+        button.setAccessibilityLabel("Copy code")
+        button.isHidden = true
+        addSubview(button)
+        return button
+    }()
+    private var hoveredCodeBlock: (range: NSRange, code: String)?
+    private var codeTrackingArea: NSTrackingArea?
+    private var copiedResetWork: DispatchWorkItem?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let codeTrackingArea { removeTrackingArea(codeTrackingArea) }
+        let area = NSTrackingArea(rect: bounds, options: [.mouseMoved, .mouseEnteredAndExited,
+                                                          .activeInKeyWindow, .inVisibleRect],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        codeTrackingArea = area
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        showCodeCopyButton(for: codeBlock(at: convert(event.locationInWindow, from: nil)))
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        showCodeCopyButton(for: nil)
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = super.menu(for: event) ?? NSMenu()
+        if let block = codeBlock(at: convert(event.locationInWindow, from: nil)) {
+            let item = NSMenuItem(title: "Copy Code", action: #selector(copyCodeFromMenu(_:)),
+                                  keyEquivalent: "")
+            item.target = self
+            item.representedObject = block.code
+            menu.insertItem(item, at: 0)
+            menu.insertItem(.separator(), at: 1)
+        }
+        return menu
+    }
+
+    private func codeBlock(at point: NSPoint) -> (range: NSRange, code: String)? {
+        guard let textStorage, textStorage.length > 0, let layoutManager, let textContainer else {
+            return nil
+        }
+        var fraction: CGFloat = 0
+        let glyph = layoutManager.glyphIndex(for: point, in: textContainer,
+                                             fractionOfDistanceThroughGlyph: &fraction)
+        let line = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+        guard line.minY <= point.y, point.y <= line.maxY else { return nil }
+        let character = layoutManager.characterIndexForGlyph(at: glyph)
+        guard character < textStorage.length,
+              textStorage.attribute(.tuffCodeBlock, at: character, effectiveRange: nil) != nil else {
+            return nil
+        }
+        return ResponseMarkdownRenderer.codeBlocks(in: textStorage)
+            .first { NSLocationInRange(character, $0.range) }
+    }
+
+    private func showCodeCopyButton(for block: (range: NSRange, code: String)?) {
+        guard let block, let layoutManager, let textContainer else {
+            hoveredCodeBlock = nil
+            codeCopyButton.isHidden = true
+            return
+        }
+        if hoveredCodeBlock?.range != block.range {
+            copiedResetWork?.perform()
+        }
+        hoveredCodeBlock = block
+        let glyphs = layoutManager.glyphRange(forCharacterRange: block.range, actualCharacterRange: nil)
+        let rect = layoutManager.boundingRect(forGlyphRange: glyphs, in: textContainer)
+        codeCopyButton.sizeToFit()
+        let size = codeCopyButton.frame.size
+        codeCopyButton.setFrameOrigin(NSPoint(x: bounds.maxX - size.width - 4,
+                                              y: rect.minY + textContainerOrigin.y + 2))
+        codeCopyButton.isHidden = false
+    }
+
+    @objc private func copyHoveredCodeBlock() {
+        guard let code = hoveredCodeBlock?.code else { return }
+        copyToPasteboard(code)
+        codeCopyButton.title = "Copied"
+        codeCopyButton.image = NSImage(systemSymbolName: "checkmark", accessibilityDescription: nil)
+        copiedResetWork?.cancel()
+        let reset = DispatchWorkItem { [weak self] in
+            self?.codeCopyButton.title = "Copy"
+            self?.codeCopyButton.image = NSImage(systemSymbolName: "doc.on.doc",
+                                                 accessibilityDescription: nil)
+        }
+        copiedResetWork = reset
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: reset)
+    }
+
+    @objc private func copyCodeFromMenu(_ sender: NSMenuItem) {
+        guard let code = sender.representedObject as? String else { return }
+        copyToPasteboard(code)
+    }
+
+    private func copyToPasteboard(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
     }
 
     /// Applies the standard message text-view configuration.

@@ -619,6 +619,7 @@ public struct GFTokenizer: @unchecked Sendable {
         reasoning: ChatReasoning = .off,
         preserveThinking: Bool
     ) throws -> String {
+        let messages = Self.mergingLeadingSystemMessages(messages)
         switch dialect {
         case .gemma:
             return try gemmaChatTemplate(
@@ -638,6 +639,23 @@ public struct GFTokenizer: @unchecked Sendable {
             return try FlintPrompt.render(messages: messages, tools: [],
                 preserveThinking: preserveThinking, addGenerationPrompt: true)
         }
+    }
+
+    /// Clients often send instructions as several system or developer
+    /// messages before the conversation. The templates take one system turn,
+    /// so leading ones are joined, the way the server already does it; a
+    /// system message after the conversation has started is still refused.
+    static func mergingLeadingSystemMessages(_ messages: [Message]) -> [Message] {
+        let isInstruction = { (message: Message) in
+            message.role == .system || message.role == .developer
+        }
+        let leading = messages.prefix(while: isInstruction)
+        guard leading.count > 1, leading.allSatisfy({ $0.content != nil }) else { return messages }
+        let joined = leading.compactMap {
+            $0.content?.trimmingCharacters(in: .whitespacesAndNewlines)
+        }.filter { !$0.isEmpty }.joined(separator: "\n\n")
+        return [Message(role: leading.first!.role, content: joined)]
+            + messages.dropFirst(leading.count)
     }
 
     public func applyHarmonyChatTemplate(

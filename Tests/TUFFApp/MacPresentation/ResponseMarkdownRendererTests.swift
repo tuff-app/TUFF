@@ -5,6 +5,32 @@ import Testing
 
 @MainActor
 @Suite struct ResponseMarkdownRendererTests {
+    @Test func eachCodeBlockCanBeCopiedOnItsOwn() {
+        let source = """
+        Install it:
+
+        ```sh
+        brew install tuff
+        tuff serve
+        ```
+
+        Then call `tuff prompt`:
+
+        ```python
+        print("hi")
+        ```
+        """
+        let rendered = ResponseMarkdownRenderer().render(source).attributedString
+        let blocks = ResponseMarkdownRenderer.codeBlocks(in: rendered)
+        #expect(blocks.map(\.code) == ["brew install tuff\ntuff serve", "print(\"hi\")"])
+        // Blank lines the author put at the end of a block are kept.
+        let padded = ResponseMarkdownRenderer().render("```\nfirst\n\n\n```").attributedString
+        let paddedCode = ResponseMarkdownRenderer.codeBlocks(in: padded).first?.code
+        #expect(paddedCode?.hasPrefix("first\n") == true)
+        // Inline code is not a block.
+        #expect(!blocks.contains { $0.code.contains("tuff prompt") })
+    }
+
     @Test func rendersSupportedMarkdownWithNativeAttributes() throws {
         let source = """
         # Heading

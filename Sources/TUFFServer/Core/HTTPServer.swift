@@ -61,7 +61,9 @@ public actor TUFFHTTPServer {
         let attachmentRoot = self.attachmentRoot
         let idleTimeout = self.idleTimeout
         let bootstrap = ServerBootstrap(group: group)
-            .serverChannelOption(ChannelOptions.backlog, value: 16)
+            // A burst of connects beyond the backlog overflows the listen queue
+            // before the accept loop drains it; macOS 27 answers that with RST.
+            .serverChannelOption(ChannelOptions.backlog, value: Int32(Self.maximumConnections))
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
                 childChannels.insert(channel)

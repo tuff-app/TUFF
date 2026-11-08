@@ -111,7 +111,7 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
             let architecture = try ManifestReader.resolveArchitecture(directoryURL: modelDirectory)
             let hello = DecodeEngineHello(architectureID: architecture.variant.rawValue,
                 requiredFeatures: ["preserve-history"] + (options.retainedConversationBytes == nil ? [] : ["bounded-retention"]))
-            try handles.input.write(contentsOf: DecodeFrameCodec.encode(DecodeServiceCommand.hello(hello)))
+            try send(.hello(hello), to: handles.input)
             let reply = try await handles.responses.next(matching: hello.requestID)
             guard reply.kind == .hello, let capabilities = reply.capabilities,
                   capabilities.accepts(hello) else {
@@ -122,8 +122,7 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
             modelPath: modelDirectory.path, maxContextTokens: maxContextTokens,
             runtimeOptions: Self.decodeRuntimeOptions(options),
             forceLogitsHead: forceLogitsHead)
-        try handles.input.write(contentsOf: DecodeFrameCodec.encode(
-            DecodeServiceCommand.load(request)))
+        try send(.load(request), to: handles.input)
         let event = try await handles.responses.next(matching: request.requestID)
         switch event.kind {
         case .ready:
@@ -144,8 +143,7 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
     public func unload() async {
         guard let handles = currentHandles() else { return }
         let requestID = UUID()
-        try? handles.input.write(contentsOf: DecodeFrameCodec.encode(
-            DecodeServiceCommand.unload(requestID)))
+        try? send(.unload(requestID), to: handles.input)
         guard let event = try? await handles.responses.next(matching: requestID),
               event.kind == .unloaded else { return }
         connection.withLock { $0.loadedDirectory = nil }
@@ -291,11 +289,25 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
         try? send(.cancel, to: input)
     }
 
-    private func send(_ command: DecodeServiceCommand, to input: FileHandle) throws {
+    /// Every frame goes through here, one writer at a time, so two frames never
+    /// interleave. The write uses its own duplicate of the descriptor: teardown
+    /// may close the shared handle the moment the connection lock is released,
+    /// and a write to a closed (or reused) descriptor would corrupt another
+    /// file or crash.
+    func send(_ command: DecodeServiceCommand, to input: FileHandle) throws {
         let frame = try DecodeFrameCodec.encode(command)
-        inputWriteLock.lock()
-        defer { inputWriteLock.unlock() }
-        try input.write(contentsOf: frame)
+        try inputWriteLock.withLock {
+            let descriptor = try connection.withLock { state -> Int32 in
+                guard state.input === input else {
+                    throw AppInferenceError.unknown(
+                        "The decode service connection closed before the request was sent.")
+                }
+                let descriptor = dup(input.fileDescriptor)
+                guard descriptor >= 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
+                return descriptor
+            }
+            try FileHandle(fileDescriptor: descriptor, closeOnDealloc: true).write(contentsOf: frame)
+        }
     }
 
     deinit { closeConnection() }
@@ -306,8 +318,22 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
             return value
         }
         if let input = state.input {
-            try? input.write(contentsOf: DecodeFrameCodec.encode(
-                DecodeServiceCommand.shutdown))
+            // Never interleave the shutdown frame with a half-written one, and
+            // never wait behind a writer blocked on a dead service: shutting the
+            // socket down below interrupts that writer instead. The frame itself
+            // is one non-blocking attempt, because a service that stopped
+            // reading leaves the buffer full and a blocking write would never
+            // return. The connection is going away, so the flag change does not
+            // matter to anyone else holding the descriptor.
+            if inputWriteLock.try() {
+                defer { inputWriteLock.unlock() }
+                if let frame = try? DecodeFrameCodec.encode(DecodeServiceCommand.shutdown) {
+                    let descriptor = input.fileDescriptor
+                    _ = fcntl(descriptor, F_SETFL, fcntl(descriptor, F_GETFL) | O_NONBLOCK)
+                    _ = frame.withUnsafeBytes { Darwin.write(descriptor, $0.baseAddress, $0.count) }
+                }
+            }
+            Darwin.shutdown(input.fileDescriptor, SHUT_RDWR)
             try? input.close()
         }
         if let label = state.launchLabel { Self.removeLaunchJob(label: label) }
