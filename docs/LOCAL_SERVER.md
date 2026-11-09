@@ -9,11 +9,11 @@ it through DNS rebinding. A proxy in front of it has to pass the original
 
 ## Start it
 
-**In the app:** turn on **Background API** on the Server screen and allow the
+**In the app:** turn on **Background API** in Settings > Server and allow the
 login item when macOS asks. It then runs whether TUFF is open or not. Pick a
 default model, a port, and how long an idle model stays loaded.
 
-![The Server screen](assets/tuff-server.png)
+![Settings > Server](assets/tuff-server.png)
 
 **In a terminal:**
 
@@ -26,7 +26,7 @@ From a clone: `swift run -c release TUFFServer --models-root scratch`.
 ## Other devices on your network
 
 To use TUFF from another machine, such as Open WebUI on a Docker host, turn on
-**Allow other devices on your network** on the Server screen, or start the
+**Allow other devices on your network** in Settings > Server, or start the
 server with `--host`:
 
 ```sh
@@ -42,7 +42,7 @@ Requests from other devices need the API key, sent as
 `x-api-key: <key>` (Anthropic clients). Without it they get 401
 `invalid_api_key`. TUFF creates the key the first time it listens beyond
 loopback and keeps it in `~/Library/Application Support/TUFF/Server/api-key`,
-readable only by you. The Server screen shows and copies it. Delete the file
+readable only by you. Settings > Server shows and copies it. Delete the file
 to get a new one. Requests from this Mac still need no key.
 
 Anyone with the key can use your models, and requests are plain HTTP, so only
@@ -59,7 +59,7 @@ checkpoints you imported in Settings are listed under a name made from their
 own, so "My Tune" is `my-tune`. Requests run one at a time, and a full queue
 answers 429 with `Retry-After`.
 
-Each model is served with the memory settings it has in Settings > Models.
+Each model is served with the memory settings it has in Settings > Generation.
 With Auto on, the server uses the Auto profile you picked. With Auto off, it
 uses the Context you chose, as long as that fits this Mac's memory budget;
 otherwise it falls back to Balanced. A model you haven't set up gets

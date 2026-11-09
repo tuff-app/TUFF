@@ -13,6 +13,10 @@ final class PrismProjection {
     private let workspace: MTLBuffer
     private let secondWorkspace: MTLBuffer
     private let block: Int
+    /// Token rows rotated and projected per batch. Each batch reads every
+    /// weight once, so 16 rows (as before 10.4) read the model about 64 times
+    /// for a 1,000-token prompt; 256 rows is a few MB of scratch.
+    static let workspaceRows = 256
 
     init(context: MetalContext, block: Int, maximumWidth: Int) throws {
         precondition([512, 1024, 2048, 4096].contains(block))
@@ -23,7 +27,8 @@ final class PrismProjection {
         floatProjection = try PrismFloatProjection(context: context)
         floatNorm = try PrismFloatRMSNorm(context: context)
         silu = try context.pipeline("silu_mul_fp16")
-        guard let buffer = context.device.makeBuffer(length: maximumWidth * MemoryLayout<Float16>.stride * 16,
+        guard let buffer = context.device.makeBuffer(length: maximumWidth * MemoryLayout<Float16>.stride
+                                                         * Self.workspaceRows,
                                                       options: .storageModeShared),
               let second = context.device.makeBuffer(length: maximumWidth * MemoryLayout<Float16>.stride,
                                                      options: .storageModeShared) else {
@@ -80,6 +85,15 @@ final class PrismProjection {
                                    weightA: weightA, outputA: outputA,
                                    weightB: weightB, outputB: outputB,
                                    columns: columns, outputs: outputs)
+    }
+
+    /// `encodeFloat` for a chunk of token rows in one dispatch.
+    func encodeFloatRows(commandBuffer: MTLCommandBuffer, weight: TensorView,
+                         input: MTLBuffer, output: MTLBuffer, columns: Int, outputs: Int,
+                         rows: Int, inputStride: Int) {
+        floatProjection.encodeRows(commandBuffer: commandBuffer, input: input, weight: weight,
+                                   output: output, columns: columns, outputs: outputs,
+                                   rows: rows, inputStride: inputStride)
     }
 
     /// GDN alpha and beta projections are unrotated F32 matrices.
@@ -140,7 +154,7 @@ final class PrismProjection {
               signs.length == UInt64(columns * MemoryLayout<Float>.stride) else {
             throw ModelError.indexCorrupt(detail: "invalid Prism projection signs")
         }
-        let capacity = min(16, workspace.length / (columns * 2))
+        let capacity = min(Self.workspaceRows, workspace.length / (columns * 2))
         var row = 0
         while row < rows {
             // Keep every per-dispatch element index representable as UInt32.

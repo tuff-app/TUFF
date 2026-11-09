@@ -1,10 +1,13 @@
+import AppKit
 import TUFFAppCore
 import TUFFMacPresentation
 import SwiftUI
 
 struct GenerateControl: View {
     let model: AppModel
-    private let controlHeight: CGFloat = 34
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    private let controlHeight: CGFloat = 32
+    @State private var sendHovered = false
 
     enum Mode: Equatable { case running, loading, otherChatRunning, send }
 
@@ -16,14 +19,25 @@ struct GenerateControl: View {
     }
 
     var body: some View {
-        switch Self.mode(selectedRunning: model.isSelectedConversationRunning,
-                         loading: model.isLoadingForSubmission,
-                         anyRunning: model.isRunning, canSubmit: model.canSubmit) {
-        case .running: runningPill
-        case .loading: loadingPill
-        case .otherChatRunning: anotherChatRunningPill
-        case .send: generateButton
+        let mode = Self.mode(selectedRunning: model.isSelectedConversationRunning,
+                             loading: model.isLoadingForSubmission,
+                             anyRunning: model.isRunning, canSubmit: model.canSubmit)
+        ZStack {
+            switch mode {
+            case .running: runningPill.transition(swap)
+            case .loading: loadingPill.transition(swap)
+            case .otherChatRunning: anotherChatRunningPill.transition(swap)
+            case .send: generateButton.transition(swap)
+            }
         }
+        .animation(reduceMotion ? .easeInOut(duration: 0.2) : TUFFMotion.standard, value: mode)
+    }
+
+    /// Send, Stop and the loading pill trade places with a quick fade and a
+    /// slight scale, the way a toolbar control changes state. Reduce Motion
+    /// keeps the fade only.
+    private var swap: AnyTransition {
+        reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.94))
     }
 
     private var generateButton: some View {
@@ -34,19 +48,31 @@ struct GenerateControl: View {
             // app's business, not a different button.
             Label("Send", systemImage: "arrow.up")
                 .appFont(.callout.weight(.semibold))
-                .padding(.horizontal, 24)
-                .frame(minWidth: 124, minHeight: controlHeight)
+                .padding(.horizontal, 18)
+                .frame(minWidth: 92, minHeight: controlHeight)
                 .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .foregroundStyle(.white)
-        .background(TUFFMacTheme.accentColor, in: .capsule)
-        .overlay {
-            Capsule().stroke(.white.opacity(0.16), lineWidth: 0.5)
+        // Disabled reads as a quiet grey pill, not a washed-out accent one
+        // that looked pressable and muddy at once.
+        .foregroundStyle(model.canSubmit ? AnyShapeStyle(TUFFMacTheme.onAccentColor) : AnyShapeStyle(.tertiary))
+        // Accent glass when it can send; clear glass when there is nothing to send.
+        .tuffGlass(Capsule(), tint: model.canSubmit ? TUFFMacTheme.accentColor : nil,
+                   highlighted: sendHovered && model.canSubmit)
+        .scaleEffect(sendHovered && model.canSubmit ? 1.03 : 1)
+        .animation(TUFFMotion.hover, value: sendHovered)
+        .onHover { sendHovered = $0 }
+        .background {
+            // Command-Return sends without the flight, which is for clicks.
+            Button("Send", action: model.submit)
+                .keyboardShortcut(.return, modifiers: .command)
+                .disabled(!model.canSubmit)
+                .opacity(0)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
         }
-        .keyboardShortcut(.return, modifiers: .command)
         .disabled(!model.canSubmit)
-        .opacity(model.canSubmit ? 1 : 0.62)
+        .animation(TUFFMotion.hover, value: model.canSubmit)
         .accessibilityHint(model.canRun
             ? "Sends the prompt to the selected local model"
             : "Loads the selected local model, then sends the prompt")
@@ -66,8 +92,8 @@ struct GenerateControl: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .foregroundStyle(.white)
-        .background(TUFFMacTheme.accentColor, in: .capsule)
+        .foregroundStyle(TUFFMacTheme.onAccentColor)
+        .tuffGlass(Capsule(), tint: TUFFMacTheme.accentColor)
         .disabled(!model.canCancelLoad)
         .help("Cancel loading and keep this draft")
         .accessibilityLabel("Cancel model load")
@@ -83,7 +109,7 @@ struct GenerateControl: View {
         .padding(.horizontal, 16)
         .frame(minWidth: 170, minHeight: controlHeight)
         .foregroundStyle(.secondary)
-        .background(.quaternary, in: .capsule)
+        .tuffGlass(Capsule(), interactive: false)
         .accessibilityLabel("Another chat is generating")
     }
 
@@ -96,15 +122,11 @@ struct GenerateControl: View {
                     Text("Stopping")
                         .appFont(.callout.weight(.medium))
                 } else if model.phase == .prefill {
-                    Text(model.presentation.label)
+                    RollingText(model.presentation.label)
                         .appFont(.callout.weight(.medium))
-                        .monospacedDigit()
-                        .contentTransition(.numericText())
                 } else {
-                    Text("\(MetricFormat.rate(model.liveTokensPerSecond)) tok/s")
+                    RollingText("\(MetricFormat.rate(model.liveTokensPerSecond)) tok/s")
                         .appFont(.callout.weight(.semibold))
-                        .monospacedDigit()
-                        .contentTransition(.numericText())
                 }
                 Label("Stop generation", systemImage: "stop.fill")
                     .labelStyle(.iconOnly)
@@ -117,17 +139,14 @@ struct GenerateControl: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .foregroundStyle(.white)
-        .background(TUFFMacTheme.accentColor, in: .capsule)
-        .overlay {
-            Capsule().stroke(.white.opacity(0.16), lineWidth: 0.5)
-        }
+        .foregroundStyle(TUFFMacTheme.onAccentColor)
+        .tuffGlass(Capsule(), tint: TUFFMacTheme.accentColor)
         .keyboardShortcut(.cancelAction)
         .disabled(!model.canCancel)
         .help("Stop generation")
         .accessibilityLabel(model.isCancellationPending
                             ? "Stopping generation" : "Stop generation")
         .accessibilityValue(model.presentation.label)
-        .animation(.smooth(duration: 0.2), value: model.presentation.label)
+        .animation(TUFFMotion.standard, value: model.presentation.label)
     }
 }

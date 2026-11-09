@@ -16,31 +16,22 @@ struct SearchSettingsView: View {
                     sandboxRows
                 }
                 Toggle("Automatically pause web search while offline", isOn: $model.pauseWebSearchWhenOffline)
-                Text("When your connection returns, web search resumes only if you left Web on. A connection does not guarantee that the search provider is available.")
-                    .appFont(.caption)
-                    .foregroundStyle(.secondary)
+                Text("Resumes when you're back online, if Web was on.")
+                    .settingsNote()
+                    .help("When your connection returns, web search resumes only if you left Web on. A connection does not guarantee that the search provider is available.")
                     .fixedSize(horizontal: false, vertical: true)
-                Picker("Provider", selection: $model.searchProvider) {
-                    ForEach(AppSearchProviderKind.allCases) { provider in
-                        Text(provider.displayName).tag(provider)
-                    }
-                }
-                Text(model.searchProvider.privacyNote)
-                    .appFont(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                GlassMenuPicker("Provider", selection: $model.searchProvider,
+                                options: AppSearchProviderKind.allCases,
+                                label: { $0.displayName })
+                .help(model.searchProvider.privacyNote)
                 if model.searchProvider.requiresKey {
                     keyRow(model.searchProvider)
                     if model.runWebInSandbox {
-                        Text("With the sandbox on, the key goes from TUFF to the sandbox and from there only to \(model.searchProvider.displayName).")
-                            .appFont(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                Text("Web search sends only the model's search query. The contents of your files are never sent to a search provider, and a query that copies text from them is refused.")
-                    .appFont(.caption)
-                    .foregroundStyle(.secondary)
+                Text("Only the search query is sent, never your files.")
+                    .settingsNote()
+                    .help("Web search sends only the model's search query. The contents of your files are never sent to a search provider, and a query that copies text from them is refused.")
                     .fixedSize(horizontal: false, vertical: true)
             }
             Section("Files") {
@@ -57,29 +48,37 @@ struct SearchSettingsView: View {
             }
             Section("Limits") {
                 let limits = AppToolLimits.standard
-                Text("Each answer may use up to \(limits.maximumToolRounds) rounds of tools (12 with write or command access), \(limits.maximumWebRequests) web requests and \(limits.maximumFileSearches) file searches, within \(Int(limits.maximumToolSeconds)) seconds. Pages are read up to \(AppWebPageReader.maximumBytes / 1_048_576) MB. Results are shortened to fit the model's context.")
-                    .appFont(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                LabeledContent("Per answer") {
+                    Text("\(limits.maximumToolRounds) tool rounds, \(limits.maximumWebRequests) web requests")
+                }
+                .help("Each answer may use up to \(limits.maximumToolRounds) rounds of tools (12 with write or command access), \(limits.maximumWebRequests) web requests and \(limits.maximumFileSearches) file searches, within \(Int(limits.maximumToolSeconds)) seconds. Pages are read up to \(AppWebPageReader.maximumBytes / 1_048_576) MB. Results are shortened to fit the model's context.")
                 if let note = model.toolSupport.note {
                     Label(note, systemImage: "info.circle")
-                        .appFont(.caption)
-                        .foregroundStyle(.secondary)
+                        .settingsNote()
                 }
             }
         }
-        .formStyle(.grouped)
+        .formStyle(TUFFFormStyle())
         .scrollContentBackground(.hidden)
+        // A switch that shows rows under it, a folder added or removed, a
+        // key saved: the page eases to its new layout.
+        .animation(TUFFMotion.standard, value: rowsKey)
         .onAppear { model.toolStore.refreshKeyPresence() }
-        .confirmationDialog("Remove every folder and delete the search index?",
-                            isPresented: $confirmingRemoval) {
-            Button("Remove All", role: .destructive) {
-                model.toolStore.removeAllFolders()
-                model.fileSearchEnabled = false
-            }
-        } message: {
-            Text("Your files are not touched. TUFF stops reading the folders and deletes its index of them.")
+        .tuffConfirm("Remove every folder and delete the search index?",
+                     isPresented: $confirmingRemoval,
+                     message: "Your files are not touched. TUFF stops reading the folders "
+                        + "and deletes its index of them.",
+                     symbol: "folder", confirm: "Remove All") {
+            model.toolStore.removeAllFolders()
+            model.fileSearchEnabled = false
         }
+    }
+
+    /// The settings whose value decides which rows the page has.
+    private var rowsKey: String {
+        "\(model.runWebInSandbox)\(sandboxFailed)\(model.runFilesInSandbox)\(filesSandboxFailed)"
+            + "\(model.searchProvider)\(model.toolStore.folders.map(\.id))"
+            + "\(model.toolStore.keyPresence[model.searchProvider] == true)\(model.toolStore.isIndexing)"
     }
 
     @ViewBuilder private var sandboxRows: some View {
@@ -90,7 +89,7 @@ struct SearchSettingsView: View {
                 if status.busy { ProgressView().controlSize(.small) }
                 Text(status.text)
                     .appFont(.caption)
-                    .foregroundStyle(status.isProblem ? Color.red : Color.secondary)
+                    .foregroundStyle(status.isProblem ? TUFFMacTheme.accentTextColor : Color.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if status.needsContainer, let releases = URL(string: "https://github.com/apple/container/releases") {
@@ -98,9 +97,9 @@ struct SearchSettingsView: View {
                     .appFont(.caption)
             }
         }
-        Text("The sandbox is a small virtual machine run by Apple's container tool. Web searches are sent from inside it, and the pages the model reads are fetched and turned into text inside it, so a harmful page or file never reaches TUFF directly. TUFF starts it when you turn this on or open the app, and stops it when it has been idle or when TUFF quits. If it is not ready, web search fails; it never falls back to a direct request. File search has its own switch under Files. Off by default; needs macOS 26 and Apple container.")
-            .appFont(.caption)
-            .foregroundStyle(.secondary)
+        Text("Fetches pages in an isolated VM. Needs macOS 26 and Apple container.")
+            .settingsNote()
+            .help("The sandbox is a small virtual machine run by Apple's container tool. Web searches are sent from inside it, and the pages the model reads are fetched and turned into text inside it, so a harmful page or file never reaches TUFF directly. TUFF starts it when you turn this on or open the app, and stops it when it has been idle or when TUFF quits. If it is not ready, web search fails; it never falls back to a direct request. File search has its own switch under Files. Off by default; needs macOS 26 and Apple container.")
             .fixedSize(horizontal: false, vertical: true)
     }
 
@@ -112,13 +111,13 @@ struct SearchSettingsView: View {
                 if status.busy { ProgressView().controlSize(.small) }
                 Text(status.text)
                     .appFont(.caption)
-                    .foregroundStyle(status.isProblem ? Color.red : Color.secondary)
+                    .foregroundStyle(status.isProblem ? TUFFMacTheme.accentTextColor : Color.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        Text("A second sandbox with no network at all reads the folders you add, read-only, and turns the files into text, so a harmful file or PDF is never opened by TUFF itself. It runs while TUFF indexes your folders and stops when it has been idle or when TUFF quits. If it cannot start, indexing stops with a message; it never falls back to reading the files in TUFF. macOS may ask whether \u{201C}container-runtime-linux\u{201D} may read a folder such as Documents; allow it, or file search cannot read that folder. Folder names with a comma cannot be used. Off by default; needs macOS 26 and Apple container.")
-            .appFont(.caption)
-            .foregroundStyle(.secondary)
+        Text("Reads files in an offline VM. Needs macOS 26 and Apple container.")
+            .settingsNote()
+            .help("A second sandbox with no network at all reads the folders you add, read-only, and turns the files into text, so a harmful file or PDF is never opened by TUFF itself. It runs while TUFF indexes your folders and stops when it has been idle or when TUFF quits. If it cannot start, indexing stops with a message; it never falls back to reading the files in TUFF. macOS may ask whether \u{201C}container-runtime-linux\u{201D} may read a folder such as Documents; allow it, or file search cannot read that folder. Folder names with a comma cannot be used. Off by default; needs macOS 26 and Apple container.")
             .fixedSize(horizontal: false, vertical: true)
     }
 
@@ -182,8 +181,7 @@ struct SearchSettingsView: View {
             Text(saved
                  ? "A key is saved in your Keychain. It is used only for searches, and never shown to the model, saved in chats or written to logs."
                  : "No key is saved. Searches with \(provider.displayName) will fail until one is added.")
-                .appFont(.caption)
-                .foregroundStyle(.secondary)
+                .settingsNote()
                 .fixedSize(horizontal: false, vertical: true)
         }
     }

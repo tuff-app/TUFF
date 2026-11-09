@@ -4,31 +4,39 @@ import SwiftUI
 
 struct StatusHUDView: View {
     let model: AppModel
-    @Environment(\.windowIsFullScreen) private var isFullScreen
+    @Environment(\.windowSidebarIsHidden) private var sidebarIsHidden
+    @State private var ejectTaps = 0
+    private let noticeCenter = TUFFNoticeCenter.shared
+
+    /// The transcript's own side margin, so the strip and the messages under
+    /// it share a left edge.
+    static let contentInset: CGFloat = TUFFDesign.Space.page
+
+    /// The strip's height: its 34 pt row plus 10 pt above and below.
+    static let stripHeight: CGFloat = 54
+    /// With the sidebar collapsed, the top of the row below the traffic
+    /// lights that holds the sidebar toggle and the strip.
+    static let collapsedTop: CGFloat = 40
 
     var body: some View {
+        let collapsed = sidebarIsHidden
         strip
-            .padding(.top, isFullScreen ? 16 : 10)
-            // Room for the traffic lights, which full screen does not have.
-            .padding(.leading, isFullScreen ? 20 : 84)
-            .padding(.trailing, 20)
-            .padding(.bottom, 6)
-            // The transcript scrolls under this strip. Without a surface the
-            // answer showed through around the capsule and its lines ran
-            // into the model name; the fade keeps the edge soft.
-            .background(alignment: .top) {
-                Color(nsColor: .windowBackgroundColor)
-                    .ignoresSafeArea(edges: .top)
-                    .overlay(alignment: .bottom) {
-                        LinearGradient(
-                            colors: [Color(nsColor: .windowBackgroundColor),
-                                     Color(nsColor: .windowBackgroundColor).opacity(0)],
-                            startPoint: .top, endPoint: .bottom)
-                            .frame(height: 14)
-                            .offset(y: 14)
-                            .allowsHitTesting(false)
-                    }
-            }
+            // Same height whether or not the sidebar is shown. Collapsed, it
+            // only moves right to make room for the sidebar toggle, which
+            // takes the strip's height and glass and sits just before it.
+            .padding(.top, collapsed ? Self.collapsedTop : Self.contentInset)
+            .padding(.leading, collapsed
+                     ? Self.contentInset + Self.stripHeight + 10
+                     : Self.contentInset)
+            .padding(.trailing, Self.contentInset)
+            // The extra top room when collapsed comes out of the bottom
+            // spacing, so the strip's total height, and with it the space
+            // held above the conversation, never changes. It did, and the
+            // conversation jumped a line while the sidebar slid.
+            .padding(.bottom, collapsed ? 12 - (Self.collapsedTop - Self.contentInset) : 12)
+            .animation(TUFFMotion.sidebar, value: collapsed)
+            // No surface behind the strip: the transcript scrolls under it,
+            // and the glass blurs it.
     }
 
     private var strip: some View {
@@ -37,7 +45,10 @@ struct StatusHUDView: View {
             Divider().frame(height: 16)
             PhaseLabel(model: model)
             Spacer(minLength: 12)
-            if showsMetrics {
+            if let notice = noticeCenter.current, notice.compact {
+                TUFFStripNotice(notice: notice, center: noticeCenter)
+                    .transition(.offset(x: 12).combined(with: .opacity))
+            } else if showsMetrics {
                 HUDMetricView(value: rateText, label: "tok/s", animated: !model.isRunning)
                 HUDMetricView(value: tokensText, label: "tokens", animated: !model.isRunning)
                 HStack(spacing: 2) {
@@ -48,34 +59,45 @@ struct StatusHUDView: View {
                 }
             }
         }
-        .frame(height: 30)
-        .padding(.horizontal, 16)
+        .frame(maxWidth: .infinity)
+        .frame(height: 34)
+        // Attached here so they run even while the window holds animations
+        // back during a reply.
+        .animation(TUFFMotion.standard, value: model.canUnloadModel)
+        .animation(TUFFMotion.standard, value: showsMetrics)
+        .animation(TUFFMotion.standard, value: noticeCenter.current?.id)
+        .padding(.leading, 18)
+        .padding(.trailing, 14)
         .padding(.vertical, 10)
-        .background {
-            Capsule()
-                .fill(Color(nsColor: .controlBackgroundColor))
-                .overlay {
-                    Capsule().stroke(.separator.opacity(0.5), lineWidth: 0.5)
-                }
-        }
-        .gesture(WindowDragGesture())
+        .tuffChrome(Capsule())
     }
 
     /// Unloading is what actually returns the model's memory, so the control
     /// sits with the memory readout rather than in a menu.
+    ///
+    /// Clicked, the symbol gives a quick upward bounce and lifts out as the
+    /// model unloads; it scales back in when a model is loaded again.
     @ViewBuilder
     private var ejectButton: some View {
         if model.canUnloadModel {
-            Button(action: model.unloadModel) {
+            Button {
+                ejectTaps += 1
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { model.unloadModel() }
+            } label: {
                 Image(systemName: "eject.fill")
                     .imageScale(.small)
-                    .frame(width: 18, height: 18)
+                    .symbolEffect(.bounce.up, value: ejectTaps)
+                    .frame(width: 26, height: 26)
                     .contentShape(Rectangle())
+                    .tuffHoverGlass()
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
             .help("Unload this model and free its memory")
             .accessibilityLabel("Unload model")
+            .transition(.asymmetric(
+                insertion: .opacity.combined(with: .scale(scale: 0.6)),
+                removal: .opacity.combined(with: .offset(y: -12))))
         }
     }
 
@@ -105,8 +127,10 @@ struct StatusHUDView: View {
         MemoryFootprintExplanation.text(chargedBytes: model.currentProcessMemoryBytes)
     }
 
+    /// Only while a model is loaded: the last reply's numbers would
+    /// otherwise linger after an eject.
     private var showsMetrics: Bool {
-        model.loadState.isReady || model.isRunning || model.diagnostics != nil
+        model.loadState.isReady || model.isRunning
     }
 }
 
@@ -121,9 +145,7 @@ private struct PhaseLabel: View {
                 Text(label)
             case .pulse(let label):
                 PulsingDot()
-                Text(label)
-                    .monospacedDigit()
-                    .contentTransition(.numericText())
+                RollingText(label)
             case .steady(let label):
                 Circle().fill(TUFFMacTheme.accentColor).frame(width: 7, height: 7)
                 Text(label).contentTransition(.opacity)

@@ -9,7 +9,8 @@ public enum AppSettingsSection: String, CaseIterable, Hashable, Identifiable, Se
     public var title: String {
         switch self {
         case .general: "General"
-        case .models: "Models"
+        // "Models" is the tab that downloads and manages them.
+        case .models: "Generation"
         case .search: "Tools"
         case .advanced: "Advanced"
         }

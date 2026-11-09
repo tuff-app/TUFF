@@ -88,7 +88,22 @@ public enum AppAutomaticMemoryPlanner {
               profile.layout.architectureID == catalog.architecture.id.rawValue else { return nil }
         return profile.layout
     }
+    /// The last summary per directory and when it was checked. Settings
+    /// views ask for this from their bodies, which run many times per layout
+    /// pass; two file stats each time added up to a hang in Settings.
+    private static let recent = Mutex<[String: (summary: ModelWeightLayoutSummary, checked: Date)]>([:])
+
     public static func layoutSummary(at directory: URL) -> ModelWeightLayoutSummary? {
+        let path = directory.standardizedFileURL.path
+        if let hit = recent.withLock({ $0[path] }), Date().timeIntervalSince(hit.checked) < 2 {
+            return hit.summary
+        }
+        guard let summary = statCheckedLayoutSummary(at: directory) else { return nil }
+        recent.withLock { if $0.count >= 64 { $0.removeAll() }; $0[path] = (summary, Date()) }
+        return summary
+    }
+
+    private static func statCheckedLayoutSummary(at directory: URL) -> ModelWeightLayoutSummary? {
         let manifest = directory.appendingPathComponent("manifest.json")
         let weights = directory.appendingPathComponent("model_weights.bin")
         guard let metadata = try? FileManager.default.attributesOfItem(atPath: manifest.path),

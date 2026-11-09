@@ -30,6 +30,7 @@ struct MessageAttachmentsView: View {
                             maximumSize: CGSize(
                                 width: imageTileSide, height: imageTileSide))
                     }
+                    .transition(.tuffArrival(scale: 0.85))
                 }
                 ForEach(documents) { document in
                     RemovableAttachment(
@@ -40,8 +41,11 @@ struct MessageAttachmentsView: View {
                     ) {
                         DocumentAttachmentTile(document: document)
                     }
+                    .transition(.tuffArrival(scale: 0.85))
                 }
             }
+            // A tile added or taken off: the others slide to their places.
+            .animation(TUFFMotion.standard, value: images.map(\.id) + documents.map(\.id))
         }
     }
 }
@@ -56,11 +60,12 @@ struct DocumentAttachmentTile: View {
     var body: some View {
         HStack(spacing: 10) {
             ZStack {
-                RoundedRectangle(cornerRadius: 7)
+                RoundedRectangle(cornerRadius: TUFFDesign.Radius.concentric(
+                    outer: TUFFDesign.Radius.panel, padding: 8), style: .continuous)
                     .fill(TUFFMacTheme.accentColor.opacity(0.16))
                 Image(systemName: symbolName)
                     .appFont(.system(size: 13, weight: .medium))
-                    .foregroundStyle(TUFFMacTheme.accentColor)
+                    .foregroundStyle(TUFFMacTheme.accentTextColor)
             }
             .frame(width: 30, height: 30)
 
@@ -78,14 +83,7 @@ struct DocumentAttachmentTile: View {
         }
         .padding(8)
         .frame(width: 232, alignment: .leading)
-        .background(
-            TUFFMacTheme.surfaceStyle(
-                reduceTransparency: reduceTransparency, material: .thin),
-            in: RoundedRectangle(cornerRadius: 12))
-        .overlay {
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(.separator.opacity(0.6), lineWidth: 0.5)
-        }
+        .tuffPanel()
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Attached file \(document.displayName)")
         .accessibilityValue(

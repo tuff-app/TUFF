@@ -637,6 +637,9 @@ public final class AppSettingsStore {
     public var showPromptExamples = true
     public var sentPromptBehavior: AppSentPromptBehavior = .keep
     public var loadModelOnLaunch = false
+    public var smoothStreaming = true
+    public var appearanceMode: AppAppearanceMode = .system
+    public var translucentWindow = true
     public var accentColorMode: AppAccentColorMode = .appDefault
     public var customAccentColorHex: String = AppHexColor.defaultPurple.hexString
     public var zoomLevel: AppZoomLevel = .default

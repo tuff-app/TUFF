@@ -31,6 +31,8 @@ import SwiftUI
         for destination in AppDestination.allCases {
             let content = AppWorkspaceView(
                 destination: destination,
+                settingsSection: .constant(.general),
+                select: { _ in },
                 model: model,
                 backgroundAPI: backgroundAPI,
                 updateController: updateController,
@@ -75,6 +77,8 @@ extension AppWorkspaceSmokeTests {
         #expect(backgroundAPI.isAvailable)
         let content = AppWorkspaceView(
             destination: .server,
+            settingsSection: .constant(.general),
+            select: { _ in },
             model: model,
             backgroundAPI: backgroundAPI,
             updateController: AppUpdateController(infoDictionary: nil),

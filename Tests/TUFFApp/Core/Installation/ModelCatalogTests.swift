@@ -427,7 +427,7 @@ import TUFFRepackCore
         #expect(model.visionDownloadButtonLabel(for: gemma)
             == "Download Gemma 4 Image Support")
         #expect(model.visionDownloadButtonLabel(for: qwen)
-            == "Download Qwen3.6 Image Support")
+            == "Download Qwen 3.6 Image Support")
         #expect(model.canInstallVisionPack(for: gemma))
         #expect(model.canInstallVisionPack(for: qwen))
 

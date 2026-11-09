@@ -39,6 +39,7 @@ struct TranscriptMessageView: View {
     }
 
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var thinkingExpanded = false
     @State private var liveHeight: CGFloat = 0
     /// Which of the two copy buttons last fired, so only that one shows the
@@ -49,7 +50,13 @@ struct TranscriptMessageView: View {
         let mailbox: GenerationTranscriptMailbox?
         let isTerminal: Bool
         let showsPrefillPlaceholder: Bool
+        var smoothsText = true
     }
+
+    /// False until a message that is being generated has come on screen.
+    /// Finished messages start shown: they are made again every time they
+    /// scroll into view, and must not fade in each time.
+    @State private var hasArrived = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -57,7 +64,18 @@ struct TranscriptMessageView: View {
             if hasAssistantMessage { assistantMessage }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        // A message just sent rises into place. Through the modifier, not
+        // `withAnimation`: the window drops explicit animations while a
+        // model is answering.
+        .opacity(arrives && !hasArrived ? 0 : 1)
+        .offset(y: arrives && !hasArrived && !reduceMotion ? 8 : 0)
+        .animation(TUFFMotion.standard, value: hasArrived)
+        .onAppear {
+            if arrives { hasArrived = true }
+        }
     }
+
+    private var arrives: Bool { live?.isTerminal == false }
 
     private var hasUserMessage: Bool {
         !prompt.isEmpty || !images.isEmpty || !documents.isEmpty
@@ -69,7 +87,7 @@ struct TranscriptMessageView: View {
 
     private var userMessage: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
+            HStack(spacing: 4) {
                 MessageRoleLabel(text: "You")
                 if let actions {
                     MessageActionButton(
@@ -92,11 +110,12 @@ struct TranscriptMessageView: View {
 
     private var assistantMessage: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
+            HStack(spacing: 4) {
                 MessageRoleLabel(text: modelName)
-                if showsActions { answerActions }
+                if showsActions { answerActions.transition(.opacity) }
                 Spacer(minLength: 0)
             }
+            .animation(TUFFMotion.standard, value: showsActions)
             if !thinking.isEmpty {
                 ThinkingDisclosure(
                     text: thinking,
@@ -104,20 +123,28 @@ struct TranscriptMessageView: View {
                         && !toolEntries.contains { $0.state == .running },
                     isExpanded: $thinkingExpanded,
                     reduceTransparency: reduceTransparency)
+                    .transition(.opacity)
             }
             if !toolEntries.isEmpty {
                 ToolActivityView(
                     entries: toolEntries, sources: sources,
                     isRunning: toolEntries.contains { $0.state == .running },
                     reduceTransparency: reduceTransparency)
+                    .transition(.opacity)
             }
             responseBody
             if let note = citationNote {
                 Label(note, systemImage: "exclamationmark.circle")
                     .appFont(.caption)
                     .foregroundStyle(.secondary)
+                    .transition(.opacity)
             }
         }
+        // The reasoning and tool rows come in as the model starts on them,
+        // rather than pushing the answer down in one step.
+        .animation(TUFFMotion.standard, value: thinking.isEmpty)
+        .animation(TUFFMotion.standard, value: toolEntries.isEmpty)
+        .animation(TUFFMotion.standard, value: citationNote)
     }
 
     /// Said when the answer cites a number no retrieved source has. The
@@ -147,18 +174,19 @@ struct TranscriptMessageView: View {
     /// on hover, which meant the reader had to know they were there before
     /// they would show.
     private var answerActions: some View {
-        HStack(spacing: 6) {
+        // Touching: each button's 28 pt target already includes its spacing.
+        HStack(spacing: 0) {
             MessageActionButton(
                 symbol: copied == .text ? "checkmark" : "doc.on.doc",
                 help: copied == .text ? "Copied" : "Copy this answer",
-                tint: copied == .text ? TUFFMacTheme.accentColor : nil,
+                tint: copied == .text ? TUFFMacTheme.accentTextColor : nil,
                 action: { copyResponse(.text) })
             MessageActionButton(
                 symbol: copied == .markdown
                     ? "checkmark" : "chevron.left.forwardslash.chevron.right",
                 help: copied == .markdown
                     ? "Copied" : "Copy this answer as Markdown",
-                tint: copied == .markdown ? TUFFMacTheme.accentColor : nil,
+                tint: copied == .markdown ? TUFFMacTheme.accentTextColor : nil,
                 action: { copyResponse(.markdown) })
             MessageActionButton(
                 symbol: "square.and.arrow.down",
@@ -173,7 +201,7 @@ struct TranscriptMessageView: View {
                     MessageActionButton(
                         symbol: "text.append",
                         help: "Carry on from where this answer stopped",
-                        tint: TUFFMacTheme.accentColor,
+                        tint: TUFFMacTheme.accentTextColor,
                         action: carryOn)
                 }
             }
@@ -198,6 +226,7 @@ struct TranscriptMessageView: View {
                 mailbox: live.mailbox,
                 isTerminal: live.isTerminal,
                 showsPrefillPlaceholder: live.showsPrefillPlaceholder,
+                smoothsText: live.smoothsText,
                 scale: fontScale,
                 height: $liveHeight)
                 // The live answer's text is built at one scale, so changing
@@ -257,10 +286,12 @@ struct MessageActionButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .appFont(.caption)
+                .appFont(.callout)
                 .contentTransition(.symbolEffect(.replace))
-                .frame(width: 18, height: 18)
+                // The glyph stays small; the target is a comfortable 28 pt.
+                .frame(width: 28, height: 28)
                 .contentShape(Rectangle())
+                .tuffHoverGlass()
         }
         .buttonStyle(.plain)
         .foregroundStyle(tint ?? .secondary)
@@ -277,7 +308,7 @@ struct MessageRoleLabel: View {
     var body: some View {
         Text(text)
             .appFont(.caption.weight(.semibold))
-            .foregroundStyle(TUFFMacTheme.accentColor)
+            .foregroundStyle(TUFFMacTheme.accentTextColor)
             .lineLimit(1)
             .accessibilityAddTraits(.isHeader)
     }
@@ -305,13 +336,11 @@ struct ThinkingDisclosure: View {
             Label(isRunning ? "Thinking…" : "Thinking", systemImage: "brain")
                 .appFont(.caption.weight(.medium))
                 .foregroundStyle(.secondary)
+                .contentTransition(.opacity)
+                .animation(TUFFMotion.standard, value: isRunning)
         }
         .padding(10)
-        .background(
-            TUFFMacTheme.surfaceStyle(
-                reduceTransparency: reduceTransparency,
-                material: .thin),
-            in: RoundedRectangle(cornerRadius: 10))
+        .tuffPanel()
         .accessibilityLabel("Model thinking")
         .accessibilityHint("Shows or hides the reasoning for this message")
     }

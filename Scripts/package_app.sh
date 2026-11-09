@@ -244,7 +244,7 @@ if [[ -n "$update_public_key" ]]; then
   plutil -insert SURequireSignedFeed -bool true "$info_plist"
   plutil -insert SUVerifyUpdateBeforeExtraction -bool true "$info_plist"
   plutil -insert SUEnableAutomaticChecks -bool "$automatic_updates" "$info_plist"
-  plutil -insert SUAllowsAutomaticUpdates -bool "$automatic_updates" "$info_plist"
+  plutil -insert SUAllowsAutomaticUpdates -bool true "$info_plist"
   plutil -insert SUAutomaticallyUpdate -bool "$automatic_updates" "$info_plist"
   if [[ "$automatic_updates" == false ]]; then plutil -insert TUFFLocalBuild -bool true "$info_plist"; fi
 else
@@ -266,7 +266,7 @@ fi
 plutil -lint "$info_plist"
 if [[ -n "$update_public_key" ]]; then
   [[ "$(plutil -extract SUEnableAutomaticChecks raw "$info_plist")" == "$automatic_updates" ]]
-  [[ "$(plutil -extract SUAllowsAutomaticUpdates raw "$info_plist")" == "$automatic_updates" ]]
+  [[ "$(plutil -extract SUAllowsAutomaticUpdates raw "$info_plist")" == true ]]
   [[ "$(plutil -extract SUAutomaticallyUpdate raw "$info_plist")" == "$automatic_updates" ]]
 fi
 

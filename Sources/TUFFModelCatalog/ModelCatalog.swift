@@ -958,7 +958,7 @@ public enum TUFFModelCatalog {
         reasoningControl: .toggleWithPreservation,
         addons: [TUFFModelAddonDescriptor(
             id: "qwen36-image-input",
-            displayName: "Qwen3.6 Image Support",
+            displayName: "Qwen 3.6 Image Support",
             kind: .imageInput,
             source: TUFFModelSource(
                 repoID: qwenSource.repoID,
@@ -1159,7 +1159,7 @@ public enum TUFFModelCatalog {
         // exactly the 4,719,616 bytes by which this pack exceeds Qwen 3.6's.
         addons: [TUFFModelAddonDescriptor(
             id: "qwen38-flash-next-image-input",
-            displayName: "Qwen3.8 Flash Next Image Support",
+            displayName: "Qwen 3.8 Flash Next Image Support",
             kind: .imageInput,
             source: TUFFModelSource(
                 repoID: qwen38FlashNextSource.repoID,

@@ -592,3 +592,126 @@ kernel void prism_gdn_gated_norm(
         out[base + i] = half(normed * gate);
     }
 }
+
+// Prefill versions of the Prism GDN steps above. Each runs a whole chunk of
+// rows in one dispatch instead of one dispatch per token, and performs the
+// same per-token arithmetic in the same order, so the output matches the
+// decode kernels run row by row.
+
+// prism_f32_gemv over several token rows: threadgroup (output, token).
+kernel void prism_f32_gemv_rows(
+    device const half *input [[buffer(0)]],
+    device const float *weights [[buffer(1)]],
+    device float *output [[buffer(2)]],
+    constant uint &columns [[buffer(3)]],
+    constant uint &outputs [[buffer(4)]],
+    constant uint &inputStride [[buffer(5)]],
+    uint2 group [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    const uint row = group.x;
+    const uint token = group.y;
+    device const half *x = input + token * inputStride;
+    float sum = 0.0f;
+    for (uint col = lane; col < columns; col += 32) {
+        sum = fma(float(x[col]), weights[row * columns + col], sum);
+    }
+    sum = simd_sum(sum);
+    if (lane == 0) output[token * outputs + row] = sum;
+}
+
+// prism_gdn_conv_mix_decode over `rows` consecutive rows. The history the
+// decode kernel shifts through `tail` is kept in registers and written back
+// once at the end, holding the same half values.
+kernel void prism_gdn_conv_mix_prefill(
+    device half*        tail     [[buffer(0)]],   // [K-1, C]
+    device const half*  qkv      [[buffer(1)]],   // [T, C]
+    device const float* conv_w  [[buffer(2)]],   // [C, K]
+    device half*        out      [[buffer(3)]],   // [T, C] silu(conv)
+    constant uint&      channels [[buffer(4)]],
+    constant uint&      taps     [[buffer(5)]],
+    constant uint&      rows     [[buffer(6)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    const uint C = channels;
+    const uint K = taps;
+    if (tid >= C) return;
+    const uint history = K - 1u;
+    half past[7];
+    for (uint j = 0; j < history; ++j) past[j] = tail[j * C + tid];
+    for (uint t = 0; t < rows; ++t) {
+        const half x = qkv[t * C + tid];
+        float acc = float(x) * float(conv_w[tid * K + (K - 1u)]);
+        for (uint j = 0; j < history; ++j) {
+            acc = fma(float(past[j]), float(conv_w[tid * K + j]), acc);
+        }
+        out[t * C + tid] = half(prism_gdn_silu(acc));
+        for (uint j = 0; j + 1u < history; ++j) past[j] = past[j + 1u];
+        if (history > 0u) past[history - 1u] = x;
+    }
+    for (uint j = 0; j < history; ++j) tail[j * C + tid] = past[j];
+}
+
+// prism_gdn_delta_step_decode over `rows` consecutive rows. The state row is
+// kept in registers between tokens; the decode kernel stores and reloads the
+// same FP32 values.
+kernel void prism_gdn_delta_step_prefill(
+    device const half*   conv_out [[buffer(0)]],   // [T, C]
+    device const float*  a_proj   [[buffer(1)]],   // [T, Hv]
+    device const float*  b_proj   [[buffer(2)]],   // [T, Hv]
+    device const float* A_log    [[buffer(3)]],   // [Hv]
+    device const float* dt_bias  [[buffer(4)]],   // [Hv]
+    device float*        state    [[buffer(5)]],   // [Hv, Dv, Dk]
+    device half*         y        [[buffer(6)]],   // [T, Hv * Dv]
+    constant uint&       kHeads   [[buffer(7)]],
+    constant uint&       vHeads   [[buffer(8)]],
+    constant uint&       keyDim   [[buffer(9)]],
+    constant uint&       valueDim [[buffer(10)]],
+    constant uint&       rows     [[buffer(11)]],
+    constant uint&       rowStride [[buffer(12)]],  // C
+    uint2 tg [[threadgroup_position_in_grid]],
+    uint2 tpos [[thread_position_in_threadgroup]]
+) {
+    const uint Hk = kHeads;
+    const uint Hv = vHeads;
+    const uint Dk = keyDim;
+    const uint Dv = valueDim;
+    const uint h = tg.x;
+    const uint dv = tg.y * 4u + tpos.y;
+    const uint lane = tpos.x;
+    if (h >= Hv || dv >= Dv) return;
+
+    const uint hk = h / (Hv / Hk);
+    const uint nPerLane = Dk / 32u;
+    device float* srow = state + (uint(h) * Dv + dv) * Dk;
+    float s[8];
+    for (uint i = 0; i < nPerLane; ++i) s[i] = srow[lane * nPerLane + i];
+    const float aScale = exp(float(A_log[h]));
+    const float bias = float(dt_bias[h]);
+
+    for (uint t = 0; t < rows; ++t) {
+        device const half* row = conv_out + t * rowStride;
+        device const half* q = row + hk * Dk;
+        device const half* k = row + Hk * Dk + hk * Dk;
+        device const half* v = row + 2u * Hk * Dk + h * Dv;
+        const float g = exp(-aScale * prism_gdn_softplus(float(a_proj[t * Hv + h]) + bias));
+        const float beta = 1.0f / (1.0f + exp(-float(b_proj[t * Hv + h])));
+
+        float kv = 0.0f;
+        for (uint i = 0; i < nPerLane; ++i) {
+            const uint idx = lane * nPerLane + i;
+            s[i] = s[i] * g;
+            kv = fma(s[i], float(k[idx]), kv);
+        }
+        kv = simd_sum(kv);
+        const float delta = (float(v[dv]) - kv) * beta;
+        float out = 0.0f;
+        for (uint i = 0; i < nPerLane; ++i) {
+            const uint idx = lane * nPerLane + i;
+            s[i] = fma(float(k[idx]), delta, s[i]);
+            out = fma(s[i], float(q[idx]), out);
+        }
+        out = simd_sum(out);
+        if (lane == 0) y[t * Hv * Dv + h * Dv + dv] = half(out);
+    }
+    for (uint i = 0; i < nPerLane; ++i) srow[lane * nPerLane + i] = s[i];
+}

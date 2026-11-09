@@ -27,25 +27,26 @@ struct PromptComposerView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if hasAttachments { attachmentStrip }
-            if let notice = attachmentNotice { attachmentNoticeText(notice) }
+            if hasAttachments { attachmentStrip.transition(.opacity) }
+            if let notice = attachmentNotice { attachmentNoticeText(notice).transition(.opacity) }
             editor
                 // Navigate > Message Box (Command-L).
                 .onReceive(NotificationCenter.default.publisher(for: .tuffFocusComposer)) { _ in
                     promptFocused = true
                 }
             footer
-            if let contextNotice { contextNoticeText(contextNotice) }
+            if let contextNotice { contextNoticeText(contextNotice).transition(.opacity) }
         }
-        .padding(12)
-        .background {
-            RoundedRectangle(cornerRadius: 22)
-                .fill(Color(nsColor: .controlBackgroundColor))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 22)
-                        .stroke(.separator.opacity(0.5), lineWidth: 0.5)
-                }
-        }
+        // The box grows and shrinks around what is added to it, rather than
+        // jumping a row at a time.
+        .animation(TUFFMotion.standard, value: hasAttachments)
+        .animation(TUFFMotion.standard, value: attachmentNotice?.text)
+        .animation(TUFFMotion.standard, value: contextNotice?.text)
+        .padding(PromptComposerMetrics.padding)
+        // Glass over the transcript, which scrolls on underneath. Not
+        // interactive: it holds a text field, not a single action.
+        .tuffChrome(RoundedRectangle(cornerRadius: PromptComposerMetrics.cornerRadius,
+                                     style: .continuous))
     }
 
     /// Configure every selection mode explicitly: directory pickers and
@@ -118,12 +119,15 @@ struct PromptComposerView: View {
             }
             .overlay {
                 if isImageDropTargeted {
-                    RoundedRectangle(cornerRadius: 8)
+                    RoundedRectangle(cornerRadius: TUFFDesign.Radius.concentric(
+                        outer: PromptComposerMetrics.cornerRadius, padding: PromptComposerMetrics.padding))
                         .stroke(.tint, lineWidth: 2)
                         .allowsHitTesting(false)
+                        .transition(.opacity)
                 }
             }
-            .animation(.smooth(duration: 0.12), value: editorHeight)
+            .animation(TUFFMotion.hover, value: editorHeight)
+            .animation(TUFFMotion.hover, value: isImageDropTargeted)
     }
 
     /// One line to start with, growing with what is typed and stopping at a
@@ -160,9 +164,9 @@ struct PromptComposerView: View {
 
     private func contextNoticeText(_ notice: (text: String, isError: Bool)) -> some View {
         Label(notice.text, systemImage: notice.isError
-              ? "exclamationmark.triangle" : "info.circle")
+              ? "exclamationmark.triangle.fill" : "info.circle")
             .appFont(.caption)
-            .foregroundStyle(notice.isError ? AnyShapeStyle(.red)
+            .foregroundStyle(notice.isError ? AnyShapeStyle(TUFFMacTheme.accentTextColor)
                              : AnyShapeStyle(.secondary))
             .fixedSize(horizontal: false, vertical: true)
     }
@@ -176,9 +180,20 @@ struct PromptComposerView: View {
             ToolToggleControls(model: model)
             Spacer(minLength: 8)
             contextMeter
+                .transition(.opacity)
             clearAction
+                .transition(.tuffArrival(scale: 0.8))
             GenerateControl(model: model)
         }
+        .animation(TUFFMotion.standard, value: model.contextUsage.isTight)
+        .animation(TUFFMotion.standard, value: clearActionKind)
+    }
+
+    /// Which of the two buttons before Send is showing, if either.
+    private var clearActionKind: Int {
+        if model.isSelectedConversationRunning { return 0 }
+        if model.hasComposedInput { return 1 }
+        return model.hasOutputTranscript ? 2 : 0
     }
 
     /// One control for everything that can be added to a message.
@@ -214,7 +229,7 @@ struct PromptComposerView: View {
                model.isVisionRuntimeSupported {
                 Divider()
                 Text("\(model.selectedDescriptor.shortName) reads images once "
-                    + "its image support is downloaded, in Models.")
+                    + "its image support is downloaded, in Settings > Models.")
             }
         } label: {
             ComposerIcon(systemImage: "plus", isOn: false)
@@ -239,8 +254,8 @@ struct PromptComposerView: View {
             HStack(spacing: 5) {
                 Circle()
                     .fill(usage.willDropOldestTurns
-                          ? AnyShapeStyle(.orange)
-                          : AnyShapeStyle(TUFFMacTheme.accentColor))
+                          ? AnyShapeStyle(TUFFMacTheme.accentTextColor)
+                          : AnyShapeStyle(TUFFMacTheme.accentTextColor))
                     .frame(width: 6, height: 6)
                 Text("\(MetricFormat.tokens(usage.estimatedTokens)) / "
                      + MetricFormat.tokens(usage.maxTokens))
@@ -289,7 +304,7 @@ struct PromptComposerView: View {
     private func attachmentNoticeText(_ notice: (text: String, isError: Bool)) -> some View {
         Text(notice.text)
             .appFont(.caption)
-            .foregroundStyle(notice.isError ? AnyShapeStyle(.red)
+            .foregroundStyle(notice.isError ? AnyShapeStyle(TUFFMacTheme.accentTextColor)
                              : AnyShapeStyle(.secondary))
             .fixedSize(horizontal: false, vertical: true)
     }
@@ -306,8 +321,9 @@ struct PromptComposerView: View {
                 Label("Clear input", systemImage: "xmark.circle.fill")
                     .labelStyle(.iconOnly)
                     .symbolRenderingMode(.hierarchical)
-                    .frame(width: 28, height: 28)
+                    .frame(width: 32, height: 32)
                     .contentShape(Circle())
+                    .tuffHoverGlass()
             }
             .buttonStyle(.borderless)
             .help("Clear the message and its attachments")
@@ -317,8 +333,9 @@ struct PromptComposerView: View {
             } label: {
                 Label("New chat", systemImage: "square.and.pencil")
                     .labelStyle(.iconOnly)
-                    .frame(width: 28, height: 28)
+                    .frame(width: 32, height: 32)
                     .contentShape(Circle())
+                    .tuffHoverGlass()
             }
             .buttonStyle(.borderless)
             .help("New chat")
@@ -330,6 +347,8 @@ struct PromptComposerView: View {
 /// placeholder overlay has to match the text view exactly, and it used to be
 /// two independent font choices that happened to agree.
 enum PromptComposerMetrics {
+    static let cornerRadius: CGFloat = 22
+    static let padding: CGFloat = 12
     /// A point larger than the system default. At 13 the message you are
     /// writing was set smaller than the answers around it.
     static let pointSize: CGFloat = 14

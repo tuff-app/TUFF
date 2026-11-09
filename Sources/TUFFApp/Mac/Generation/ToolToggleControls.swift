@@ -16,7 +16,7 @@ struct ToolToggleControls: View {
                 model.webSearchEnabled.toggle()
             } label: {
                 ComposerIcon(systemImage: "globe", isOn: webOn,
-                             badge: model.webSearchEnabled && model.isWebSearchPaused ? .orange : nil)
+                             badge: model.webSearchEnabled && model.isWebSearchPaused ? TUFFMacTheme.accentTextColor : nil)
             }
             .buttonStyle(.plain)
             .help(webHelp)
@@ -93,13 +93,13 @@ struct FolderAccessPanel: View {
         VStack(alignment: .leading, spacing: 10) {
             if showsToggle {
                 Toggle("Search these folders", isOn: $model.fileSearchEnabled)
-                    .toggleStyle(.switch)
+                    .toggleStyle(TUFFRowToggleStyle())
                     .disabled(model.toolStore.folders.isEmpty)
             }
             if model.toolStore.folders.isEmpty {
-                Text("Choose folders for TUFF to search. Only the folders you add are read, and their contents stay on this Mac.")
+                Text("Only folders you add are read. Nothing leaves this Mac.")
                     .appFont(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(TUFFDesign.secondaryTextColor)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
                 VStack(alignment: .leading, spacing: 6) {
@@ -110,20 +110,18 @@ struct FolderAccessPanel: View {
             }
             if !model.toolStore.folders.isEmpty {
                 Divider()
-                Picker("Workspace", selection: $model.codingFolderID) {
-                    Text("None").tag("")
-                    ForEach(model.toolStore.folders) { folder in
-                        Text(folder.displayName).tag(folder.id.uuidString)
-                    }
-                }
+                GlassMenuPicker("Workspace", selection: $model.codingFolderID,
+                                options: [""] + model.toolStore.folders.map(\.id.uuidString),
+                                label: { id in model.toolStore.folders.first { $0.id.uuidString == id }?.displayName ?? "None" })
                 Toggle("Write and edit files", isOn: $model.codingWriteEnabled)
                     .disabled(!model.fileSearchEnabled)
                 Toggle("Run commands", isOn: $model.codingCommandEnabled)
                     .disabled(!model.fileSearchEnabled)
                 Toggle("Allow command network access", isOn: $model.codingNetworkEnabled)
                     .disabled(!model.fileSearchEnabled || !model.codingCommandEnabled)
-                Text("Choose a workspace to let the model list and read its files directly, including hidden files. Commands are confined to the workspace. Write access requires Write and edit files; network access is off unless enabled. Search can use all added folders.")
-                    .appFont(.caption).foregroundStyle(.secondary)
+                Text("The model can read the workspace. Commands stay inside it.")
+                    .appFont(.caption).foregroundStyle(TUFFDesign.secondaryTextColor)
+                    .help("Choose a workspace to let the model list and read its files directly, including hidden files. Commands are confined to the workspace. Write access requires Write and edit files; network access is off unless enabled. Search can use all added folders.")
             }
             HStack {
                 Button("Add Folder…", action: addFolders)
@@ -137,12 +135,17 @@ struct FolderAccessPanel: View {
             if let error = model.toolStore.lastError {
                 Text(error)
                     .appFont(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(TUFFMacTheme.accentTextColor)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
         .disabled(model.isRunning)
         .help(model.isRunning ? "Folder and coding permissions can be changed after the current answer finishes." : "")
+        // A folder added or removed: the rows and the options under them
+        // ease in and out.
+        .animation(TUFFMotion.standard, value: model.toolStore.folders.map(\.id))
+        .animation(TUFFMotion.standard, value: model.toolStore.isIndexing)
+        .animation(TUFFMotion.standard, value: model.toolStore.lastError)
     }
 
     private func folderRow(_ folder: AppSearchFolder) -> some View {

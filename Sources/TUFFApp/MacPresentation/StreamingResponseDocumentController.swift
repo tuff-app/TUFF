@@ -80,12 +80,14 @@ public final class StreamingResponseDocumentController {
         isTerminal: Bool,
         showsPrefillPlaceholder: Bool = false
     ) -> UpdateResult {
-        let responseChanged = response != self.response
+        let responseChanged = !response.utf8.elementsEqual(self.response.utf8)
         let displaysPrefillPlaceholder = Self.shouldRunPrefillAnimation(
             response: response,
             isTerminal: isTerminal,
             requested: showsPrefillPlaceholder)
-        let needsRebuild = !response.hasPrefix(self.response)
+        // A byte prefix, not `hasPrefix`: canonically equivalent text can
+        // differ in length, and the append below slices at the old length.
+        let needsRebuild = !response.utf8.starts(with: self.response.utf8)
             || (isFinalized && !isTerminal)
             || displaysPrefillPlaceholder != self.showsPrefillPlaceholder
 
@@ -98,8 +100,11 @@ public final class StreamingResponseDocumentController {
                 response: response,
                 showsPrefillPlaceholder: displaysPrefillPlaceholder)
             mutation = .rebuilt
-        } else if response.count > self.response.count {
-            let delta = String(response.dropFirst(self.response.count))
+        } else if response.utf8.count > self.response.utf8.count {
+            // `response` extends the previous one here, so the new part starts
+            // at its byte length; counting characters ran on every frame.
+            let delta = String(response[response.utf8.index(
+                response.utf8.startIndex, offsetBy: self.response.utf8.count)...])
             storage.append(NSAttributedString(
                 string: delta,
                 attributes: Self.responseAttributes(scale: scale)))

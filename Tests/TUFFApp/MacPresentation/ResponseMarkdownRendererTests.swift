@@ -5,6 +5,21 @@ import Testing
 
 @MainActor
 @Suite struct ResponseMarkdownRendererTests {
+    /// A composed "é" replaced by a decomposed "e" + accent is equal as a
+    /// Swift string but not byte for byte; the streaming append must rebuild
+    /// rather than slice the new text at the old byte length.
+    @Test func streamingAppendRebuildsWhenOnlyCanonicallyEqual() {
+        let controller = StreamingResponseDocumentController()
+        let storage = NSMutableAttributedString()
+        controller.synchronize(storage: storage, response: "caf\u{E9}", isTerminal: false)
+        controller.synchronize(storage: storage, response: "cafe\u{301} au lait", isTerminal: false)
+        #expect(storage.string.utf8.elementsEqual("cafe\u{301} au lait".utf8))
+        // An accent arriving after its letter is a plain append.
+        controller.synchronize(storage: storage, response: "cafe\u{301} au lait e", isTerminal: false)
+        controller.synchronize(storage: storage, response: "cafe\u{301} au lait e\u{301}", isTerminal: false)
+        #expect(storage.string.utf8.elementsEqual("cafe\u{301} au lait e\u{301}".utf8))
+    }
+
     @Test func eachCodeBlockCanBeCopiedOnItsOwn() {
         let source = """
         Install it:
@@ -23,6 +38,25 @@ import Testing
         let rendered = ResponseMarkdownRenderer().render(source).attributedString
         let blocks = ResponseMarkdownRenderer.codeBlocks(in: rendered)
         #expect(blocks.map(\.code) == ["brew install tuff\ntuff serve", "print(\"hi\")"])
+        // Each block is one card: room for the header above its first line
+        // only, and the language it was fenced with.
+        func spacingBefore(at index: Int) -> CGFloat {
+            (rendered.attribute(.paragraphStyle, at: index, effectiveRange: nil)
+                as? NSParagraphStyle)?.paragraphSpacingBefore ?? 0
+        }
+        func language(at index: Int) -> String? {
+            rendered.attribute(.tuffCodeLanguage, at: index, effectiveRange: nil) as? String
+        }
+        let first = blocks[0].range
+        let secondLine = (rendered.string as NSString).range(of: "tuff serve").location
+        #expect(spacingBefore(at: first.location) > 0)
+        #expect(spacingBefore(at: secondLine) == 0)
+        #expect(language(at: first.location) == "sh")
+        #expect(language(at: blocks[1].range.location) == "python")
+        // Markup inside a fence is code, not raw HTML in the answer.
+        let html = ResponseMarkdownRenderer().render("Page:\n\n```html\n<p>hi</p>\n```")
+        #expect(!html.usedFallback)
+        #expect(ResponseMarkdownRenderer.codeBlocks(in: html.attributedString).map(\.code) == ["<p>hi</p>"])
         // Blank lines the author put at the end of a block are kept.
         let padded = ResponseMarkdownRenderer().render("```\nfirst\n\n\n```").attributedString
         let paddedCode = ResponseMarkdownRenderer.codeBlocks(in: padded).first?.code
@@ -97,19 +131,119 @@ import Testing
         #expect(ResponseMarkdownRenderer(scale: 2).render(source).attributedString !== first)
     }
 
-    @Test func unfinishedFenceFallsBackToExactRawText() {
-        let source = "Before\n\n```python\nprint('unfinished')"
+    @Test func unfinishedFenceStillGetsItsCodeCard() {
+        // An answer cut off inside a code block: the text before it keeps
+        // its formatting and the code its card, as if the fence had closed.
+        let source = "**Before**\n\n```python\nprint('unfinished')"
         let result = ResponseMarkdownRenderer().render(source)
 
-        #expect(result.usedFallback)
-        #expect(result.attributedString.string == source)
+        #expect(!result.usedFallback)
+        #expect(!result.attributedString.string.contains("```"))
+        #expect(!result.attributedString.string.contains("**"))
+        let blocks = ResponseMarkdownRenderer.codeBlocks(in: result.attributedString)
+        #expect(blocks.map(\.code) == ["print('unfinished')"])
     }
 
-    @Test func unsupportedHTMLTableAndImageStayReadableAsRawText() {
+    @Test func tablesRenderAsTextTablesAndKeepTheRestFormatted() throws {
+        let source = """
+        **Numbers**
+
+        ```python
+        print(2)
+        ```
+
+        | Prime | Note |
+        | :--- | ---: |
+        | 2 | `even` |
+        | 3 |  |
+
+        After.
+        """
+        let result = ResponseMarkdownRenderer().render(source)
+        let text = result.attributedString
+
+        #expect(!result.usedFallback)
+        #expect(!text.string.contains("|"))
+        #expect(!text.string.contains("```"))
+        #expect(ResponseMarkdownRenderer.codeBlocks(in: text).map(\.code) == ["print(2)"])
+
+        func cell(_ string: String) throws -> NSTextTableBlock {
+            let range = (text.string as NSString).range(of: string)
+            try #require(range.location != NSNotFound)
+            let style = try #require(text.attribute(.paragraphStyle, at: range.location,
+                                                    effectiveRange: nil) as? NSParagraphStyle)
+            return try #require(style.textBlocks.first as? NSTextTableBlock)
+        }
+        let header = try cell("Prime")
+        let note = try cell("even")
+        #expect(header.table === note.table)
+        #expect(header.table.numberOfColumns == 2)
+        #expect((header.startingRow, header.startingColumn) == (0, 0))
+        #expect((note.startingRow, note.startingColumn) == (1, 1))
+        #expect(header.backgroundColor != nil)
+        #expect(note.backgroundColor == nil)
+        // A table this small is as wide as what is in it, not the whole line.
+        #expect(header.contentWidthValueType == .absoluteValueType)
+        #expect(header.contentWidth > 0 && header.contentWidth < 120)
+        #expect(header.table.contentWidthValueType == .absoluteValueType)
+
+        // Every cell has a paragraph of its own, the empty one included: two
+        // columns by three rows.
+        var cells = Set<String>()
+        text.enumerateAttribute(.paragraphStyle, in: NSRange(location: 0, length: text.length)) { value, _, _ in
+            guard let block = (value as? NSParagraphStyle)?.textBlocks.first as? NSTextTableBlock else { return }
+            cells.insert("\(block.startingRow),\(block.startingColumn)")
+        }
+        #expect(cells.count == 6)
+        #expect(try #require(text.string.range(of: "After.")) != nil)
+        let after = (text.string as NSString).range(of: "After.")
+        let afterStyle = text.attribute(.paragraphStyle, at: after.location, effectiveRange: nil) as? NSParagraphStyle
+        #expect(afterStyle?.textBlocks.isEmpty != false)
+        // Copied as plain text, the layout-only characters are gone.
+        let plain = ResponseMarkdownRenderer().plainText(source)
+        #expect(!plain.contains("\u{200B}"))
+        #expect(plain.contains("Prime\tNote\n2\teven\n3\t\n"))
+    }
+
+    @Test func lineBreakTagsBreakLinesOutsideCodeOnly() {
+        let source = "| A |\n|---|\n| one<br>two |\n\n`<br>` stays.\n\n```html\n<br/>\n```"
+        let result = ResponseMarkdownRenderer().render(source)
+
+        #expect(!result.usedFallback)
+        #expect(result.attributedString.string.contains("one\u{2028}two"))
+        #expect(result.attributedString.string.contains("<br> stays."))
+        #expect(ResponseMarkdownRenderer.codeBlocks(in: result.attributedString).map(\.code) == ["<br/>"])
+
+        // Code the Markdown parser knows as code, however it is fenced.
+        for source in ["``<br>`` stays", "~~~\n<br>\n~~~", "> ```html\n> <br>\n> ```"] {
+            let rendered = ResponseMarkdownRenderer().render(source)
+            #expect(!rendered.usedFallback)
+            #expect(rendered.attributedString.string.contains("<br>"))
+            #expect(!rendered.attributedString.string.contains("\u{2028}"))
+        }
+    }
+
+    @Test func aTagInASentenceIsShownAsWrittenWithoutLosingTheFormatting() {
+        // A generic type in prose is inline HTML to the parser. It used to
+        // turn the whole answer back into raw Markdown.
+        let result = ResponseMarkdownRenderer().render("**Returns** a Vec<String> of names.")
+
+        #expect(!result.usedFallback)
+        #expect(result.attributedString.string == "Returns a Vec<String> of names.")
+    }
+
+    @Test func anOpenFenceOfAnyLengthIsCodeToItsEnd() {
+        for source in ["````python\nprint(1)", "~~~python\nprint(1)", "Text with ``` inline.\n\n```python\nprint(1)"] {
+            let result = ResponseMarkdownRenderer().render(source)
+            #expect(!result.usedFallback)
+            #expect(ResponseMarkdownRenderer.codeBlocks(in: result.attributedString).map(\.code) == ["print(1)"])
+        }
+    }
+
+    @Test func unsupportedHTMLAndImageStayReadableAsRawText() {
         let renderer = ResponseMarkdownRenderer()
         let samples = [
             "<div>Never execute this</div>",
-            "| A | B |\n|---|---|\n| 1 | 2 |",
             "![remote](https://example.com/image.png)",
         ]
 
@@ -392,7 +526,8 @@ import Testing
             response: partial,
             isTerminal: true)
         #expect(first.mutation == .finalized)
-        #expect(storage.string.hasSuffix(partial))
+        // Already a card: an open fence is rendered as if it had closed.
+        #expect(!storage.string.contains("```"))
 
         let updated = controller.synchronize(
             storage: storage,
@@ -401,8 +536,10 @@ import Testing
 
         #expect(updated.mutation == .finalized)
         #expect(controller.response == complete)
+        // A card that is the whole answer gets hairline spacer lines around
+        // it for layout; the code itself is unchanged.
         #expect((storage.string as NSString).substring(with: updated.assistantRange)
-            == "kernel void matmul() {}\n")
+            .trimmingCharacters(in: .newlines) == "kernel void matmul() {}")
         #expect(!storage.string.contains("```"))
     }
 

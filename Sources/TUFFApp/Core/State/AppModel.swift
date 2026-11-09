@@ -243,6 +243,14 @@ public final class AppModel {
             persistSettings()
         }
     }
+    public var smoothStreaming: Bool {
+        get { settingsStore.smoothStreaming }
+        set {
+            guard settingsStore.smoothStreaming != newValue else { return }
+            settingsStore.smoothStreaming = newValue
+            persistSettings()
+        }
+    }
     public var showPromptExamples: Bool {
         get { settingsStore.showPromptExamples }
         set {
@@ -266,6 +274,22 @@ public final class AppModel {
         set {
             guard settingsStore.loadModelOnLaunch != newValue else { return }
             settingsStore.loadModelOnLaunch = newValue
+            persistSettings()
+        }
+    }
+    public var translucentWindow: Bool {
+        get { settingsStore.translucentWindow }
+        set {
+            guard settingsStore.translucentWindow != newValue else { return }
+            settingsStore.translucentWindow = newValue
+            persistSettings()
+        }
+    }
+    public var appearanceMode: AppAppearanceMode {
+        get { settingsStore.appearanceMode }
+        set {
+            guard settingsStore.appearanceMode != newValue else { return }
+            settingsStore.appearanceMode = newValue
             persistSettings()
         }
     }
@@ -588,6 +612,9 @@ public final class AppModel {
         self.settingsStore.showPromptExamples = settings.showPromptExamples
         self.settingsStore.sentPromptBehavior = settings.sentPromptBehavior
         self.settingsStore.loadModelOnLaunch = settings.loadModelOnLaunch
+        self.settingsStore.smoothStreaming = settings.smoothStreaming
+        self.settingsStore.appearanceMode = settings.appearanceMode
+        self.settingsStore.translucentWindow = settings.translucentWindow
         self.settingsStore.accentColorMode = settings.accentColorMode
         self.customAccentColorHex = settings.customAccentColorHex
         self.settingsStore.zoomLevel = settings.zoomLevel
@@ -2118,7 +2145,7 @@ public final class AppModel {
                 await self?.applyLoadState(.failed(appError), generation: generation)
             } catch {
                 await self?.applyLoadState(
-                    .failed(.modelLoadFailed("\(error)")),
+                    .failed(.modelLoadFailed(AppLoadFailureMessage.text(for: error))),
                     generation: generation)
             }
             await self?.clearLoadTask(generation: generation)
@@ -2792,6 +2819,9 @@ public final class AppModel {
             settingsStore.showPromptExamples = settings.showPromptExamples
             settingsStore.sentPromptBehavior = settings.sentPromptBehavior
             settingsStore.loadModelOnLaunch = settings.loadModelOnLaunch
+            settingsStore.smoothStreaming = settings.smoothStreaming
+            settingsStore.appearanceMode = settings.appearanceMode
+            settingsStore.translucentWindow = settings.translucentWindow
             settingsStore.accentColorMode = settings.accentColorMode
             customAccentColorHex = settings.customAccentColorHex
             settingsStore.zoomLevel = settings.zoomLevel
@@ -2937,6 +2967,9 @@ public final class AppModel {
         settings.showPromptExamples = showPromptExamples
         settings.sentPromptBehavior = sentPromptBehavior
         settings.loadModelOnLaunch = loadModelOnLaunch
+        settings.smoothStreaming = smoothStreaming
+        settings.appearanceMode = appearanceMode
+        settings.translucentWindow = translucentWindow
         settings.accentColorMode = accentColorMode
         settings.customAccentColorHex = customAccentColorHex
         settings.zoomLevel = zoomLevel

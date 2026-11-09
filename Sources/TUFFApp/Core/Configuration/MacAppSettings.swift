@@ -173,6 +173,12 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     var showPromptExamples: Bool = false
     var sentPromptBehavior: AppSentPromptBehavior = .clear
     var loadModelOnLaunch: Bool = false
+    /// Reveal a streaming answer at a steady pace instead of in the batches
+    /// the engine sends. Display only; the answer and its timing are unchanged.
+    var smoothStreaming: Bool = true
+    var appearanceMode: AppAppearanceMode = .system
+    /// The desktop shows through behind the chat, blurred.
+    var translucentWindow: Bool = true
     var accentColorMode: AppAccentColorMode = .appDefault
     var customAccentColorHex: String = AppHexColor.defaultPurple.hexString
     var zoomLevel: AppZoomLevel = .default
@@ -248,6 +254,9 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         case showPromptExamples
         case sentPromptBehavior
         case loadModelOnLaunch
+        case smoothStreaming
+        case appearanceMode
+        case translucentWindow
         case accentColorMode
         case customAccentColorHex
         case bypassModelRestrictions
@@ -342,6 +351,12 @@ struct MacAppSettings: Codable, Equatable, Sendable {
                 AppSentPromptBehavior.self, forKey: .sentPromptBehavior) ?? .clear
             loadModelOnLaunch = try container.decodeIfPresent(
                 Bool.self, forKey: .loadModelOnLaunch) ?? false
+            smoothStreaming = try container.decodeIfPresent(
+                Bool.self, forKey: .smoothStreaming) ?? true
+            appearanceMode = try container.decodeIfPresent(
+                AppAppearanceMode.self, forKey: .appearanceMode) ?? .system
+            translucentWindow = try container.decodeIfPresent(
+                Bool.self, forKey: .translucentWindow) ?? true
             accentColorMode = try container.decodeIfPresent(
                 AppAccentColorMode.self, forKey: .accentColorMode) ?? .appDefault
             customAccentColorHex = try container.decodeIfPresent(

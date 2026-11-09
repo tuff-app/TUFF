@@ -14,6 +14,9 @@ import SwiftUI
 /// pointer was over.
 struct OutputPaneView: View {
     let model: AppModel
+    /// Height of the glass composer floating over the bottom of the
+    /// transcript; the last message scrolls clear of it.
+    var bottomInset: CGFloat = 0
     @Environment(\.appFontScale) private var fontScale
     /// True while the view should keep itself at the newest message. Set by the
     /// reader arriving at the bottom and cleared by the reader leaving it, so
@@ -43,8 +46,7 @@ struct OutputPaneView: View {
 
     private var placeholder: some View {
         EmptyConversationLayout(spacing: 8) {
-            EmptyPlaceholderIcon(systemName: placeholderSymbol)
-                .frame(width: 32, height: 32)
+            TUFFLoadingMark(stage: markStage)
 
             emptyPlaceholderContent
         }
@@ -69,11 +71,14 @@ struct OutputPaneView: View {
                     // stopped short whenever that message was taller than the
                     // viewport, which is most of them.
                     Color.clear
+                        .frame(height: bottomInset)
+                        .accessibilityHidden(true)
+                    Color.clear
                         .frame(height: 1)
                         .id(Self.bottomID)
                         .accessibilityHidden(true)
                 }
-                .padding(.horizontal, 26)
+                .padding(.horizontal, StatusHUDView.contentInset)
                 .padding(.vertical, 22)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -96,7 +101,13 @@ struct OutputPaneView: View {
                 } else if isPinnedToBottom,
                           current.contentHeight > previous.contentHeight {
                     // The answer grew under a view that was at the bottom.
-                    scrollToBottom(proxy)
+                    // Deferred to the next turn of the run loop: scrolling from
+                    // inside this callback runs during layout, and the lazy
+                    // stack measuring newly visible rows changed the height
+                    // again, until AppKit stopped the window for looping.
+                    DispatchQueue.main.async {
+                        if isPinnedToBottom { scrollToBottom(proxy) }
+                    }
                 }
             }
             .onChange(of: model.runIdentity) { _, _ in
@@ -166,7 +177,8 @@ struct OutputPaneView: View {
                 showsPrefillPlaceholder: model.isRunning
                     && model.outputResponsePlainText.isEmpty
                     && model.outputThinkingText.isEmpty
-                    && model.phase != .tools),
+                    && model.phase != .tools,
+                smoothsText: model.smoothStreaming),
             toolEntries: ToolActivityEntry.entries(from: model.outputToolActivities),
             sources: model.outputSources)
     }
@@ -186,6 +198,15 @@ struct OutputPaneView: View {
         return renderer
     }
 
+    /// What the empty chat is saying, so a change from one to the next
+    /// (load, loading, failed, ready) can fade instead of swapping.
+    private var placeholderStage: Int {
+        if isLoadingModel { return 1 }
+        if model.loadState.isFailed { return 2 }
+        if model.hasStaleLoadedRuntime { return 3 }
+        return needsModelLoad ? 0 : 4
+    }
+
     private var emptyPlaceholderContent: some View {
         VStack(spacing: 8) {
             if !needsModelLoad {
@@ -200,10 +221,12 @@ struct OutputPaneView: View {
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             }
-            if isLoadingModel {
-                LoadingModelText()
+            if case .loading(let phase) = model.loadState {
+                Text(phase.label)
                     .appFont(.callout)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(TUFFDesign.secondaryTextColor)
+                    .contentTransition(.opacity)
+                    .animation(TUFFMotion.standard, value: phase)
             } else if let placeholderHint {
                 Text(placeholderHint)
                     .appFont(.callout)
@@ -212,26 +235,31 @@ struct OutputPaneView: View {
             if let detail = model.presentation.detail {
                 Text(detail)
                     .appFont(.caption)
-                    .foregroundStyle(model.presentation.severity == .error ? .red : .secondary)
+                    .foregroundStyle(model.presentation.severity == .error ? TUFFMacTheme.accentTextColor : .secondary)
                     .multilineTextAlignment(.center)
+                    .transition(.opacity)
             }
             if model.canLoadModel {
                 Button(model.loadState.isFailed ? "Retry Load" : "Load Model",
                        action: model.loadModel)
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.tuffProminent)
                     .controlSize(.large)
+                    .transition(.tuffArrival(scale: 0.96))
             } else if isLoadingModel {
                 Button("Load Model", action: {})
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.tuffProminent)
                     .controlSize(.large)
                     .hidden()
                     .accessibilityHidden(true)
             } else if model.canReloadModel {
                 Button("Reload Model", action: model.reloadModel)
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.tuffProminent)
+                    .transition(.tuffArrival(scale: 0.96))
             }
         }
         .frame(maxWidth: .infinity)
+        .animation(TUFFMotion.standard, value: placeholderStage)
+        .animation(TUFFMotion.standard, value: model.presentation.detail)
     }
 
     private var needsModelLoad: Bool {
@@ -243,8 +271,12 @@ struct OutputPaneView: View {
         return false
     }
 
-    private var placeholderSymbol: String {
-        "cube.transparent"
+    private var markStage: TUFFLoadingMark.Stage {
+        switch model.loadState {
+        case .loading(let phase): .loading(phase.progressFraction)
+        case .ready: .ready
+        default: .idle
+        }
     }
 
     private var placeholderHint: String? {
@@ -309,7 +341,7 @@ struct SubmittedImageThumbnail: View {
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .overlay {
             RoundedRectangle(cornerRadius: 10)
-                .stroke(.separator.opacity(0.5), lineWidth: 0.5)
+                .stroke(TUFFDesign.hairlineColor, lineWidth: 1)
         }
         .accessibilityLabel("Attached image \(attachment.displayName)")
         .help(attachment.displayName)
@@ -358,17 +390,6 @@ struct SubmittedImageThumbnail: View {
     }()
 }
 
-private struct EmptyPlaceholderIcon: View {
-    let systemName: String
-
-    var body: some View {
-        Image(systemName: systemName)
-            .appFont(.title2)
-            .foregroundStyle(.quaternary)
-            .accessibilityHidden(true)
-    }
-}
-
 private struct EmptyConversationLayout: Layout {
     let spacing: CGFloat
 
@@ -403,31 +424,6 @@ private struct EmptyConversationLayout: Layout {
                 y: iconCenter.y + iconSize.height / 2 + spacing),
             anchor: .top,
             proposal: ProposedViewSize(width: bounds.width, height: nil))
-    }
-}
-
-private struct LoadingModelText: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var animationStart = Date()
-
-    var body: some View {
-        if reduceMotion {
-            label(dotCount: 3)
-        } else {
-            TimelineView(.periodic(from: .now, by: 0.25)) { context in
-                let elapsed = max(0, context.date.timeIntervalSince(animationStart))
-                label(dotCount: Int(elapsed / 0.25) % 4)
-            }
-        }
-    }
-
-    private func label(dotCount: Int) -> some View {
-        ZStack(alignment: .leading) {
-            Text("Loading Model...").hidden()
-            Text("Loading Model" + String(repeating: ".", count: dotCount))
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Loading Model")
     }
 }
 

@@ -1,4 +1,5 @@
 import SwiftUI
+import TUFFMacPresentation
 
 struct HUDMetricView: View {
     let value: String
@@ -7,11 +8,8 @@ struct HUDMetricView: View {
 
     var body: some View {
         VStack(spacing: 1) {
-            Text(value)
+            RollingText(value, animated: animated)
                 .appFont(.system(.callout, design: .rounded).weight(.semibold))
-                .monospacedDigit()
-                .contentTransition(animated ? .numericText() : .identity)
-                .animation(animated ? .snappy(duration: 0.25) : nil, value: value)
             Text(label)
                 .appFont(.caption2)
                 .textCase(.uppercase)

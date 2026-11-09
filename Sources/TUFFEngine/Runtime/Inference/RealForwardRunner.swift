@@ -1993,29 +1993,26 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                     try prism.encode(commandBuffer: cb, model: model, weight: views.linZ!,
                                      input: blockInput, output: scratch.gdnZ, columns: D,
                                      outputs: la.valueDim, rows: t, inputStride: D, outputStride: la.valueDim)
-                    for row in 0..<t {
-                        let qOffset = row * la.qkvDim * MemoryLayout<Float16>.stride
-                        let valueOffset = row * la.valueDim * MemoryLayout<Float16>.stride
-                        let scalarOffset = row * la.numVHeads * MemoryLayout<Float>.stride
-                        prism.encodeFloat(commandBuffer: cb, weight: views.linA!, input: blockInput,
+                    // One dispatch per step for the whole chunk. Through 10.3
+                    // these ran once per token: six dispatches per token per
+                    // GDN layer, which dominated Bonsai's prefill.
+                    prism.encodeFloatRows(commandBuffer: cb, weight: views.linA!, input: blockInput,
                                           output: scratch.gdnA, columns: D, outputs: la.numVHeads,
-                                          inputOffset: row * D * 2, outputOffset: scalarOffset)
-                        prism.encodeFloat(commandBuffer: cb, weight: views.linB!, input: blockInput,
+                                          rows: t, inputStride: D)
+                    prism.encodeFloatRows(commandBuffer: cb, weight: views.linB!, input: blockInput,
                                           output: scratch.gdnB, columns: D, outputs: la.numVHeads,
-                                          inputOffset: row * D * 2, outputOffset: scalarOffset)
-                        prismGDN.encodeConv(commandBuffer: cb, tail: gdnState.convTailBuffer(layer: L),
-                                            qkv: scratch.q, weight: views.linConv!, output: scratch.gdnConvOut,
-                                            qkvOffset: qOffset, outputOffset: qOffset)
-                        gdn.encodeQKNorm(commandBuffer: cb, convOut: scratch.gdnConvOut, convOutOffset: qOffset)
-                        prismGDN.encodeDelta(commandBuffer: cb, convOut: scratch.gdnConvOut,
-                                             a: scratch.gdnA, b: scratch.gdnB, aLog: views.linALog!,
-                                             dtBias: views.linDtBias!, state: gdnState.stateBuffer(layer: L),
-                                             output: scratch.gdnY, convOutOffset: qOffset,
-                                             aOffset: scalarOffset, bOffset: scalarOffset, outputOffset: valueOffset)
-                        prismGDN.encodeGatedNorm(commandBuffer: cb, y: scratch.gdnY, z: scratch.gdnZ,
-                                                 weight: views.linNorm!, output: scratch.attentionOutput,
-                                                 yOffset: valueOffset, zOffset: valueOffset, outputOffset: valueOffset)
-                    }
+                                          rows: t, inputStride: D)
+                    prismGDN.encodeConvPrefill(commandBuffer: cb, tail: gdnState.convTailBuffer(layer: L),
+                                               qkv: scratch.q, weight: views.linConv!,
+                                               output: scratch.gdnConvOut, rows: t)
+                    gdn.encodeQKNorm(commandBuffer: cb, convOut: scratch.gdnConvOut, rows: t)
+                    prismGDN.encodeDeltaPrefill(commandBuffer: cb, convOut: scratch.gdnConvOut,
+                                                a: scratch.gdnA, b: scratch.gdnB, aLog: views.linALog!,
+                                                dtBias: views.linDtBias!, state: gdnState.stateBuffer(layer: L),
+                                                output: scratch.gdnY, rows: t)
+                    prismGDN.encodeGatedNormPrefill(commandBuffer: cb, y: scratch.gdnY, z: scratch.gdnZ,
+                                                    weight: views.linNorm!, output: scratch.attentionOutput,
+                                                    rows: t)
                     try prism.encode(commandBuffer: cb, model: model, weight: views.linOut!,
                                      input: scratch.attentionOutput, output: scratch.h1,
                                      columns: la.valueDim, outputs: D, rows: t,

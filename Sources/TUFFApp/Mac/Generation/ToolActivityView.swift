@@ -47,7 +47,7 @@ struct ToolActivityEntry: Identifiable, Equatable {
         switch state {
         case .running: "ellipsis"
         case .succeeded: "checkmark.circle"
-        case .failed: "exclamationmark.triangle"
+        case .failed: "exclamationmark.triangle.fill"
         case .refused: "nosign"
         case .cancelled: "stop.circle"
         }
@@ -102,6 +102,7 @@ struct ToolActivityView: View {
             VStack(alignment: .leading, spacing: 10) {
                 ForEach(entries) { entry in
                     entryRow(entry)
+                        .transition(.opacity)
                 }
                 if !sources.isEmpty {
                     Divider()
@@ -112,26 +113,35 @@ struct ToolActivityView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.top, 8)
+            .animation(TUFFMotion.standard, value: entries.map(\.id))
         } label: {
             HStack(spacing: 6) {
                 if isRunning {
                     ProgressView().controlSize(.small)
+                        .transition(.opacity)
                 } else {
                     Image(systemName: headlineSymbol)
+                        .transition(.opacity)
                 }
                 Text(headline)
+                    .contentTransition(.opacity)
                 if !sources.isEmpty {
                     Text("· \(sources.count) source\(sources.count == 1 ? "" : "s")")
                         .foregroundStyle(.tertiary)
+                        .contentTransition(.numericText())
+                        .transition(.opacity)
                 }
             }
             .appFont(.caption.weight(.medium))
             .foregroundStyle(.secondary)
+            // One call gives way to the next, and to the summary, without
+            // the line jumping.
+            .animation(TUFFMotion.standard, value: headline)
+            .animation(TUFFMotion.standard, value: isRunning)
+            .animation(TUFFMotion.standard, value: sources.count)
         }
         .padding(10)
-        .background(
-            TUFFMacTheme.surfaceStyle(reduceTransparency: reduceTransparency, material: .thin),
-            in: RoundedRectangle(cornerRadius: 10))
+        .tuffPanel()
         .accessibilityLabel("Tool activity")
         .accessibilityValue(headline)
         .accessibilityHint("Shows tool calls, results, and any sources")
@@ -166,7 +176,7 @@ struct ToolActivityView: View {
     }
 
     private var headlineSymbol: String {
-        entries.contains { $0.state == .failed } ? "exclamationmark.triangle"
+        entries.contains { $0.state == .failed } ? "exclamationmark.triangle.fill"
             : entries.contains { $0.name == AppToolName.runCommand.rawValue } ? "terminal"
             : entries.contains { [AppToolName.listFiles.rawValue, AppToolName.readFile.rawValue,
                                    AppToolName.writeFile.rawValue, AppToolName.editFile.rawValue].contains($0.name) } ? "folder"
@@ -178,7 +188,7 @@ struct ToolActivityView: View {
     private func entryRow(_ entry: ToolActivityEntry) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Image(systemName: entry.symbol)
-                .foregroundStyle(entry.state == .failed ? AnyShapeStyle(.orange)
+                .foregroundStyle(entry.state == .failed ? AnyShapeStyle(TUFFMacTheme.accentTextColor)
                                  : AnyShapeStyle(.secondary))
                 .frame(width: 14)
             VStack(alignment: .leading, spacing: 2) {
@@ -240,7 +250,7 @@ struct SourceRow: View {
                 } label: {
                     Text(source.title)
                         .lineLimit(1)
-                        .foregroundStyle(TUFFMacTheme.accentColor)
+                        .foregroundStyle(TUFFMacTheme.accentTextColor)
                 }
                 .buttonStyle(.plain)
                 .disabled(source.openURL == nil)

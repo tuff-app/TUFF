@@ -24,7 +24,7 @@ struct InspectorView: View {
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .tuffPageBackground()
     }
 
     /// Shown while it has something to say, hidden once it does not. Unlike
@@ -87,16 +87,16 @@ struct InspectorView: View {
             } else if case .failed(let message) = model.visionInstallState {
                 Text(message)
                     .appFont(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(TUFFMacTheme.accentTextColor)
             } else if case .recoverable(let message) = model.visionInstallState {
                 Text(message)
                     .appFont(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(TUFFMacTheme.accentTextColor)
             } else if case .partial(let message) = model.visionInstallationStatus,
                       !model.isInstallingVisionPack {
                 Text(message)
                     .appFont(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(TUFFMacTheme.accentTextColor)
             } else if case .unsupportedLayout = model.visionInstallationStatus {
                 Text("Image support needs a model directory named "
                     + "\"<name>.gturbo\", which is where the companion pack lives.")
@@ -106,12 +106,12 @@ struct InspectorView: View {
                       !model.isInstallingVisionPack {
                 Text(message)
                     .appFont(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(TUFFMacTheme.accentTextColor)
             } else if case .insufficientSpace(let requirement) = model.visionInstallReadiness,
                       !model.isInstallingVisionPack {
                 Text("Free \(MetricFormat.storage(requirement.shortfallBytes)) more storage.")
                     .appFont(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(TUFFMacTheme.accentTextColor)
             } else if model.isVisionCompanionOperationInProgress {
                 Text("Model actions stay unavailable until this finishes. "
                     + "Your prompt, images, and transcript are kept.")
@@ -145,7 +145,7 @@ struct InspectorView: View {
                     .disabled(!model.canDiscardVisionPackDownload)
                     if model.isVisionRuntimeSupported {
                         Button("Activate", action: model.activateVisionPack)
-                            .buttonStyle(.borderedProminent)
+                            .buttonStyle(.tuffProminent)
                             .disabled(!model.canActivateVisionPack)
                     }
                 } else if model.isVisionPackInstalled {
@@ -170,7 +170,7 @@ struct InspectorView: View {
                         Button(visionInstallButtonLabel) {
                             model.installVisionPack()
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.tuffProminent)
                         .disabled(!model.canInstallVisionPack)
                     }
                 }
@@ -207,7 +207,7 @@ struct InspectorView: View {
     private var visionStatusColor: Color {
         guard model.isVisionRuntimeSupported else { return .secondary }
         switch model.visionInstallationStatus {
-        case .partial: return .orange
+        case .partial: return TUFFMacTheme.accentTextColor
         case .missing, .complete, .unsupportedLayout: return .secondary
         }
     }

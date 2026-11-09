@@ -19,6 +19,7 @@ final class MessageTextView: NSTextView {
               let container = textContainer, let layoutManager else { return nil }
         container.containerSize = NSSize(width: width, height: .greatestFiniteMagnitude)
         layoutManager.ensureLayout(for: container)
+        layoutCodeCopyButtons()
         return max(1, ceil(layoutManager.usedRect(for: container).height))
     }
 
@@ -28,6 +29,7 @@ final class MessageTextView: NSTextView {
         // measure again: without this, resizing left every message at the
         // height its old width needed.
         guard abs(newSize.width - measuredWidth) > 0.5 else { return }
+        defer { layoutCodeCopyButtons() }
         measuredWidth = newSize.width
         reportHeight()
     }
@@ -38,6 +40,7 @@ final class MessageTextView: NSTextView {
     func reportHeight() {
         guard let container = textContainer, let layoutManager else { return }
         layoutManager.ensureLayout(for: container)
+        layoutCodeCopyButtons()
         let measured = ceil(layoutManager.usedRect(for: container).height)
         guard measured > 0, abs(measured - reportedHeight) > 0.5 else { return }
         reportedHeight = measured
@@ -47,42 +50,10 @@ final class MessageTextView: NSTextView {
 
     // MARK: Code blocks
 
-    /// Shown at the top right of the code block under the pointer.
-    private lazy var codeCopyButton: NSButton = {
-        let button = NSButton(title: "Copy", image: NSImage(
-            systemSymbolName: "doc.on.doc", accessibilityDescription: nil) ?? NSImage(),
-            target: self, action: #selector(copyHoveredCodeBlock))
-        button.bezelStyle = .accessoryBarAction
-        button.controlSize = .small
-        button.imagePosition = .imageLeading
-        button.setAccessibilityLabel("Copy code")
-        button.isHidden = true
-        addSubview(button)
-        return button
-    }()
-    private var hoveredCodeBlock: (range: NSRange, code: String)?
-    private var codeTrackingArea: NSTrackingArea?
-    private var copiedResetWork: DispatchWorkItem?
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let codeTrackingArea { removeTrackingArea(codeTrackingArea) }
-        let area = NSTrackingArea(rect: bounds, options: [.mouseMoved, .mouseEnteredAndExited,
-                                                          .activeInKeyWindow, .inVisibleRect],
-                                  owner: self, userInfo: nil)
-        addTrackingArea(area)
-        codeTrackingArea = area
-    }
-
-    override func mouseMoved(with event: NSEvent) {
-        super.mouseMoved(with: event)
-        showCodeCopyButton(for: codeBlock(at: convert(event.locationInWindow, from: nil)))
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        super.mouseExited(with: event)
-        showCodeCopyButton(for: nil)
-    }
+    /// One Copy button per code card, at the right of its header row. Always
+    /// shown, as in other chat apps; a hover-only button was easy to miss and
+    /// a small target.
+    private var codeCopyButtons: [CodeCopyButton] = []
 
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = super.menu(for: event) ?? NSMenu()
@@ -115,38 +86,26 @@ final class MessageTextView: NSTextView {
             .first { NSLocationInRange(character, $0.range) }
     }
 
-    private func showCodeCopyButton(for block: (range: NSRange, code: String)?) {
-        guard let block, let layoutManager, let textContainer else {
-            hoveredCodeBlock = nil
-            codeCopyButton.isHidden = true
-            return
+    /// Puts a Copy button in each card's header. Called whenever the text or
+    /// width changes, after layout.
+    func layoutCodeCopyButtons() {
+        let cards = (layoutManager as? CodeBlockLayoutManager)?.codeCards() ?? []
+        while codeCopyButtons.count > cards.count { codeCopyButtons.removeLast().removeFromSuperview() }
+        while codeCopyButtons.count < cards.count {
+            let button = CodeCopyButton()
+            addSubview(button)
+            codeCopyButtons.append(button)
         }
-        if hoveredCodeBlock?.range != block.range {
-            copiedResetWork?.perform()
+        for (card, button) in zip(cards, codeCopyButtons) {
+            button.code = card.code
+            button.fontSize = card.codeFont.pointSize
+            let size = button.fittingSize
+            let inset = card.codeFont.pointSize * ResponseMarkdownRenderer.codeInset / 12.5
+            button.frame = NSRect(
+                x: card.rect.maxX + textContainerOrigin.x - size.width - inset + 8,
+                y: card.rect.minY + textContainerOrigin.y + (card.headerHeight - size.height) / 2,
+                width: size.width, height: size.height)
         }
-        hoveredCodeBlock = block
-        let glyphs = layoutManager.glyphRange(forCharacterRange: block.range, actualCharacterRange: nil)
-        let rect = layoutManager.boundingRect(forGlyphRange: glyphs, in: textContainer)
-        codeCopyButton.sizeToFit()
-        let size = codeCopyButton.frame.size
-        codeCopyButton.setFrameOrigin(NSPoint(x: bounds.maxX - size.width - 4,
-                                              y: rect.minY + textContainerOrigin.y + 2))
-        codeCopyButton.isHidden = false
-    }
-
-    @objc private func copyHoveredCodeBlock() {
-        guard let code = hoveredCodeBlock?.code else { return }
-        copyToPasteboard(code)
-        codeCopyButton.title = "Copied"
-        codeCopyButton.image = NSImage(systemSymbolName: "checkmark", accessibilityDescription: nil)
-        copiedResetWork?.cancel()
-        let reset = DispatchWorkItem { [weak self] in
-            self?.codeCopyButton.title = "Copy"
-            self?.codeCopyButton.image = NSImage(systemSymbolName: "doc.on.doc",
-                                                 accessibilityDescription: nil)
-        }
-        copiedResetWork = reset
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: reset)
     }
 
     @objc private func copyCodeFromMenu(_ sender: NSMenuItem) {
@@ -161,7 +120,13 @@ final class MessageTextView: NSTextView {
 
     /// Applies the standard message text-view configuration.
     static func make() -> MessageTextView {
-        let textView = MessageTextView()
+        // TextKit 1 with the layout manager that draws code cards.
+        let storage = NSTextStorage()
+        let layoutManager = CodeBlockLayoutManager()
+        storage.addLayoutManager(layoutManager)
+        let container = NSTextContainer(size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
+        layoutManager.addTextContainer(container)
+        let textView = MessageTextView(frame: .zero, textContainer: container)
         textView.isEditable = false
         textView.isSelectable = true
         textView.isRichText = true
@@ -179,6 +144,65 @@ final class MessageTextView: NSTextView {
         textView.autoresizingMask = [.width]
         textView.setContentHuggingPriority(.defaultHigh, for: .vertical)
         return textView
+    }
+}
+
+/// A code card's Copy control: icon and label, a full-height hit area, and a
+/// brief "Copied" confirmation.
+final class CodeCopyButton: NSButton {
+    var code = ""
+    var fontSize: CGFloat = 12 { didSet { if fontSize != oldValue { refresh(copied: false) } } }
+    private var resetWork: DispatchWorkItem?
+
+    init() {
+        super.init(frame: .zero)
+        isBordered = false
+        bezelStyle = .regularSquare
+        imagePosition = .imageLeading
+        imageHugsTitle = true
+        contentTintColor = TUFFDesign.secondaryText
+        target = self
+        action = #selector(copyCode)
+        setAccessibilityLabel("Copy code")
+        refresh(copied: false)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var fittingSize: NSSize {
+        let base = super.fittingSize
+        // Padding around the label makes the whole pill the target.
+        return NSSize(width: ceil(base.width) + 16, height: max(ceil(base.height) + 10, 26))
+    }
+
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if isHighlighted {
+            NSColor.labelColor.withAlphaComponent(0.08).setFill()
+            NSBezierPath(roundedRect: bounds, xRadius: 7, yRadius: 7).fill()
+        }
+        super.draw(dirtyRect)
+    }
+
+    private func refresh(copied: Bool) {
+        let configuration = NSImage.SymbolConfiguration(pointSize: fontSize - 1, weight: .medium)
+        image = NSImage(systemSymbolName: copied ? "checkmark" : "doc.on.doc",
+                        accessibilityDescription: nil)?.withSymbolConfiguration(configuration)
+        attributedTitle = NSAttributedString(string: copied ? " Copied" : " Copy", attributes: [
+            .font: NSFont.systemFont(ofSize: fontSize, weight: .medium),
+            .foregroundColor: TUFFDesign.secondaryText,
+        ])
+    }
+
+    @objc private func copyCode() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(code, forType: .string)
+        refresh(copied: true)
+        resetWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.refresh(copied: false) }
+        resetWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
     }
 }
 

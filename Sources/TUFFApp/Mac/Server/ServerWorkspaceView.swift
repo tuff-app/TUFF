@@ -11,7 +11,6 @@ import TUFFMacPresentation
 struct ServerWorkspaceView: View {
     let model: AppModel
     @Bindable var controller: AppBackgroundAPIController
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @State private var portText = ""
     @State private var copiedURL = false
     @State private var copiedKey = false
@@ -32,13 +31,9 @@ struct ServerWorkspaceView: View {
                     cloneBuildCard
                 }
             }
-            .frame(maxWidth: 920, alignment: .leading)
-            .padding(28)
-            // Centred in a wide window rather than pinned to the sidebar.
-            .frame(maxWidth: .infinity)
+            .workspaceColumn()
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .workspacePageChrome()
         .task {
             guard controller.isAvailable else { return }
             portText = String(controller.settings.port)
@@ -59,48 +54,47 @@ struct ServerWorkspaceView: View {
                     Text("Background API").appFont(.headline)
                     Text(statusText)
                         .appFont(.callout)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(TUFFDesign.secondaryTextColor)
+                        .contentTransition(.opacity)
                 }
                 Spacer()
                 if controller.isChanging {
                     ProgressView().controlSize(.small)
+                        .transition(.opacity)
                 }
                 Toggle("Background API", isOn: Binding(
                     get: { controller.settings.enabled },
                     set: { value in controller.update { $0.enabled = value } }))
-                    .toggleStyle(.switch)
+                    .toggleStyle(TUFFSwitchToggleStyle())
                     .labelsHidden()
                     .disabled(controller.isChanging)
                     .accessibilityHint("Starts or stops the login item that serves installed models")
             }
             Text("Serves installed models while TUFF is open or closed. Each request names a model, which loads on demand; one model runs at a time.")
                 .appFont(.callout)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(TUFFDesign.secondaryTextColor)
             if controller.requiresApproval {
                 HStack {
                     Label("Allow TUFF in Login Items to start the listener.",
-                          systemImage: "exclamationmark.triangle")
+                          systemImage: "exclamationmark.triangle.fill")
                         .appFont(.callout)
                     Spacer()
                     Button("Open Login Items", action: controller.openLoginItems)
                 }
+                .transition(.opacity)
             }
             if let message = controller.message {
                 Text(message)
                     .appFont(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(TUFFDesign.secondaryTextColor)
                     .textSelection(.enabled)
+                    .transition(.opacity)
             }
             Divider()
             HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Endpoint")
-                        .appFont(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    Text(controller.endpoint)
-                        .appFont(.body.monospaced())
-                        .textSelection(.enabled)
-                }
+                Text(controller.endpoint)
+                    .appFont(.body.monospaced())
+                    .textSelection(.enabled)
                 Spacer()
                 Button {
                     copy(controller.endpoint)
@@ -118,45 +112,71 @@ struct ServerWorkspaceView: View {
                 }
             }
         }
-        .padding(18)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(cardBackground, in: RoundedRectangle(cornerRadius: 16))
+        // Turning the server on or off: the status line, the spinner and
+        // any message change in place rather than snapping.
+        .animation(TUFFMotion.standard, value: statusText)
+        .animation(TUFFMotion.standard, value: controller.isChanging)
+        .animation(TUFFMotion.standard, value: controller.requiresApproval)
+        .animation(TUFFMotion.standard, value: controller.message)
+        .tuffCard()
     }
 
+    /// Label on the left, control on the right, one row each with a divider
+    /// between, as in Settings.
     private var configurationCard: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Configuration").appFont(.headline)
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Configuration")
+                .appFont(.headline)
+                .padding(.bottom, TUFFDesign.Space.xxs)
             if installedModels.isEmpty {
-                Text("Install a model on the Models screen to serve it.")
+                Text("Install a model in the Models tab to serve it.")
                     .appFont(.callout)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(TUFFDesign.secondaryTextColor)
+                    .configurationRow()
             } else {
-                Picker("Default model", selection: Binding(
-                    get: { controller.defaultModelID },
-                    set: { value in controller.update { $0.defaultModel = value } })) {
-                    ForEach(installedModels, id: \.apiModelID) { descriptor in
-                        Text(descriptor.displayName).tag(descriptor.apiModelID)
-                    }
-                    if !installedModels.contains(where: { $0.apiModelID == controller.defaultModelID }) {
-                        Text("\(controller.settings.defaultModel) (not installed)")
-                            .tag(controller.defaultModelID)
-                    }
+                LabeledContent("Default model") {
+                    GlassMenuPicker("Default model", selection: Binding(
+                        get: { controller.defaultModelID },
+                        set: { value in controller.update { $0.defaultModel = value } }),
+                        options: installedModels.map(\.apiModelID)
+                            + (installedModels.contains { $0.apiModelID == controller.defaultModelID }
+                               ? [] : [controller.defaultModelID]),
+                        label: { id in
+                            if let installed = installedModels.first(where: { $0.apiModelID == id }) {
+                                return installed.displayName
+                            }
+                            // By its name where the catalog knows it, not
+                            // the identifier requests use ("gemma4").
+                            let name = model.installs.map(\.descriptor)
+                                .first { $0.apiModelID == id }?.displayName
+                                ?? controller.settings.defaultModel
+                            return "\(name) (not installed)"
+                        })
+                    .labelsHidden()
+                    .fixedSize()
+                    .accessibilityHint("The model used by requests that name default")
                 }
-                .accessibilityHint("The model used by requests that name default")
                 .help("Used when a request names \"default\". Separate from the model chosen in Chat.")
+                .configurationRow()
             }
-            Picker("Unload model", selection: Binding(
-                get: { controller.settings.unloadDelay },
-                set: { value in controller.update { $0.unloadDelay = value } })) {
-                ForEach(TUFFModelUnloadDelay.choices, id: \.self) { delay in
-                    Text(delay.label).tag(delay)
-                }
+            Divider()
+            LabeledContent("Unload model") {
+                GlassMenuPicker("Unload model", selection: Binding(
+                    get: { controller.settings.unloadDelay },
+                    set: { value in controller.update { $0.unloadDelay = value } }),
+                    options: TUFFModelUnloadDelay.choices,
+                    label: { $0.label })
+                .labelsHidden()
+                .fixedSize()
             }
+            .configurationRow()
+            Divider()
             LabeledContent("Port") {
                 TextField("Port", text: $portText)
                     .labelsHidden()
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 120)
+                    .tuffField()
+                    .multilineTextAlignment(.trailing)
+                    .frame(width: 80)
                     .focused($portIsFocused)
                     .onSubmit {
                         controller.updatePort(portText)
@@ -169,24 +189,31 @@ struct ServerWorkspaceView: View {
                         if !portIsFocused { portText = String(port) }
                     }
             }
-            .fixedSize()
+            .configurationRow()
+            Divider()
             Toggle("Allow other devices on your network", isOn: Binding(
                 get: { controller.settings.listensBeyondLoopback },
                 set: { value in controller.setNetworkAccess(value) }))
+                .toggleStyle(TUFFRowToggleStyle())
                 .accessibilityHint("Listens on every network interface and requires the API key from other devices")
+                .configurationRow()
             if controller.settings.listensBeyondLoopback {
                 networkAccess
+                    .padding(.bottom, TUFFDesign.Space.xs)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
             }
             Text(controller.settings.listensBeyondLoopback
                  ? "Other devices must send the API key as Authorization: Bearer <key> or x-api-key. Requests from this Mac need no key. Anyone with the key can use your models, so only allow this on a network you trust. Chat and the API share one memory budget, so the API declines a request while Chat holds a model the second would not fit beside."
                  : "The server listens only on 127.0.0.1, so only this Mac can reach it, and it needs no key. Chat and the API share one memory budget, so the API declines a request while Chat holds a model the second would not fit beside.")
                 .appFont(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(TUFFDesign.secondaryTextColor)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, TUFFDesign.Space.xxs)
         }
+        .labeledContentStyle(TUFFRowLabeledContentStyle())
         .disabled(controller.isChanging)
-        .padding(18)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(cardBackground, in: RoundedRectangle(cornerRadius: 16))
+        .animation(TUFFMotion.standard, value: controller.settings.listensBeyondLoopback)
+        .tuffCard()
     }
 
     private var networkAccess: some View {
@@ -194,12 +221,12 @@ struct ServerWorkspaceView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("From other devices")
                     .appFont(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(TUFFDesign.secondaryTextColor)
                 let endpoints = controller.networkEndpoints
                 if endpoints.isEmpty {
                     Text("This Mac has no network address right now.")
                         .appFont(.callout)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(TUFFDesign.secondaryTextColor)
                 }
                 ForEach(endpoints, id: \.self) { endpoint in
                     Text(endpoint)
@@ -211,7 +238,7 @@ struct ServerWorkspaceView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("API key")
                         .appFont(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(TUFFDesign.secondaryTextColor)
                     if let key = controller.apiKey {
                         Text(showsKey ? key : String(repeating: "•", count: 24))
                             .appFont(.body.monospaced())
@@ -222,7 +249,7 @@ struct ServerWorkspaceView: View {
                     } else {
                         Text("Created when the server starts")
                             .appFont(.callout)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(TUFFDesign.secondaryTextColor)
                     }
                 }
                 Spacer()
@@ -245,8 +272,8 @@ struct ServerWorkspaceView: View {
                 }
             }
         }
-        .padding(12)
-        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .tuffInset()
     }
 
     private var activityCard: some View {
@@ -280,9 +307,7 @@ struct ServerWorkspaceView: View {
                     accent: (controller.status?.queuedRequests ?? 0) > 0)
             }
         }
-        .padding(18)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(cardBackground, in: RoundedRectangle(cornerRadius: 16))
+        .tuffCard()
     }
 
     /// Clone builds have no app bundle to register a login item from, so they
@@ -295,12 +320,12 @@ struct ServerWorkspaceView: View {
                     Text("Background API").appFont(.headline)
                     Text("Available in the packaged TUFF app")
                         .appFont(.callout)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(TUFFDesign.secondaryTextColor)
                 }
             }
             Text("This build cannot register a login item. From the repository, run the same server in Terminal. It serves every model in scratch/ until you press Control-C.")
                 .appFont(.callout)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(TUFFDesign.secondaryTextColor)
             Divider()
             HStack(spacing: 12) {
                 Text(Self.cloneCommand)
@@ -314,9 +339,7 @@ struct ServerWorkspaceView: View {
                 }
             }
         }
-        .padding(18)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(cardBackground, in: RoundedRectangle(cornerRadius: 16))
+        .tuffCard()
     }
 
     static let cloneCommand = "swift run -c release TUFFServer --models-root scratch"
@@ -351,10 +374,6 @@ struct ServerWorkspaceView: View {
         return "Loaded model · unloads in \(Duration.seconds(seconds).formatted(.units(allowed: [.minutes, .seconds], width: .narrow)))"
     }
 
-    private var cardBackground: AnyShapeStyle {
-        TUFFMacTheme.surfaceStyle(reduceTransparency: reduceTransparency)
-    }
-
     private func copy(_ string: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(string, forType: .string)
@@ -365,14 +384,11 @@ private struct ServerIcon: View {
     let isActive: Bool
 
     var body: some View {
-        ZStack {
-            Circle().fill(TUFFMacTheme.accentColor.opacity(isActive ? 0.2 : 0.1))
-            Image(systemName: "network")
-                .appFont(.title2)
-                .foregroundStyle(isActive ? TUFFMacTheme.accentColor : .secondary)
-        }
-        .frame(width: 44, height: 44)
-        .accessibilityHidden(true)
+        Image(systemName: "network")
+            .appFont(.title2)
+            .foregroundStyle(isActive ? TUFFMacTheme.accentTextColor : TUFFDesign.secondaryTextColor)
+            .frame(width: 32)
+            .accessibilityHidden(true)
     }
 }
 
@@ -385,20 +401,28 @@ private struct ServerMetric: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Image(systemName: systemImage)
-                .foregroundStyle(accent ? TUFFMacTheme.accentColor : .secondary)
+                .foregroundStyle(accent ? TUFFMacTheme.accentTextColor : .secondary)
             Text(value)
-                .appFont(.title3.weight(.semibold))
+                .appFont(.title3.weight(.semibold).monospacedDigit())
                 .lineLimit(1)
                 .truncationMode(.middle)
             Text(title)
                 .appFont(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(TUFFDesign.secondaryTextColor)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
+        .tuffInset()
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(title)
         .accessibilityValue(value)
+    }
+}
+
+private extension View {
+    /// One row of a settings-style card: the height and spacing of a
+    /// Settings row, so the two screens read the same.
+    func configurationRow() -> some View {
+        frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
+            .padding(.vertical, 9)
     }
 }

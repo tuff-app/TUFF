@@ -247,10 +247,12 @@ final class PrismAffine2 {
 final class PrismFloatProjection {
     private let pipeline: MTLComputePipelineState
     private let dualPipeline: MTLComputePipelineState
+    private let rowsPipeline: MTLComputePipelineState
 
     init(context: MetalContext) throws {
         pipeline = try context.pipeline("prism_f32_gemv")
         dualPipeline = try context.pipeline("prism_f32_gemv_dual")
+        rowsPipeline = try context.pipeline("prism_f32_gemv_rows")
         precondition(pipeline.threadExecutionWidth == 32)
     }
 
@@ -277,6 +279,28 @@ final class PrismFloatProjection {
         encoder.setBytes(&c, length: MemoryLayout<UInt32>.size, index: 5)
         encoder.setBytes(&n, length: MemoryLayout<UInt32>.size, index: 6)
         encoder.dispatchThreadgroups(MTLSize(width: 2 * outputs, height: 1, depth: 1),
+                                     threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+        encoder.endEncoding()
+    }
+
+    /// `encode` for `rows` token rows of `input` (stride `inputStride`
+    /// halves) in one dispatch; row `t` writes `outputs` floats at `t * outputs`.
+    func encodeRows(commandBuffer: MTLCommandBuffer, input: MTLBuffer, weight: TensorView,
+                    output: MTLBuffer, columns: Int, outputs: Int, rows: Int, inputStride: Int) {
+        precondition(columns > 0 && outputs > 0 && rows > 0 && inputStride >= columns)
+        precondition(weight.dtype == 3 && Int(weight.shape.0) == outputs && Int(weight.shape.1) == columns)
+        precondition(input.length >= ((rows - 1) * inputStride + columns) * 2)
+        precondition(output.length >= rows * outputs * 4)
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        encoder.setComputePipelineState(rowsPipeline)
+        encoder.setBuffer(input, offset: 0, index: 0)
+        encoder.setBuffer(weight.buffer, offset: Int(weight.offset), index: 1)
+        encoder.setBuffer(output, offset: 0, index: 2)
+        var c = UInt32(columns), o = UInt32(outputs), stride = UInt32(inputStride)
+        encoder.setBytes(&c, length: MemoryLayout<UInt32>.size, index: 3)
+        encoder.setBytes(&o, length: MemoryLayout<UInt32>.size, index: 4)
+        encoder.setBytes(&stride, length: MemoryLayout<UInt32>.size, index: 5)
+        encoder.dispatchThreadgroups(MTLSize(width: outputs, height: rows, depth: 1),
                                      threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
         encoder.endEncoding()
     }

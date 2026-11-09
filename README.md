@@ -16,12 +16,7 @@
   <a href="https://github.com/tuff-app/TUFF/discussions">Discussions</a>
 </p>
 
-<p align="center">
-  <a href="https://tuff-app.github.io/assets/tuff-film.mp4"><img src="docs/assets/tuff-film-poster.jpg" alt="Watch the TUFF film" width="640"></a><br>
-  <a href="https://tuff-app.github.io/assets/tuff-film.mp4">Watch the film (66 s)</a>
-</p>
-
-![TUFF chatting with Qwen3.8 Flash Next on a 16 GB MacBook Air](docs/assets/tuff-chat.png)
+![TUFF chatting with Ternary Bonsai 2 2B](docs/assets/tuff-chat.png)
 
 TUFF runs language models on Apple Silicon Macs. The app is SwiftUI and the
 engine is my own, written in Swift and Metal. It's open source, and nothing you
@@ -40,7 +35,7 @@ You need an Apple Silicon Mac on macOS 15 or newer.
 
 1. Download the ZIP from the [latest release](https://github.com/tuff-app/TUFF/releases/latest),
    unzip it and move `TUFF.app` to Applications.
-2. Open TUFF, go to **Models** and install one. Gemma 4 E2B is a quick first
+2. Open TUFF and install a model in **Settings > Models**. Gemma 4 E2B is a quick first
    download.
 
 TUFF isn't notarized, so the first time, Control-click the app and choose

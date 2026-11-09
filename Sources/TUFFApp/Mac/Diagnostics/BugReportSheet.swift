@@ -37,7 +37,7 @@ struct BugReportSheet: View {
                 Button("Open Bug Form") {
                     NSWorkspace.shared.open(report.issueURL(includeDiagnostics: includeDiagnostics))
                     dismiss()
-                }.buttonStyle(.borderedProminent)
+                }.buttonStyle(.tuffProminent)
             }
         }.padding(24).frame(width: 560)
     }

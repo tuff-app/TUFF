@@ -50,7 +50,6 @@ struct ModelCatalogView: View {
     private func groupHeader(_ group: ModelCatalogGroup) -> some View {
         Text(group.title)
             .appFont(.headline)
-            .padding(.top, 4)
             .accessibilityAddTraits(.isHeader)
     }
 }
@@ -101,6 +100,7 @@ struct ModelCatalogRow: View {
             }
             if install.isInstalling {
                 progress
+                    .transition(.opacity)
             }
             message
             actions
@@ -108,65 +108,43 @@ struct ModelCatalogRow: View {
                 visionSupport
             }
         }
-        .padding(compact ? 12 : 16)
-        .background {
-            RoundedRectangle(cornerRadius: 16)
-                .fill(Color(nsColor: .controlBackgroundColor))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 16)
-                        .stroke(isSelected
-                                ? TUFFMacTheme.accentColor.opacity(0.65)
-                                : Color(nsColor: .separatorColor).opacity(0.5),
-                                lineWidth: isSelected ? 1.5 : 0.5)
-                }
-        }
-        .confirmationDialog(
-            "Discard the saved \(install.descriptor.displayName) download?",
-            isPresented: $showingDiscardConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("Discard Download", role: .destructive) { install.discard() }
-            Button("Keep Download", role: .cancel) {}
-        } message: {
-            Text("Downloaded ranges for this model will be removed. "
-                 + "Other models and any installed model are untouched.")
-        }
-        .confirmationDialog(
-            "Discard the saved \(visionDisplayName) download?",
-            isPresented: $showingVisionDiscardConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("Discard Download", role: .destructive) {
-                model.discardVisionPackDownload(for: install)
+        // A download starting, pausing or finishing: the progress bar and
+        // the buttons for that stage fade across, and the card resizes
+        // around them, instead of swapping in one frame.
+        .animation(TUFFMotion.standard, value: stage)
+        .tuffCard(padding: compact ? TUFFDesign.Space.sm : TUFFDesign.Radius.cardPadding)
+        .overlay {
+            if isSelected {
+                RoundedRectangle(cornerRadius: TUFFDesign.Radius.card, style: .continuous)
+                    .strokeBorder(TUFFMacTheme.accentTextColor, lineWidth: 1.5)
+                    .transition(.opacity)
             }
-            Button("Keep Download", role: .cancel) {}
-        } message: {
-            Text("Downloaded add-on ranges will be removed. The text model is untouched.")
         }
-        .confirmationDialog(
-            "Remove \(visionDisplayName)?",
-            isPresented: $showingVisionRemoveConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("Remove Image Support", role: .destructive) {
-                model.removeVisionPack(for: install)
-            }
-            Button("Keep Image Support", role: .cancel) {}
-        } message: {
-            Text("Text generation will keep working. Restoring image input requires downloading this add-on again.")
-        }
-        .confirmationDialog(
-            "Delete \(install.descriptor.displayName)?",
-            isPresented: $showingDeleteConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("Delete Model", role: .destructive) {
-                model.deleteInstalledModel(install)
-            }
-            Button("Keep Model", role: .cancel) {}
-        } message: {
-            Text(deleteMessage)
-        }
+        .animation(TUFFMotion.standard, value: isSelected)
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .tuffConfirm("Discard the saved \(install.descriptor.displayName) download?",
+                     isPresented: $showingDiscardConfirmation,
+                     message: "Downloaded ranges for this model will be removed. "
+                        + "Other models and any installed model are untouched.",
+                     symbol: "arrow.down.circle", confirm: "Discard Download",
+                     cancel: "Keep Download") { install.discard() }
+        .tuffConfirm("Discard the saved \(visionDisplayName) download?",
+                     isPresented: $showingVisionDiscardConfirmation,
+                     message: "Downloaded add-on ranges will be removed. The text model is untouched.",
+                     symbol: "arrow.down.circle", confirm: "Discard Download",
+                     cancel: "Keep Download") { model.discardVisionPackDownload(for: install) }
+        .tuffConfirm("Remove \(visionDisplayName)?",
+                     isPresented: $showingVisionRemoveConfirmation,
+                     message: "Text generation will keep working. Restoring image input "
+                        + "requires downloading this add-on again.",
+                     symbol: "photo", confirm: "Remove Image Support",
+                     cancel: "Keep Image Support") { model.removeVisionPack(for: install) }
+        .tuffConfirm("Delete \(install.descriptor.displayName)?",
+                     isPresented: $showingDeleteConfirmation,
+                     message: deleteMessage,
+                     symbol: "trash", confirm: "Delete Model",
+                     cancel: "Keep Model") { model.deleteInstalledModel(install) }
         // Grey means "this Mac cannot run it". With restrictions bypassed the
         // card stays in colour, because the buttons work, and the requirement
         // is still stated below in orange.
@@ -177,23 +155,8 @@ struct ModelCatalogRow: View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(install.descriptor.displayName)
                 .appFont(compact ? .callout.weight(.medium) : .headline)
-            if isSelected {
-                Text("Selected")
-                    .appFont(.caption2.weight(.semibold))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(TUFFMacTheme.accentColor.opacity(0.18),
-                                in: Capsule())
-            }
-            if install.descriptor.isRecommended {
-                Text("Recommended")
-                    .appFont(.caption2.weight(.semibold))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .foregroundStyle(TUFFMacTheme.accentColor)
-                    .background(TUFFMacTheme.accentColor.opacity(0.12),
-                                in: Capsule())
-            }
+            // No badges beside the name: the selected card's accent border
+            // says it is selected, and "Recommended" was removed.
             Spacer(minLength: 8)
             statusBadge
         }
@@ -218,11 +181,11 @@ struct ModelCatalogRow: View {
                 .appFont(.caption)
         case .downloading:
             Label("Downloading", systemImage: "arrow.down.circle")
-                .foregroundStyle(TUFFMacTheme.accentColor)
+                .foregroundStyle(TUFFMacTheme.accentTextColor)
                 .appFont(.caption)
         case .paused:
             Label("Paused", systemImage: "pause.circle")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(TUFFDesign.secondaryTextColor)
                 .appFont(.caption)
         case .notInstalled:
             EmptyView()
@@ -245,8 +208,8 @@ struct ModelCatalogRow: View {
                 : "Local checkpoint · ")
                 + MetricFormat.memory(hardwareEligibility.minimumUnifiedMemoryBytes)
                 + " RAM minimum")
-                .appFont(.caption)
-                .foregroundStyle(.secondary)
+                .appFont(.caption.monospacedDigit())
+                .foregroundStyle(TUFFDesign.secondaryTextColor)
             if !hardwareEligibility.isCompatible,
                let explanation = hardwareEligibility.explanation {
                 warning(explanation, symbol: "memorychip")
@@ -262,9 +225,15 @@ struct ModelCatalogRow: View {
     private func warning(_ text: String, symbol: String) -> some View {
         Label(text, systemImage: symbol)
             .appFont(.caption)
-            .foregroundStyle(.orange)
+            .foregroundStyle(TUFFMacTheme.accentTextColor)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Where this model's download stands, as far as the card's layout goes.
+    private var stage: String {
+        "\(install.isInstalling)\(install.isInstalled)\(install.hasPartialDownload)\(install.isInstallPathBlocked)"
+            + "\(model.isVisionInstallTarget(install) && model.isInstallingVisionPack)\(visionIsInstalled)\(visionIsPrepared)"
     }
 
     @ViewBuilder
@@ -275,6 +244,7 @@ struct ModelCatalogRow: View {
                 let completed = reused + downloaded
                 let fraction = min(1, Double(completed) / Double(total))
                 ProgressView(value: fraction)
+                    .animation(.linear(duration: 0.25), value: fraction)
                     .accessibilityLabel("\(install.descriptor.displayName) download")
                     .accessibilityValue(Text(accessibleProgressValue(fraction: fraction)))
                 HStack {
@@ -286,16 +256,16 @@ struct ModelCatalogRow: View {
                     }
                 }
                 .appFont(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
+                .foregroundStyle(TUFFDesign.secondaryTextColor)
                 if reused > 0 {
                     Text("Reused \(MetricFormat.storage(reused)) from the saved download")
                         .appFont(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(TUFFDesign.secondaryTextColor)
                 }
             } else {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
-                    Text(stageLabel).appFont(.caption).foregroundStyle(.secondary)
+                    Text(stageLabel).appFont(.caption).foregroundStyle(TUFFDesign.secondaryTextColor)
                     Spacer()
                 }
             }
@@ -340,25 +310,25 @@ struct ModelCatalogRow: View {
                   + "Remove and Retry clears it and downloads again.",
                   systemImage: "exclamationmark.triangle.fill")
                 .appFont(.caption)
-                .foregroundStyle(.orange)
+                .foregroundStyle(TUFFMacTheme.accentTextColor)
                 .fixedSize(horizontal: false, vertical: true)
         }
         switch install.state {
         case .failed(let text):
             Label(text, systemImage: "exclamationmark.triangle.fill")
                 .appFont(.caption)
-                .foregroundStyle(.red)
+                .foregroundStyle(TUFFMacTheme.accentTextColor)
                 .fixedSize(horizontal: false, vertical: true)
         case .recoverable(let text):
-            Label(text, systemImage: "exclamationmark.triangle")
+            Label(text, systemImage: "exclamationmark.triangle.fill")
                 .appFont(.caption)
-                .foregroundStyle(.orange)
+                .foregroundStyle(TUFFMacTheme.accentTextColor)
                 .fixedSize(horizontal: false, vertical: true)
         default:
             if case .failed(let text) = install.readiness, !install.isInstalled {
                 Label(text, systemImage: "exclamationmark.triangle.fill")
                     .appFont(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(TUFFMacTheme.accentTextColor)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -381,14 +351,14 @@ struct ModelCatalogRow: View {
                     Button("Remove and Retry", role: .destructive) {
                         install.clearBlockedInstallPath()
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.tuffProminent)
                     .disabled(!install.canClearInstallPath)
                     .help(blockedPathHelp)
                 } else if !install.isInstalled {
                     Button(install.hasPartialDownload ? "Resume" : "Download") {
                         model.installModel(install)
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.tuffProminent)
                     .disabled(!model.canInstallModel(install))
                     .help(downloadHelp)
                 }
@@ -414,7 +384,7 @@ struct ModelCatalogRow: View {
         if !isSelected, model.isRunning, install.isInstalled {
             Text("Stop the reply to switch")
                 .appFont(.caption2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(TUFFDesign.secondaryTextColor)
         }
         }
         .controlSize(compact ? .small : .regular)
@@ -435,6 +405,7 @@ struct ModelCatalogRow: View {
             if model.isVisionInstallTarget(install),
                let fraction = model.visionInstallProgressFraction {
                 ProgressView(value: fraction)
+                    .animation(.linear(duration: 0.25), value: fraction)
                     .accessibilityLabel("Image support download")
                     .accessibilityValue(Text(MetricFormat.percent(fraction * 100)))
                 HStack {
@@ -443,7 +414,7 @@ struct ModelCatalogRow: View {
                     if let eta = model.visionInstallETAText { Text(eta) }
                 }
                 .appFont(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
+                .foregroundStyle(TUFFDesign.secondaryTextColor)
             }
 
             visionMessage
@@ -455,7 +426,7 @@ struct ModelCatalogRow: View {
                    let visionDescriptor {
                     Text(MetricFormat.storage(visionDescriptor.approximateDownloadBytes))
                         .appFont(.caption2.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(TUFFDesign.secondaryTextColor)
                 }
             }
             .controlSize(compact ? .small : .regular)
@@ -485,7 +456,7 @@ struct ModelCatalogRow: View {
                     Button("Activate Image Support") {
                         model.activateVisionPack()
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.tuffProminent)
                     .disabled(!model.canActivateVisionPack)
                 }
             } else {
@@ -504,7 +475,7 @@ struct ModelCatalogRow: View {
             Button(model.visionDownloadButtonLabel(for: install)) {
                 model.installVisionPack(for: install)
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.tuffSecondary)
             .disabled(!model.canInstallVisionPack(for: install))
             .help("Optional download for this model only. The text model stays installed.")
         }
@@ -514,20 +485,20 @@ struct ModelCatalogRow: View {
     private var visionMessage: some View {
         if !model.isVisionRuntimeSupported {
             Label("Image input requires an M2 or newer Mac", systemImage: "memorychip")
-                .foregroundStyle(.orange)
+                .foregroundStyle(TUFFMacTheme.accentTextColor)
         } else if model.isVisionInstallTarget(install),
                   case .failed(let text) = model.visionInstallState {
             Label(text, systemImage: "exclamationmark.triangle.fill")
-                .foregroundStyle(.red)
+                .foregroundStyle(TUFFMacTheme.accentTextColor)
         } else if model.isVisionInstallTarget(install),
                   case .recoverable(let text) = model.visionInstallState {
-            Label(text, systemImage: "exclamationmark.triangle")
-                .foregroundStyle(.orange)
+            Label(text, systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(TUFFMacTheme.accentTextColor)
         } else if let requirement = model.visionInstallRequirement(for: install),
                   !requirement.canInstall, !visionIsInstalled {
             Label("Free \(MetricFormat.storage(requirement.shortfallBytes)) more storage.",
                   systemImage: "internaldrive")
-                .foregroundStyle(.orange)
+                .foregroundStyle(TUFFMacTheme.accentTextColor)
         }
     }
 
@@ -585,7 +556,7 @@ struct ModelCatalogRow: View {
         switch model.visionInstallationStatus(for: install) {
         case .complete: return "Installed"
         case .partial: return "Needs repair"
-        case .missing: return "Optional"
+        case .missing: return ""
         case .unsupportedLayout: return "Unavailable"
         }
     }
@@ -593,7 +564,7 @@ struct ModelCatalogRow: View {
     private var visionStatusColor: Color {
         if visionIsInstalled { return .green }
         if case .partial = model.visionInstallationStatus(for: install) {
-            return .orange
+            return TUFFMacTheme.accentTextColor
         }
         return .secondary
     }

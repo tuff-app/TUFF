@@ -8,7 +8,6 @@ import TUFFMacPresentation
 struct BenchmarksWorkspaceView: View {
     let model: AppModel
     @Bindable var controller: BenchmarkController
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
         ScrollView {
@@ -22,25 +21,30 @@ struct BenchmarksWorkspaceView: View {
                     setupCard
                     if controller.isRunning || !controller.states.isEmpty {
                         progressCard
+                            .transition(.opacity)
                     }
                     if let error = controller.error {
-                        Label(error, systemImage: "exclamationmark.triangle")
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
                             .appFont(.callout)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(TUFFDesign.secondaryTextColor)
                             .textSelection(.enabled)
+                            .transition(.opacity)
                     }
                     if let result = controller.result {
                         resultCard(result)
+                            .transition(.opacity)
                     }
                 }
             }
-            .frame(maxWidth: 920, alignment: .leading)
-            .padding(28)
-            // Centred in a wide window rather than pinned to the sidebar.
-            .frame(maxWidth: .infinity)
+            // A run starting, moving on to the next model and finishing:
+            // the cards ease in and the rest moves down for them.
+            .animation(TUFFMotion.standard, value: controller.isRunning)
+            .animation(TUFFMotion.standard, value: controller.states.count)
+            .animation(TUFFMotion.standard, value: controller.error)
+            .animation(TUFFMotion.standard, value: controller.result != nil)
+            .workspaceColumn()
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .workspacePageChrome()
         .task { controller.refresh() }
     }
 
@@ -49,13 +53,11 @@ struct BenchmarksWorkspaceView: View {
     private var emptyCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("No models installed").appFont(.headline)
-            Text("Install a model on the Models screen, then come back to benchmark it.")
+            Text("Install a model in the Models tab, then come back to benchmark it.")
                 .appFont(.callout)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(TUFFDesign.secondaryTextColor)
         }
-        .padding(18)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(cardBackground, in: RoundedRectangle(cornerRadius: 16))
+        .tuffCard()
     }
 
     private var setupCard: some View {
@@ -66,7 +68,8 @@ struct BenchmarksWorkspaceView: View {
                 Button(allSelected ? "Select None" : "Select All") {
                     controller.selected = allSelected ? [] : Set(controller.installed.map(\.id))
                 }
-                .buttonStyle(.link)
+                .buttonStyle(.tuffSecondary)
+                .controlSize(.small)
                 .disabled(controller.isRunning)
             }
             VStack(spacing: 0) {
@@ -77,12 +80,9 @@ struct BenchmarksWorkspaceView: View {
             }
             Divider()
             HStack(alignment: .center, spacing: 14) {
-                Picker("Length", selection: $controller.mode) {
-                    ForEach(AppBenchmarkMode.allCases) { Text($0.title).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .fixedSize()
+                TUFFTabBar(tabs: AppBenchmarkMode.allCases, selection: $controller.mode,
+                           title: \.title, compact: true)
+                    .fixedSize()
                 .disabled(controller.isRunning)
                 .help("Quick runs each test once. Standard runs each three times, which the leaderboard uses.")
                 Spacer(minLength: 8)
@@ -98,15 +98,13 @@ struct BenchmarksWorkspaceView: View {
                         Label("Run Benchmark", systemImage: "play.fill")
                     }
                     .help("Chat's model is unloaded first. Avoid chatting while it runs.")
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.tuffProminent)
                     .controlSize(.large)
                     .disabled(!controller.canStart || model.isRunning)
                 }
             }
         }
-        .padding(18)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(cardBackground, in: RoundedRectangle(cornerRadius: 16))
+        .tuffCard()
     }
 
     private func modelRow(_ item: AppBenchmarkModel) -> some View {
@@ -121,11 +119,11 @@ struct BenchmarksWorkspaceView: View {
                 if item.descriptor.source.installedBytes > 50_000_000_000 {
                     Text("Slow on most Macs")
                         .appFont(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(TUFFDesign.secondaryTextColor)
                 }
                 Text(Self.gigabytes(item.descriptor.source.installedBytes))
                     .appFont(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(TUFFDesign.secondaryTextColor)
                     .frame(minWidth: 64, alignment: .trailing)
             }
         }
@@ -142,11 +140,14 @@ struct BenchmarksWorkspaceView: View {
                 if controller.isRunning {
                     Text("\(Int(controller.progress * 100))%")
                         .appFont(.callout.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(TUFFDesign.secondaryTextColor)
+                        .contentTransition(.numericText(value: controller.progress))
+                        .animation(.smooth(duration: 0.4), value: controller.progress)
                 }
             }
             if controller.isRunning {
                 ProgressView(value: controller.progress)
+                    .animation(.smooth(duration: 0.4), value: controller.progress)
             }
             ForEach(controller.installed.filter { controller.states[$0.id] != nil }) { item in
                 HStack(spacing: 10) {
@@ -156,13 +157,11 @@ struct BenchmarksWorkspaceView: View {
                     Spacer()
                     Text(stateText(controller.states[item.id]))
                         .appFont(.callout)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(TUFFDesign.secondaryTextColor)
                 }
             }
         }
-        .padding(18)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(cardBackground, in: RoundedRectangle(cornerRadius: 16))
+        .tuffCard()
     }
 
     private func resultCard(_ result: AppBenchmarkResult) -> some View {
@@ -171,7 +170,7 @@ struct BenchmarksWorkspaceView: View {
                 Text("Results").appFont(.headline)
                 Text(result.machine.shortDescription)
                     .appFont(.callout)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(TUFFDesign.secondaryTextColor)
                 Spacer()
             }
             Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 10) {
@@ -198,7 +197,7 @@ struct BenchmarksWorkspaceView: View {
                         } else {
                             Text(run.error ?? run.status.rawValue.capitalized)
                                 .appFont(.callout)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(TUFFDesign.secondaryTextColor)
                                 .gridCellColumns(5)
                         }
                     }
@@ -206,7 +205,7 @@ struct BenchmarksWorkspaceView: View {
             }
             Text("Writes is decode speed. Reads prompt is how fast a 1,500-token prompt is processed. First token is the wait for that prompt; Follow-up is the same wait when TUFF reuses the earlier conversation.")
                 .appFont(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(TUFFDesign.secondaryTextColor)
             Divider()
             HStack(spacing: 10) {
                 Button {
@@ -214,7 +213,7 @@ struct BenchmarksWorkspaceView: View {
                 } label: {
                     Label("Share on GitHub", systemImage: "square.and.arrow.up")
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.tuffProminent)
                 .disabled(result.completedRuns.isEmpty)
                 Button("Show File") { controller.revealResult() }
                 Button("Leaderboard") { NSWorkspace.shared.open(AppBenchmarkShare.leaderboardURL) }
@@ -222,11 +221,9 @@ struct BenchmarksWorkspaceView: View {
             }
             Text(controller.shareNote ?? "Sharing posts this table in TUFF's Benchmarks discussions from your GitHub account. It includes your chip, memory, macOS version and these timings, and nothing else.")
                 .appFont(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(TUFFDesign.secondaryTextColor)
         }
-        .padding(18)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(cardBackground, in: RoundedRectangle(cornerRadius: 16))
+        .tuffCard()
     }
 
     // MARK: - Pieces
@@ -238,7 +235,7 @@ struct BenchmarksWorkspaceView: View {
     private func header(_ title: String) -> some View {
         Text(title)
             .appFont(.caption.weight(.semibold))
-            .foregroundStyle(.secondary)
+            .foregroundStyle(TUFFDesign.secondaryTextColor)
     }
 
     @ViewBuilder
@@ -246,16 +243,16 @@ struct BenchmarksWorkspaceView: View {
         switch check?.passed {
         case true?:
             Image(systemName: "checkmark.circle.fill")
-                .foregroundStyle(TUFFMacTheme.accentColor)
+                .foregroundStyle(TUFFMacTheme.accentTextColor)
                 .help("Answered the check question correctly")
                 .accessibilityLabel("Check passed")
         case false?:
             Image(systemName: "xmark.circle.fill")
-                .foregroundStyle(.red)
+                .foregroundStyle(TUFFMacTheme.accentTextColor)
                 .help("Answered the check question wrongly: \(check?.answer ?? "")")
                 .accessibilityLabel("Check failed")
         case nil:
-            Text("n/a").foregroundStyle(.secondary)
+            Text("n/a").foregroundStyle(TUFFDesign.secondaryTextColor)
         }
     }
 
@@ -269,11 +266,11 @@ struct BenchmarksWorkspaceView: View {
         case .running?:
             ProgressView().controlSize(.small)
         case .finished(.completed)?:
-            Image(systemName: "checkmark.circle.fill").foregroundStyle(TUFFMacTheme.accentColor)
+            Image(systemName: "checkmark.circle.fill").foregroundStyle(TUFFMacTheme.accentTextColor)
         case .finished(.failed)?:
-            Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
+            Image(systemName: "xmark.circle.fill").foregroundStyle(TUFFMacTheme.accentTextColor)
         case .finished?:
-            Image(systemName: "minus.circle").foregroundStyle(.secondary)
+            Image(systemName: "minus.circle").foregroundStyle(TUFFDesign.secondaryTextColor)
         default:
             Image(systemName: "circle").foregroundStyle(.tertiary)
         }
@@ -295,9 +292,6 @@ struct BenchmarksWorkspaceView: View {
         }
     }
 
-    private var cardBackground: AnyShapeStyle {
-        TUFFMacTheme.surfaceStyle(reduceTransparency: reduceTransparency)
-    }
 
     static func gigabytes(_ bytes: UInt64) -> String {
         String(format: "%.1f GB", Double(bytes) / 1e9)

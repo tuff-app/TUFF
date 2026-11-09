@@ -17,20 +17,24 @@ struct ModelStatusBadge: View {
         }
     }
 
-    @ViewBuilder
+    /// One dot whose color eases between states instead of being swapped.
     private var statusDot: some View {
-        switch model.presentation.severity {
-        case .neutral: dot(.gray)
-        // Working, not failing: the same purple the phase label and the send
-        // button use, rather than a caution colour for an ordinary load.
-        case .active: dot(TUFFMacTheme.accentColor)
-        case .warning: dot(.orange)
-        case .success: dot(.green)
-        case .error: dot(.red)
-        }
+        Circle()
+            .fill(dotColor)
+            .frame(width: 8, height: 8)
+            .animation(TUFFMotion.standard, value: model.presentation.severity)
+            .accessibilityHidden(true)
     }
 
-    private func dot(_ color: Color) -> some View {
-        Circle().fill(color).frame(width: 8, height: 8).accessibilityHidden(true)
+    private var dotColor: Color {
+        switch model.presentation.severity {
+        case .neutral: .gray
+        // Working, not failing: the same purple the phase label and the send
+        // button use, rather than a caution colour for an ordinary load.
+        case .active: TUFFMacTheme.accentTextColor
+        case .warning: TUFFMacTheme.accentTextColor
+        case .success: .green
+        case .error: TUFFMacTheme.accentTextColor
+        }
     }
 }

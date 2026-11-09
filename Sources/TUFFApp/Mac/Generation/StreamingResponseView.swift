@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 import TUFFAppCore
 import TUFFMacPresentation
 import SwiftUI
@@ -6,9 +7,10 @@ import SwiftUI
 /// The answer currently being generated.
 ///
 /// Tokens arrive faster than SwiftUI wants to rebuild a view, so this one keeps
-/// the streaming fast path: a mailbox drained on a timer, the new suffix
-/// appended to the text storage, and the whole response re-rendered as Markdown
-/// exactly once, when the run ends. It reports the height it needs, so it sits
+/// the streaming fast path: a mailbox drained on every display frame, the new
+/// suffix appended to the text storage, and the whole response re-rendered as
+/// Markdown exactly once, when the run ends. With smoothing on, a pacer reveals
+/// the arrived text at a steady rate instead of in the engine's batches. It reports the height it needs, so it sits
 /// in the transcript's scroll view as an ordinary message rather than bringing
 /// a second scroll view along with it.
 struct StreamingResponseView: NSViewRepresentable {
@@ -18,6 +20,7 @@ struct StreamingResponseView: NSViewRepresentable {
     var mailbox: GenerationTranscriptMailbox?
     var isTerminal: Bool
     var showsPrefillPlaceholder: Bool
+    var smoothsText: Bool = true
     /// The zoom. The streamed answer is an attributed string built with baked
     /// point sizes, so the controller is made for one scale and the view is
     /// rebuilt (see the `id` at the call site) if that changes.
@@ -30,7 +33,12 @@ struct StreamingResponseView: NSViewRepresentable {
         var mailbox: GenerationTranscriptMailbox?
         var isTerminal = false
         var showsPrefillPlaceholder = false
-        var timer: Timer?
+        var smoothsText = true
+        var pacer = StreamingTextPacer()
+        /// The placeholder request last handed to the document controller.
+        private var appliedPlaceholderRequest: Bool?
+        private var appliedTerminal = false
+        var displayLink: CADisplayLink?
         var prefillAnimationTimer: Timer?
         let documentController: StreamingResponseDocumentController
 
@@ -40,35 +48,54 @@ struct StreamingResponseView: NSViewRepresentable {
 
         func attach(_ textView: MessageTextView) {
             self.textView = textView
-            guard timer == nil else { return }
-            let timer = Timer(timeInterval: 0.1, target: self,
-                              selector: #selector(drainMailbox),
-                              userInfo: nil, repeats: true)
-            timer.tolerance = 0.02
-            RunLoop.main.add(timer, forMode: .common)
-            self.timer = timer
+            guard displayLink == nil else { return }
+            // Drawn in step with the screen rather than on a 100 ms timer,
+            // which beat against the engine's own 100 ms batches.
+            let link = textView.displayLink(target: self, selector: #selector(frame))
+            link.add(to: .main, forMode: .common)
+            displayLink = link
         }
 
         func synchronize(
             text: String,
             mailbox: GenerationTranscriptMailbox?,
             isTerminal: Bool,
-            showsPrefillPlaceholder: Bool
+            showsPrefillPlaceholder: Bool,
+            smoothsText: Bool
         ) {
             self.mailbox = mailbox
             self.isTerminal = isTerminal
             self.showsPrefillPlaceholder = showsPrefillPlaceholder
-            apply(response: mailbox?.drain().completeText ?? text)
+            self.smoothsText = smoothsText
+            render(complete: mailbox?.drain().completeText ?? text)
         }
 
-        @objc private func drainMailbox() {
-            guard let mailbox else { return }
-            let snapshot = mailbox.drain()
-            guard !snapshot.pendingText.isEmpty
-                    || snapshot.completeText != documentController.response else {
+        @objc private func frame() {
+            render(complete: mailbox?.drain().completeText ?? pacer.target)
+        }
+
+        /// Shows `complete` (everything that has arrived), paced unless
+        /// smoothing is off or the run is over, which show it all at once.
+        private func render(complete: String) {
+            let now = CACurrentMediaTime()
+            pacer.receive(complete, at: now)
+            if !smoothsText || isTerminal {
+                let all = pacer.flush()
+                if !all.utf8.elementsEqual(documentController.response.utf8)
+                    || appliedPlaceholderRequest != showsPrefillPlaceholder
+                    || isTerminal != appliedTerminal {
+                    apply(response: all)
+                }
                 return
             }
-            apply(response: snapshot.completeText)
+            if let shown = pacer.advance(to: now) {
+                apply(response: shown)
+            } else if pacer.displayed.isEmpty, !documentController.response.isEmpty {
+                // A new answer started: clear the old one.
+                apply(response: "")
+            } else if appliedPlaceholderRequest != showsPrefillPlaceholder {
+                apply(response: pacer.displayed)
+            }
         }
 
         @objc private func animatePrefillPlaceholderIfNeeded() {
@@ -87,6 +114,8 @@ struct StreamingResponseView: NSViewRepresentable {
         private func apply(response: String) {
             guard let textView, let storage = textView.textStorage else { return }
             let selection = textView.selectedRanges.map(\.rangeValue)
+            appliedPlaceholderRequest = showsPrefillPlaceholder
+            appliedTerminal = isTerminal
             storage.beginEditing()
             let update = documentController.synchronize(
                 storage: storage,
@@ -133,8 +162,8 @@ struct StreamingResponseView: NSViewRepresentable {
         }
 
         func invalidate() {
-            timer?.invalidate()
-            timer = nil
+            displayLink?.invalidate()
+            displayLink = nil
             prefillAnimationTimer?.invalidate()
             prefillAnimationTimer = nil
             mailbox = nil
@@ -157,7 +186,8 @@ struct StreamingResponseView: NSViewRepresentable {
             text: text,
             mailbox: mailbox,
             isTerminal: isTerminal,
-            showsPrefillPlaceholder: showsPrefillPlaceholder)
+            showsPrefillPlaceholder: showsPrefillPlaceholder,
+            smoothsText: smoothsText)
     }
 
     static func dismantleNSView(_ nsView: MessageTextView, coordinator: Coordinator) {

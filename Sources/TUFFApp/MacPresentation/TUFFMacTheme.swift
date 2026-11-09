@@ -90,6 +90,45 @@ public enum TUFFMacTheme {
     @MainActor
     public static var accentColor: Color { Color(nsColor: accentNSColor) }
 
+    /// The accent for text, icons and outlines: the chosen color, darkened in
+    /// light mode or lightened in dark mode until it reads at 3:1 on the page.
+    /// A pale custom accent otherwise made accent text invisible (white menu
+    /// labels on white rows). Fills keep `accentColor` exactly.
+    @MainActor
+    public static var accentTextColor: Color {
+        let accent = accentNSColor
+        return Color(nsColor: NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            var resolved = NSColor.black
+            appearance.performAsCurrentDrawingAppearance {
+                resolved = accent.usingColorSpace(.sRGB) ?? accent
+            }
+            let page = TUFFDesign.page
+            var pageResolved = NSColor.black
+            appearance.performAsCurrentDrawingAppearance {
+                pageResolved = page.usingColorSpace(.sRGB) ?? page
+            }
+            let target: NSColor = isDark ? .white : .black
+            var color = resolved
+            var step: CGFloat = 0
+            while TUFFDesign.contrast(color, pageResolved) < 3, step < 1 {
+                step += 0.1
+                color = resolved.blended(withFraction: step, of: target) ?? color
+            }
+            return color
+        })
+    }
+
+    /// Text and icons drawn on an accent fill: white, or black when the
+    /// accent is light enough that white would not read (a custom white or
+    /// pale accent made the New Chat plus and Send label disappear).
+    @MainActor
+    public static var onAccentColor: Color {
+        let color = accentNSColor.usingColorSpace(.sRGB) ?? accentNSColor
+        return TUFFDesign.contrast(color, .white) >= TUFFDesign.contrast(color, .black)
+            ? .white : .black
+    }
+
     @MainActor
     public static var markWingNSColor: NSColor { TUFFAccentThemeStore.shared.markWingNSColor }
 

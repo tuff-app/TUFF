@@ -16,8 +16,9 @@ struct InfoPopoverButton: View {
             Image(systemName: "info.circle")
                 .appFont(.caption2)
                 .foregroundStyle(.tertiary)
-                .frame(width: 16, height: 16)
+                .frame(width: 24, height: 24)
                 .contentShape(Rectangle())
+                .tuffHoverGlass()
         }
         .buttonStyle(.plain)
         .help(text)

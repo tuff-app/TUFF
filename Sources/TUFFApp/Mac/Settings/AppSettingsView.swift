@@ -9,7 +9,8 @@ import SwiftUI
 struct AppSettingsView: View {
     @Bindable var model: AppModel
     @Bindable var updateController: AppUpdateController
-    @State private var section: AppSettingsSection = .general
+    /// Chosen by the Settings tab bar, which this view sits under.
+    let section: AppSettingsSection
     @State private var profileModelID = ""
     /// Holds text the user is mid-typing into the hex field until it parses,
     /// so an incomplete value (e.g. "6F4") isn't snapped back to the last
@@ -18,22 +19,7 @@ struct AppSettingsView: View {
     @State private var autoLearningMessage: String?
 
     var body: some View {
-        VStack(spacing: 0) {
-            Picker("Settings section", selection: $section) {
-                ForEach(AppSettingsSection.allCases) { item in
-                    Label(item.title, systemImage: item.systemImage)
-                        .tag(item)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .controlSize(.large)
-            .frame(maxWidth: 520)
-            .padding(.horizontal, 28)
-            .padding(.top, 20)
-            .padding(.bottom, 10)
-            .accessibilityLabel("Settings section")
-
+        VStack(alignment: .leading, spacing: 0) {
             Group {
                 switch section {
                 case .general: generalSettings
@@ -43,89 +29,97 @@ struct AppSettingsView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            // Settings controls read as full-size rows rather than the compact
-            // system default, so a pop-up here is a comfortable target.
-            .controlSize(.large)
             .id(section)
+            .transition(.opacity)
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .animation(TUFFMotion.standard, value: section)
+        // A setting that shows or hides the rows under it: they ease in and
+        // the cards below move, instead of the page jumping.
+        .animation(TUFFMotion.standard, value: rowsKey)
+        .tuffPageBackground()
+    }
+
+    /// The settings whose value decides which rows the page has.
+    private var rowsKey: String {
+        let profile = selectedProfile
+        return "\(model.accentColorMode)\(model.bypassModelRestrictions)\(updateController.isAvailable)"
+            + "\(profile.automaticMemory)\(profile.topKEnabled)\(profile.topPEnabled)"
+            + "\(autoLearningMessage ?? "")\(selectedProfileInstall.id)"
     }
 
     private var generalSettings: some View {
         Form {
             Section("Chat") {
-                Picker("Send message with", selection: $model.newlineShortcut) {
-                    ForEach(AppNewlineShortcut.sendMessageOptions) { shortcut in
-                        Text(shortcut.sendMessageLabel).tag(shortcut)
-                    }
-                }
-                Picker("After sending", selection: $model.sentPromptBehavior) {
-                    ForEach(AppSentPromptBehavior.allCases) { behavior in
-                        Text(behavior.settingsLabel).tag(behavior)
-                    }
-                }
+                GlassMenuPicker("Send message with", selection: $model.newlineShortcut,
+                                options: AppNewlineShortcut.sendMessageOptions,
+                                label: { $0.sendMessageLabel })
+                GlassMenuPicker("After sending", selection: $model.sentPromptBehavior,
+                                options: AppSentPromptBehavior.allCases,
+                                label: { $0.settingsLabel })
                 Toggle("Show prompt examples", isOn: $model.showPromptExamples)
+                Toggle("Smooth text while it streams", isOn: $model.smoothStreaming)
+                    .help("Shows an answer at a steady pace instead of in bursts. "
+                        + "The answer and its speed are the same either way.")
             }
             Section("Appearance") {
-                Picker("Zoom", selection: $model.zoomLevel) {
-                    ForEach(AppZoomLevel.allCases) { level in
-                        Text(level.settingsLabel).tag(level)
-                    }
-                }
-                .pickerStyle(.segmented)
-                Text("Scales the whole interface — text, icons, and controls. "
-                    + "Also on the View menu as Zoom In (⌘+), Zoom Out (⌘−), "
-                    + "and Actual Size (⌘0).")
-                    .appFont(.caption)
-                    .foregroundStyle(.secondary)
-                Picker("Accent color", selection: $model.accentColorMode) {
-                    ForEach(AppAccentColorMode.allCases) { mode in
-                        Text(mode.settingsLabel).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
+                GlassChoiceRow(title: "Appearance", selection: $model.appearanceMode,
+                               options: AppAppearanceMode.allCases, label: \.settingsLabel)
+                Toggle("Translucent window", isOn: $model.translucentWindow)
+                    .help("Shows the desktop, blurred, behind the chat. "
+                        + "Reduce Transparency in System Settings turns it off too.")
+                GlassChoiceRow(title: "Zoom", selection: $model.zoomLevel,
+                               options: AppZoomLevel.allCases, label: \.settingsLabel)
+                Text("Also in the View menu: ⌘+, ⌘− and ⌘0.")
+                    .settingsNote()
+                    .help("Scales text, icons and controls. Also in the View menu: "
+                    + "Zoom In (⌘+), Zoom Out (⌘−) and Actual Size (⌘0).")
+                GlassChoiceRow(title: "Accent color", selection: $model.accentColorMode,
+                               options: AppAccentColorMode.allCases, label: \.settingsLabel)
                 if model.accentColorMode == .custom {
-                    ColorPicker("Custom color", selection: customAccentColorBinding, supportsOpacity: false)
-                    LabeledContent("Hex value") {
-                        TextField("6F4DFF", text: customAccentColorHexFieldBinding)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 100)
-                            .multilineTextAlignment(.trailing)
+                    // One row: the hex value and a round swatch that opens the
+                    // color panel.
+                    LabeledContent("Custom color") {
+                        HStack(spacing: TUFFDesign.Space.xs) {
+                            TextField("6F4DFF", text: customAccentColorHexFieldBinding)
+                                .tuffField()
+                                .frame(width: 90)
+                                .multilineTextAlignment(.trailing)
+                                .monospaced()
+                            ColorPicker("Custom color", selection: customAccentColorBinding,
+                                        supportsOpacity: false)
+                                .labelsHidden()
+                                .frame(width: 28, height: 24)
+                        }
                     }
                 } else if model.accentColorMode == .system {
                     Text("Follows the accent color set in System Settings.")
-                        .appFont(.caption)
-                        .foregroundStyle(.secondary)
+                        .settingsNote()
                 }
             }
             Section("Model restrictions") {
                 Toggle("Bypass model restrictions",
                        isOn: $model.bypassModelRestrictions)
-                Text("TUFF normally hides Download and Load for models this Mac "
+                Text("Allows models larger than this Mac's memory budget.")
+                    .settingsNote()
+                    .help("TUFF normally hides Download and Load for models this Mac "
                     + "does not meet the requirements for, and refuses to load "
                     + "any model whose context and expert cache exceed "
                     + "\(MetricFormat.memory(model.deviceCapabilities.safeAppMemoryBudgetBytes)), "
                     + "the share of this Mac's memory it plans against. Turning "
                     + "this on removes both gates.")
-                    .appFont(.caption)
-                    .foregroundStyle(.secondary)
                 if model.bypassModelRestrictions {
-                    Label("A model that does not fit will swap heavily, and macOS "
-                        + "can terminate TUFF while it is loading or generating. "
-                        + "The download stays on disk.",
+                    Label("Models that don't fit can swap heavily or be quit by macOS.",
                           systemImage: "exclamationmark.triangle.fill")
-                        .appFont(.caption)
-                        .foregroundStyle(.orange)
+                        .settingsNote(tone: .warning)
                 }
             }
             Section("Startup") {
                 Toggle("Load the selected model at launch",
                        isOn: $model.loadModelOnLaunch)
-                Text("TUFF will only load when the model is installed and it "
-                    + "is allowed to load — a memory profile within budget, or "
-                    + "restrictions bypassed.")
-                    .appFont(.caption)
-                    .foregroundStyle(.secondary)
+                Text("Only if the model fits this Mac's memory budget.")
+                    .settingsNote()
+                    .help("Only when the model is installed and fits this Mac's "
+                    + "memory budget, or restrictions are bypassed.")
             }
             Section("Updates") {
                 if updateController.isAvailable {
@@ -141,42 +135,39 @@ struct AppSettingsView: View {
                         updateController.checkForUpdates()
                     }
                     .disabled(!updateController.canCheckForUpdates)
-                    Text("Updates come from TUFF's GitHub Releases feed. Each "
+                    Text("Signed releases from GitHub.")
+                        .settingsNote()
+                        .help("Updates come from TUFF's GitHub Releases feed. Each "
                         + "download must pass Sparkle's embedded EdDSA signature "
                         + "check before it can be installed.")
-                        .appFont(.caption)
-                        .foregroundStyle(.secondary)
                 } else {
                     Label(
                         updateController.unavailableReason
                             ?? "Updates are unavailable in this build.",
                         systemImage: "exclamationmark.shield")
-                        .foregroundStyle(.secondary)
-                    Text("Clone builds stay usable, but only packaged builds with "
+                        .foregroundStyle(TUFFDesign.secondaryTextColor)
+                    Text("Only packaged builds can install updates.")
+                        .settingsNote()
+                        .help("Clone builds stay usable, but only packaged builds with "
                         + "TUFF's update-signing public key can install releases.")
-                        .appFont(.caption)
-                        .foregroundStyle(.secondary)
                 }
             }
         }
-        .formStyle(.grouped)
+        .formStyle(TUFFFormStyle())
         .scrollContentBackground(.hidden)
     }
 
     private func modelSettings(advanced: Bool) -> some View {
         Form {
             Section("Profile") {
-                Picker("Model", selection: profileModelBinding) {
-                    ForEach(model.installs) { install in
-                        Text(install.descriptor.shortName).tag(install.id)
-                    }
-                }
+                GlassMenuPicker("Model", selection: profileModelBinding,
+                                options: model.installs.map(\.id),
+                                label: { id in model.installs.first { $0.id == id }?.descriptor.shortName ?? "" })
                 if selectedProfileInstall.id == model.selectedModelID,
                    model.hasStaleLoadedRuntime {
                     Label("Reload the model to apply memory changes.",
                           systemImage: "arrow.clockwise")
-                        .appFont(.caption)
-                        .foregroundStyle(.secondary)
+                        .settingsNote()
                 }
             }
             if advanced {
@@ -190,7 +181,7 @@ struct AppSettingsView: View {
                 samplingSettings
             }
         }
-        .formStyle(.grouped)
+        .formStyle(TUFFFormStyle())
         .scrollContentBackground(.hidden)
         .disabled(model.isRunning || model.loadState.isLoading
             || model.isVisionCompanionOperationInProgress)
@@ -200,15 +191,12 @@ struct AppSettingsView: View {
         Section("Memory") {
             Toggle("Auto", isOn: automaticMemoryBinding)
             if selectedProfile.automaticMemory {
-                Picker("Auto profile", selection: profileBinding(\.automaticMemoryProfile)) {
-                    ForEach(AppAutomaticMemoryProfile.allCases) { profile in
-                        Text(profileLabel(profile)).tag(profile)
-                    }
-                }
-                .pickerStyle(.segmented)
+                GlassChoiceRow(title: "Auto profile",
+                               selection: profileBinding(\.automaticMemoryProfile),
+                               options: AppAutomaticMemoryProfile.allCases,
+                               label: { profileLabel($0) })
                 Text(selectedProfile.automaticMemoryProfile.explanation)
-                    .appFont(.caption)
-                    .foregroundStyle(.secondary)
+                    .settingsNote()
                 DisclosureGroup("Auto tuning") {
                     Button("Tune Auto on this Mac") { model.tuneAutomaticMemory() }
                         .disabled(selectedProfileInstall.id != model.selectedModelID || !model.canTuneAutomaticMemory)
@@ -221,37 +209,36 @@ struct AppSettingsView: View {
                         } catch { autoLearningMessage = String(describing: error) }
                     }
                     if let autoLearningMessage {
-                        Text(autoLearningMessage).appFont(.caption).foregroundStyle(.secondary)
+                        Text(autoLearningMessage).appFont(.caption).foregroundStyle(TUFFDesign.secondaryTextColor)
                     }
                 }
             }
             Group {
-                Picker("Context", selection: profileBinding(\.contextTokens)) {
-                    ForEach(AppContextLengthOption.options(for: selectedProfileInstall.descriptor)) { option in
-                        let eligibility = contextEligibility(
-                            tokens: option.tokens,
-                            slots: selectedProfile.expertCacheSlots)
-                        Text(contextLabel(option, eligibility: eligibility))
-                            .tag(option.tokens)
-                            .disabled(!eligibility.isCompatible)
-                    }
-                }
+                GlassMenuPicker("Context", selection: profileBinding(\.contextTokens),
+                                options: AppContextLengthOption.options(for: selectedProfileInstall.descriptor).map(\.tokens),
+                                label: { tokens in
+                                    guard let option = AppContextLengthOption.options(for: selectedProfileInstall.descriptor)
+                                        .first(where: { $0.tokens == tokens }) else { return MetricFormat.tokens(tokens) }
+                                    return contextLabel(option, eligibility: contextEligibility(
+                                        tokens: tokens, slots: selectedProfile.expertCacheSlots))
+                                },
+                                isEnabled: { tokens in
+                                    contextEligibility(tokens: tokens, slots: selectedProfile.expertCacheSlots).isCompatible
+                                })
                 if selectedProfileInstall.descriptor.usesExpertCache {
-                    Picker("Expert cache", selection: expertCacheSlotsBinding) {
-                        ForEach(selectedProfileInstall.descriptor.usefulExpertCacheSlotCounts,
-                                id: \.self) { slots in
-                            let eligibility = contextEligibility(
-                                tokens: selectedProfile.contextTokens,
-                                slots: slots)
-                            Text(selectedProfile.automaticMemory ? "\(slots) slots"
-                                : "\(slots) slots (" + MetricFormat.memory(eligibility.estimatedWorkingSetBytes) + " total)")
-                                .tag(slots)
-                                .disabled(!eligibility.isCompatible)
-                        }
-                    }
+                    GlassMenuPicker("Expert cache", selection: expertCacheSlotsBinding,
+                                    options: selectedProfileInstall.descriptor.usefulExpertCacheSlotCounts,
+                                    label: { slots in
+                                        selectedProfile.automaticMemory ? "\(slots) slots"
+                                            : "\(slots) slots (" + MetricFormat.memory(contextEligibility(
+                                                tokens: selectedProfile.contextTokens, slots: slots).estimatedWorkingSetBytes) + " total)"
+                                    },
+                                    isEnabled: { slots in
+                                        contextEligibility(tokens: selectedProfile.contextTokens, slots: slots).isCompatible
+                                    })
                 } else {
                     LabeledContent("Expert cache", value: "Not used by this dense model")
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(TUFFDesign.secondaryTextColor)
                 }
             }
             .disabled(selectedProfile.automaticMemory)
@@ -266,8 +253,7 @@ struct AppSettingsView: View {
             }
             if automaticPlan == nil, let explanation = eligibility.explanation {
                 Label(explanation, systemImage: "exclamationmark.triangle.fill")
-                    .appFont(.caption)
-                    .foregroundStyle(.orange)
+                    .settingsNote(tone: .warning)
                 Text(model.bypassModelRestrictions
                      ? "Bypass model restrictions is on, so TUFF will still load "
                         + "this. If the Mac runs out of memory the app may be "
@@ -275,8 +261,7 @@ struct AppSettingsView: View {
                      : "TUFF will not load the model at these settings. Lower "
                         + "Context or Expert cache, switch this model to Auto, "
                         + "or turn on Bypass model restrictions in General.")
-                    .appFont(.caption)
-                    .foregroundStyle(.secondary)
+                    .settingsNote()
             }
         }
     }
@@ -285,21 +270,34 @@ struct AppSettingsView: View {
     /// each model carries its own.
     private var systemPromptSettings: some View {
         Section("System prompt") {
+            // A padded, rounded well like the message box, not a bare black
+            // text view flush with the card.
             TextEditor(text: profileBinding(\.systemPrompt))
                 .appFont(.body)
+                .scrollContentBackground(.hidden)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 8)
                 .frame(minHeight: 96)
+                .background(TUFFDesign.insetColor,
+                            in: RoundedRectangle(cornerRadius: TUFFDesign.Radius.control, style: .continuous))
                 .overlay(alignment: .topLeading) {
                     if selectedProfile.systemPrompt.isEmpty {
                         Text("Sent ahead of every chat with this model.")
                             .appFont(.body)
                             .foregroundStyle(.tertiary)
-                            .padding(.leading, 5)
+                            .padding(.leading, 12)
                             .padding(.top, 8)
                             .allowsHitTesting(false)
                     }
                 }
                 .accessibilityLabel("System prompt")
             HStack {
+                Text("Applies from the next message.")
+                    .appFont(.caption)
+                    .foregroundStyle(TUFFDesign.secondaryTextColor)
+                    .help("Sent as a system message before the conversation. It applies "
+                        + "from the next message; answers already given were not "
+                        + "written with it.")
                 Spacer()
                 Button("Restore Default") {
                     var profile = selectedProfile
@@ -309,12 +307,8 @@ struct AppSettingsView: View {
                 .disabled(selectedProfile.systemPrompt
                     == selectedProfileInstall.descriptor.defaultSystemPrompt)
                 .help("Restore TUFF's default prompt for this model")
+                .controlSize(.small)
             }
-            Text("Sent as a system message before the conversation. It applies "
-                 + "from the next message; answers already given were not "
-                 + "written with it.")
-                .appFont(.caption)
-                .foregroundStyle(.secondary)
         }
     }
 
@@ -324,29 +318,23 @@ struct AppSettingsView: View {
             Section("Reasoning default") {
                 switch control {
                 case .toggle, .toggleWithPreservation:
-                    Picker("Thinking", selection: profileBinding(\.defaultReasoning)) {
-                        Text("Off").tag(ChatReasoning.off)
-                        Text("On").tag(ChatReasoning.on)
-                    }
-                    .pickerStyle(.segmented)
+                    GlassChoiceRow(title: "Thinking", selection: profileBinding(\.defaultReasoning),
+                                   options: [ChatReasoning.off, .on],
+                                   label: { $0 == .on ? "On" : "Off" })
                 case .graded:
-                    Picker("Effort", selection: profileBinding(\.defaultReasoningEffort)) {
-                        ForEach(GPTOSSReasoningEffort.allCases, id: \.self) { effort in
-                            Text(effort.rawValue.capitalized).tag(effort)
-                        }
-                    }
-                    .pickerStyle(.segmented)
+                    GlassChoiceRow(title: "Effort", selection: profileBinding(\.defaultReasoningEffort),
+                                   options: GPTOSSReasoningEffort.allCases,
+                                   label: { $0.rawValue.capitalized })
                 case .alwaysOn:
                     LabeledContent("Thinking", value: "Always On")
-                    Text("This model always reasons before answering. TUFF keeps "
+                    Text("Reasoning is kept separate from the answer.")
+                        .settingsNote()
+                        .help("This model always reasons before answering. TUFF keeps "
                         + "that reasoning separate from the visible answer.")
-                        .appFont(.caption)
-                        .foregroundStyle(.secondary)
                 }
                 if control != .alwaysOn {
                     Text("Chat can override this for the current conversation.")
-                        .appFont(.caption)
-                        .foregroundStyle(.secondary)
+                        .settingsNote()
                 }
             }
         }
@@ -389,11 +377,9 @@ struct AppSettingsView: View {
         Group {
             Section("Runtime") {
                 if selectedProfileInstall.descriptor.projectionLayerCount > 0 {
-                    Picker("Projection residency", selection: projectionResidencyBinding) {
-                        Text("Resident").tag("resident")
-                        Text("Partial").tag("partial")
-                        Text("Streamed").tag("streamed")
-                    }.disabled(selectedProfile.automaticMemory)
+                    GlassMenuPicker("Projection residency", selection: projectionResidencyBinding,
+                                    options: ["resident", "partial", "streamed"],
+                                    label: { $0.capitalized }).disabled(selectedProfile.automaticMemory)
                     if let count = selectedProfile.denseResidentLayerCount, count > 0 {
                         Stepper(value: projectionLayerBinding,
                                 in: 1...max(1, selectedProfileInstall.descriptor.projectionLayerCount - 1)) {
@@ -401,7 +387,7 @@ struct AppSettingsView: View {
                         }.disabled(selectedProfile.automaticMemory)
                     }
                     Text("Resident keeps projection weights in RAM. Streamed reads each layer as needed and may be very slow. Auto manages this choice while preserving your manual setting.")
-                        .appFont(.caption).foregroundStyle(.secondary)
+                        .appFont(.caption).foregroundStyle(TUFFDesign.secondaryTextColor)
                 }
                 Toggle("Chunked prefill", isOn: profileBinding(\.prefillEnabled))
                     .disabled(selectedProfile.automaticMemory
@@ -409,36 +395,32 @@ struct AppSettingsView: View {
                         < RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill)
                 if selectedProfile.automaticMemory {
                     Text("Auto manages chunked prefill with this model's memory plan.")
-                        .appFont(.caption)
-                        .foregroundStyle(.secondary)
+                        .settingsNote()
                 } else if selectedProfile.expertCacheSlots
                     < RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill {
                     Text("Chunked prefill needs at least "
                         + "\(RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill) "
                         + "expert-cache slots.")
-                        .appFont(.caption)
-                        .foregroundStyle(.secondary)
+                        .settingsNote()
                 }
-                Picker("RDADVISE", selection: profileBinding(\.rdadvisePolicy)) {
-                    ForEach(AppRDAdvicePolicy.allCases) { policy in
-                        Text(policy.label).tag(policy)
-                    }
-                }
-                Text("RDADVISE is experimental. Changes to memory mapping apply "
+                GlassMenuPicker("RDADVISE", selection: profileBinding(\.rdadvisePolicy),
+                                options: AppRDAdvicePolicy.allCases,
+                                label: { $0.label })
+                Text("Experimental. Applies after a reload.")
+                    .settingsNote()
+                    .help("RDADVISE is experimental. Changes to memory mapping apply "
                     + "after the selected model is reloaded.")
-                    .appFont(.caption)
-                    .foregroundStyle(.secondary)
             }
             if selectedProfileInstall.descriptor.reasoningControl
                 == .toggleWithPreservation {
                 Section("Thinking history") {
                     Toggle("Preserve thinking in later prompts",
                            isOn: profileBinding(\.preserveThinking))
-                    Text("When enabled, Qwen receives its earlier thinking text as "
+                    Text("Sends earlier thinking back to the model.")
+                        .settingsNote()
+                        .help("When enabled, Qwen receives its earlier thinking text as "
                         + "part of conversation history. TUFF always keeps that text "
                         + "available for you in the transcript.")
-                        .appFont(.caption)
-                        .foregroundStyle(.secondary)
                 }
             }
             Section("Location") {
@@ -586,5 +568,248 @@ struct AppSettingsView: View {
         guard let rgb = NSColor(color).usingColorSpace(.deviceRGB) else { return nil }
         return AppHexColor(
             red: rgb.redComponent, green: rgb.greenComponent, blue: rgb.blueComponent)
+    }
+}
+
+/// Options on a capsule track with one Liquid Glass capsule under the chosen
+/// one. The capsule is a single shape that moves and resizes, so it glides
+/// across any distance. Hovering brightens it, or shows a faint wash under an
+/// option that is not chosen. Used for the Settings tabs (with icons) and for
+/// every segmented choice in Settings (compact, text only). In a narrow
+/// window, tabs with icons drop the labels of the unchosen ones.
+struct TUFFTabBar<Tab: Hashable>: View {
+    let tabs: [Tab]
+    @Binding var selection: Tab
+    let title: (Tab) -> String
+    var systemImage: ((Tab) -> String)? = nil
+    var compact = false
+    /// Off where the bar sits inside another glass shape (the thinking
+    /// control), which already is the track.
+    var showsTrack = true
+    /// Each tab's frame, per layout (with and without labels), since the
+    /// window can switch between them.
+    @State private var frames: [FrameKey: CGRect] = [:]
+    @State private var hovered: Tab?
+    /// The option under the pointer while the glass is being dragged; it is
+    /// chosen when the drag ends.
+    @State private var dragged: Tab?
+    /// The pointer's x while dragging; the glass follows it directly.
+    @State private var dragX: CGFloat?
+    @Namespace private var pillSpace
+    /// Just after a drag: the dragged glass glides into the chosen slot
+    /// before the tab's own glass takes over, so it does not pop.
+    @State private var settling = false
+
+    /// The glass's frame: the chosen option's, or while dragging, the
+    /// width of the option under the pointer centred on the pointer,
+    /// kept inside the bar.
+    private func pillFrame(labels: Bool) -> CGRect? {
+        guard let base = frames[FrameKey(labels: labels, tab: dragged ?? selection)] else { return nil }
+        guard let x = dragX else { return base }
+        let all = tabs.compactMap { frames[FrameKey(labels: labels, tab: $0)] }
+        let lower = all.map(\.minX).min() ?? base.minX
+        let upper = (all.map(\.maxX).max() ?? base.maxX) - base.width
+        var frame = base
+        frame.origin.x = min(max(x - base.width / 2, lower), upper)
+        return frame
+    }
+
+    private struct FrameKey: Hashable {
+        let labels: Bool
+        let tab: Tab
+    }
+
+    var body: some View {
+        if systemImage == nil {
+            bar(labels: true)
+        } else {
+            ViewThatFits(in: .horizontal) {
+                bar(labels: true)
+                bar(labels: false)
+            }
+        }
+    }
+
+    private func bar(labels: Bool) -> some View {
+        HStack(spacing: 2) {
+            ForEach(tabs, id: \.self) { tab in
+                let isSelected = tab == selection
+                Button {
+                    selection = tab
+                } label: {
+                    Group {
+                        if let systemImage {
+                            if labels || isSelected {
+                                Label(title(tab), systemImage: systemImage(tab))
+                            } else {
+                                Image(systemName: systemImage(tab))
+                            }
+                        } else {
+                            Text(title(tab))
+                        }
+                    }
+                    .appFont(.callout.weight(isSelected ? .semibold : .medium))
+                    .foregroundStyle((dragged ?? selection) == tab ? AnyShapeStyle(.primary)
+                                                : AnyShapeStyle(TUFFDesign.secondaryTextColor))
+                    .lineLimit(1)
+                    .fixedSize()
+                    .padding(.horizontal, compact ? 12 : 14)
+                    .frame(minHeight: compact ? 26 : 30)
+                    .background {
+                        if isSelected && dragX == nil && !settling {
+                            // Laid out with the tab itself, so the glass moves
+                            // in the same pass as the tabs (when the whole bar
+                            // moves with the sidebar, say), and slides to the
+                            // next tab as one matched shape.
+                            TUFFGlassPill(isHovered: hovered == tab)
+                                .matchedGeometryEffect(id: labels, in: pillSpace)
+                        } else if !isSelected && hovered == tab {
+                            Capsule().fill(Color.primary.opacity(0.06))
+                        }
+                    }
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .onHover { inside in
+                    if inside { hovered = tab } else if hovered == tab { hovered = nil }
+                }
+                .help(title(tab))
+                .accessibilityLabel(title(tab))
+                .accessibilityAddTraits(isSelected ? .isSelected : [])
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(TabSpace.name)) } action: {
+                    frames[FrameKey(labels: labels, tab: tab)] = $0
+                }
+            }
+        }
+        .padding(compact ? 3 : 4)
+        // While dragging, the glass follows the pointer, placed from the
+        // measured tab frames.
+        .background(alignment: .topLeading) {
+            if dragX != nil || settling, let frame = pillFrame(labels: labels) {
+                TUFFGlassPill(isHovered: true)
+                    .frame(width: frame.width, height: frame.height)
+                    .offset(x: frame.minX, y: frame.minY)
+            }
+        }
+        // Drag the glass across the options: it follows the pointer, and
+        // the option it is let go on is chosen.
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 4, coordinateSpace: .named(TabSpace.name))
+                .onChanged { value in
+                    let x = value.location.x
+                    var follow = Transaction()
+                    follow.animation = .interactiveSpring(response: 0.12, dampingFraction: 0.9)
+                    withTransaction(follow) {
+                        dragX = x
+                        if let tab = tabs.first(where: { tab in
+                            guard let frame = frames[FrameKey(labels: labels, tab: tab)] else { return false }
+                            return x >= frame.minX - 1 && x <= frame.maxX + 1
+                        }) {
+                            dragged = tab
+                        }
+                    }
+                }
+                .onEnded { _ in
+                    settling = true
+                    withAnimation(TUFFMotion.standard) {
+                        if let dragged { selection = dragged }
+                        dragged = nil
+                        dragX = nil
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        var still = Transaction()
+                        still.disablesAnimations = true
+                        withTransaction(still) { settling = false }
+                    }
+                })
+        .coordinateSpace(name: TabSpace.name)
+        .background(showsTrack ? Color.primary.opacity(0.06) : .clear, in: Capsule())
+        .animation(dragX == nil ? TUFFMotion.standard : nil, value: selection)
+        .animation(TUFFMotion.hover, value: hovered)
+        .accessibilityElement(children: .contain)
+    }
+}
+
+private enum TabSpace { static let name = "TUFFTabBar" }
+
+/// A labeled settings row whose choice is a glass segmented control.
+struct GlassChoiceRow<Value: Hashable>: View {
+    let title: String
+    @Binding var selection: Value
+    let options: [Value]
+    let label: (Value) -> String
+
+    var body: some View {
+        LabeledContent(title) {
+            TUFFTabBar(tabs: options, selection: $selection, title: label, compact: true)
+                .fixedSize()
+        }
+    }
+}
+
+/// A dropdown as a glass capsule: the current choice and a small chevron,
+/// brightening on hover, opening a menu of plain buttons with a checkmark on
+/// the chosen one. (A `Picker` nested in the menu drew misaligned checkmarks
+/// and an empty checked row.)
+struct GlassMenuPicker<Value: Hashable>: View {
+    let title: String
+    @Binding var selection: Value
+    let options: [Value]
+    let label: (Value) -> String
+    var isEnabled: ((Value) -> Bool)? = nil
+    @State private var isHovered = false
+    @Environment(\.isEnabled) private var controlEnabled
+
+    init(_ title: String, selection: Binding<Value>, options: [Value],
+         label: @escaping (Value) -> String, isEnabled: ((Value) -> Bool)? = nil) {
+        self.title = title
+        _selection = selection
+        self.options = options
+        self.label = label
+        self.isEnabled = isEnabled
+    }
+
+    var body: some View {
+        LabeledContent(title) {
+            Menu {
+                ForEach(options, id: \.self) { option in
+                    Button {
+                        selection = option
+                    } label: {
+                        if option == selection {
+                            Label(label(option), systemImage: "checkmark")
+                        } else {
+                            Text(label(option))
+                        }
+                    }
+                    .disabled(!(isEnabled?(option) ?? true))
+                }
+            } label: {
+                HStack(spacing: 7) {
+                    Text(label(selection))
+                        .lineLimit(1)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .appFont(.caption2.weight(.bold))
+                        .foregroundStyle(TUFFDesign.secondaryTextColor)
+                }
+                .appFont(.callout.weight(.medium))
+                .foregroundStyle(controlEnabled ? AnyShapeStyle(.primary)
+                                                : AnyShapeStyle(TUFFDesign.tertiaryTextColor))
+                .padding(.leading, 14)
+                .padding(.trailing, 11)
+                .frame(minHeight: 30)
+                .tuffGlass(Capsule(), highlighted: isHovered && controlEnabled)
+                .contentShape(Capsule())
+                .scaleEffect(isHovered && controlEnabled ? 1.03 : 1)
+                .animation(TUFFMotion.hover, value: isHovered)
+            }
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .onHover { isHovered = $0 }
+            .accessibilityLabel(title)
+            .accessibilityValue(label(selection))
+        }
     }
 }

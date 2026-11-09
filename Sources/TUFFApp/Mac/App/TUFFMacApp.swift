@@ -91,13 +91,15 @@ struct TUFFMacApp: App {
                 updateController: updateController)
                 .sheet(isPresented: $isReportingBug) { BugReportSheet(model: model) }
                 .task { backgroundAPI.refreshRegistrationAfterUpdate() }
-                .alert("Recovery Update", isPresented: Binding(
+                .tuffConfirm("Recovery Update", isPresented: Binding(
                     get: { updateController.recoveryMessage != nil },
-                    set: { if !$0 { updateController.recoveryMessage = nil } })) {
-                    Button("OK") { updateController.recoveryMessage = nil }
-                    Button("Check for Updates…") { updateController.checkForUpdates() }
-                        .disabled(!updateController.canCheckForUpdates)
-                } message: { Text(updateController.recoveryMessage ?? "") }
+                    set: { if !$0 { updateController.recoveryMessage = nil } }),
+                    message: updateController.recoveryMessage,
+                    symbol: "arrow.triangle.2.circlepath",
+                    confirm: "Check for Updates…", cancel: "OK",
+                    canConfirm: updateController.canCheckForUpdates) {
+                    updateController.checkForUpdates()
+                }
                 // Scaled with the zoom: at 150% the text and the columns that
                 // hold it are half again as wide, so the smallest window that
                 // still fits the layout grows with it.
@@ -118,19 +120,12 @@ struct TUFFMacApp: App {
                 }
                 // On the window, not in the Inspector: the menu item works
                 // whether or not the Inspector is open.
-                .confirmationDialog(
-                    "Remove downloaded image support?",
-                    isPresented: Bindable(model).isConfirmingVisionPackRemoval,
-                    titleVisibility: .visible
-                ) {
-                    Button("Remove Image Support", role: .destructive) {
-                        model.removeVisionPack()
-                    }
-                    Button("Cancel", role: .cancel) {}
-                } message: {
-                    Text("Text generation will continue to work. "
-                        + "Getting image support back means downloading the "
-                        + "pack again.")
+                .tuffConfirm("Remove downloaded image support?",
+                             isPresented: Bindable(model).isConfirmingVisionPackRemoval,
+                             message: "Text generation will continue to work. Getting "
+                                + "image support back means downloading the pack again.",
+                             symbol: "photo", confirm: "Remove Image Support") {
+                    model.removeVisionPack()
                 }
         }
         .windowStyle(.hiddenTitleBar)
@@ -143,9 +138,9 @@ struct TUFFMacApp: App {
             CommandGroup(replacing: .help) {
                 Button("Report a Bug…") { isReportingBug = true }
             }
-            // Into the View menu macOS already puts Enter Full Screen in, not a
-            // `CommandMenu("View")` — that builds a second menu with the same
-            // name and the app ends up with two of them in the bar.
+            // Into the system's own View menu, not a `CommandMenu("View")` —
+            // that builds a second menu with the same name and the app ends
+            // up with two of them in the bar.
             CommandGroup(after: .toolbar) {
                 Button("Zoom In") { model.zoomLevel = model.zoomLevel.zoomedIn }
                     .keyboardShortcut("=", modifiers: .command)

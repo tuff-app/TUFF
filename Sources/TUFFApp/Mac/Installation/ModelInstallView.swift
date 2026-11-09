@@ -29,14 +29,14 @@ struct ModelInstallView: View {
         VStack(spacing: 10) {
             Image(systemName: "externaldrive.badge.plus")
                 .appFont(.system(.largeTitle, design: .rounded))
-                .foregroundStyle(TUFFMacTheme.accentColor)
+                .foregroundStyle(TUFFMacTheme.accentTextColor)
                 .accessibilityHidden(true)
             Text("Choose a model")
                 .appFont(.title.bold())
                 .accessibilityHeading(.h1)
             Text("Download a model to start chatting. You can add more later.")
                 .appFont(.body)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(TUFFDesign.secondaryTextColor)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -47,7 +47,7 @@ struct ModelInstallView: View {
             DisclosureGroup("Install location") {
                 Text(model.modelPathText)
                     .appFont(.caption.monospaced())
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(TUFFDesign.tertiaryTextColor)
                     .lineLimit(2)
                     .truncationMode(.middle)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -60,14 +60,6 @@ struct ModelInstallView: View {
                 }
             }
         }
-        .padding(18)
-        .background {
-            RoundedRectangle(cornerRadius: 20)
-                .fill(Color(nsColor: .controlBackgroundColor))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 20)
-                        .stroke(.separator.opacity(0.5), lineWidth: 0.5)
-                }
-        }
+        .tuffCard()
     }
 }

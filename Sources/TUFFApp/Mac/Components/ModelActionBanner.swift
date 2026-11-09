@@ -6,7 +6,11 @@ struct ModelActionBanner: View {
     @Bindable var model: AppModel
 
     var body: some View {
+        // Not for a model that is merely unloaded: Send loads it first, and
+        // the status strip already says "Not loaded". A permanent bar over
+        // the transcript for that was noise.
         if let action = model.presentation.conversationAction,
+           action != .load,
            model.hasOutputTranscript {
             banner(tint: iconColor(for: action)) {
                 Image(systemName: iconName(for: action))
@@ -14,27 +18,29 @@ struct ModelActionBanner: View {
                     .accessibilityHidden(true)
                 Text(message(for: action))
                     .appFont(.callout)
-                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 8)
                 Button(buttonTitle(for: action)) {
                     model.perform(action)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
+                .buttonStyle(.tuffSecondary)
+                .controlSize(.regular)
             }
+            .transition(.tuffArrival(offsetY: 6))
         } else if let notice = model.presentation.conversationNotice {
             // Shown whether or not anything has been said yet: this is the
             // state where the composer refuses and there is no button to
             // press, so the reason has to be on screen from the start.
-            banner(tint: .orange) {
+            banner(tint: TUFFMacTheme.accentTextColor) {
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(TUFFMacTheme.accentTextColor)
                     .accessibilityHidden(true)
                 Text(notice)
                     .appFont(.callout)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 8)
             }
+            .transition(.tuffArrival(offsetY: 6))
         }
     }
 
@@ -46,16 +52,14 @@ struct ModelActionBanner: View {
         HStack(spacing: 10) {
             content()
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .background {
-            RoundedRectangle(cornerRadius: 14)
-                .fill(Color(nsColor: .controlBackgroundColor))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 14)
-                        .stroke(tint.opacity(0.5), lineWidth: 1)
-                }
-        }
+        .padding(.leading, 16)
+        .padding(.trailing, 10)
+        .padding(.vertical, 10)
+        .frame(minHeight: 48)
+        // The card and hairline every other surface uses; the icon carries
+        // the tone. A colored outline read as an alarm for a routine step.
+        .tuffGlass(RoundedRectangle(cornerRadius: PromptComposerMetrics.cornerRadius,
+                                        style: .continuous), interactive: false)
         .accessibilityElement(children: .contain)
         .transition(.move(edge: .bottom).combined(with: .opacity))
     }
@@ -98,6 +102,6 @@ struct ModelActionBanner: View {
     /// purple like every other "do this next" control. Orange is kept for the
     /// things that really are wrong, and red for a load that failed.
     private func iconColor(for action: AppModelAction) -> Color {
-        action == .retryLoad ? .red : TUFFMacTheme.accentColor
+        action == .retryLoad ? TUFFMacTheme.accentTextColor : TUFFMacTheme.accentTextColor
     }
 }

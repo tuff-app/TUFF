@@ -18,7 +18,7 @@ struct ChatControlsView: View {
         }
         .appFont(.callout)
         .disabled(model.isRunning || model.loadState.isLoading)
-        .animation(.smooth(duration: 0.18), value: showsReasoningChoices)
+        .animation(TUFFMotion.standard, value: showsReasoningChoices)
     }
 
     // Only what is on this Mac. Offering the rest of the catalogue here meant
@@ -53,17 +53,17 @@ struct ChatControlsView: View {
     private var reasoningControl: some View {
         switch model.selectedDescriptor.reasoningControl {
         case .toggle, .toggleWithPreservation:
-            brain(isOn: model.reasoning == .on, help: "Thinking: \(model.reasoning == .on ? "on" : "off")")
-            if showsReasoningChoices {
-                choices([("Off", ChatReasoning.off), ("On", ChatReasoning.on)],
-                        selection: $model.reasoning)
-            }
+            ReasoningMorph(isOn: model.reasoning == .on,
+                           help: "Thinking: \(model.reasoning == .on ? "on" : "off")",
+                           options: [("Off", ChatReasoning.off), ("On", ChatReasoning.on)],
+                           selection: $model.reasoning,
+                           isOpen: $showsReasoningChoices)
         case .graded:
-            brain(isOn: true, help: "Reasoning: \(model.reasoningEffort.rawValue)")
-            if showsReasoningChoices {
-                choices([("Low", GPTOSSReasoningEffort.low), ("Medium", .medium), ("High", .high)],
-                        selection: $model.reasoningEffort)
-            }
+            ReasoningMorph(isOn: true,
+                           help: "Reasoning: \(model.reasoningEffort.rawValue)",
+                           options: [("Low", GPTOSSReasoningEffort.low), ("Medium", .medium), ("High", .high)],
+                           selection: $model.reasoningEffort,
+                           isOpen: $showsReasoningChoices)
         case .alwaysOn:
             ComposerIcon(systemImage: "brain", isOn: true)
                 .help("This model always thinks before answering")
@@ -72,49 +72,72 @@ struct ChatControlsView: View {
             EmptyView()
         }
     }
+}
 
-    private func brain(isOn: Bool, help: String) -> some View {
-        Button {
-            showsReasoningChoices.toggle()
-        } label: {
-            ComposerIcon(systemImage: "brain", isOn: isOn)
-        }
-        .buttonStyle(.plain)
-        .help(help)
-        .accessibilityLabel("Thinking")
-        .accessibilityValue(help)
-    }
+/// The thinking control. Clicked, the round brain button grows into one glass
+/// capsule holding the choices; picking one (or clicking the brain again)
+/// folds it back into the button. One shape throughout, so it reads as the
+/// button opening rather than a second control appearing beside it.
+private struct ReasoningMorph<Value: Hashable>: View {
+    let isOn: Bool
+    let help: String
+    let options: [(String, Value)]
+    @Binding var selection: Value
+    @Binding var isOpen: Bool
+    @State private var isHovered = false
 
-    private func choices<Value: Hashable>(_ options: [(String, Value)],
-                                          selection: Binding<Value>) -> some View {
+    var body: some View {
         HStack(spacing: 2) {
-            ForEach(options, id: \.0) { title, value in
-                let isSelected = selection.wrappedValue == value
-                Button {
-                    selection.wrappedValue = value
-                    showsReasoningChoices = false
-                } label: {
-                    Text(title)
-                        .foregroundStyle(isSelected
-                                         ? AnyShapeStyle(TUFFMacTheme.accentColor)
-                                         : AnyShapeStyle(.secondary))
-                        .padding(.horizontal, 9)
-                        .frame(height: 24)
-                        .background {
-                            if isSelected {
-                                Capsule().fill(TUFFMacTheme.accentColor.opacity(0.14))
+            Button {
+                isOpen.toggle()
+            } label: {
+                Image(systemName: "brain")
+                    .appFont(.body)
+                    .foregroundStyle(isOn ? AnyShapeStyle(TUFFMacTheme.accentTextColor)
+                                     : isHovered ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                    .rotationEffect(.degrees(isOpen ? -8 : 0))
+                    .frame(width: 32, height: 32)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .help(help)
+            .accessibilityLabel("Thinking")
+            .accessibilityValue(help)
+            if isOpen {
+                // The Settings glass selector: the capsule slides to the
+                // choice (or follows a drag), then the control folds back.
+                TUFFTabBar(
+                    tabs: options.map(\.1),
+                    selection: Binding(
+                        get: { selection },
+                        set: { value in
+                            selection = value
+                            // Let the glass settle on the choice, then fold.
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+                                withAnimation(TUFFMotion.emphasized) { isOpen = false }
                             }
-                        }
-                        .contentShape(Capsule())
-                }
-                .buttonStyle(.plain)
-                .accessibilityAddTraits(isSelected ? .isSelected : [])
+                        }),
+                    title: { value in options.first { $0.1 == value }?.0 ?? "" },
+                    compact: true,
+                    showsTrack: false)
+                    .fixedSize()
+                    // Opens out of the brain and folds back into it the
+                    // same way.
+                    .transition(.opacity
+                        .combined(with: .scale(scale: 0.5, anchor: .leading))
+                        .combined(with: .offset(x: -16)))
             }
         }
-        .padding(2)
-        .background(ComposerIcon.background(isOn: false))
+        // No extra inset: the selector's own 3 pt padding is the same on
+        // every side, so its capsule sits concentric inside this one.
+        .tuffGlass(Capsule(),
+                   tint: isOn && !isOpen ? TUFFMacTheme.accentColor.opacity(0.3) : nil,
+                   highlighted: isHovered && !isOpen)
+        .scaleEffect(isHovered && !isOpen ? 1.06 : 1)
+        .onHover { isHovered = $0 }
         .fixedSize()
-        .transition(.opacity.combined(with: .move(edge: .leading)))
+        .animation(TUFFMotion.emphasized, value: isOpen)
+        .animation(TUFFMotion.hover, value: isHovered)
     }
 }
 
@@ -123,13 +146,24 @@ struct ComposerIcon: View {
     let systemImage: String
     let isOn: Bool
     var badge: Color?
+    @State private var isHovered = false
 
     var body: some View {
         Image(systemName: systemImage)
             .appFont(.body)
-            .foregroundStyle(isOn ? AnyShapeStyle(TUFFMacTheme.accentColor) : AnyShapeStyle(.secondary))
-            .frame(width: 28, height: 28)
-            .background(Self.background(isOn: isOn))
+            .foregroundStyle(isOn ? AnyShapeStyle(TUFFMacTheme.accentTextColor)
+                             : isHovered ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+            .frame(width: 32, height: 32)
+            // Glass, tinted with the accent while its option is on.
+            .tuffGlass(Circle(), tint: isOn ? TUFFMacTheme.accentColor.opacity(0.3) : nil,
+                       highlighted: isHovered)
+            .scaleEffect(isHovered ? 1.06 : 1)
+            // Switching on or off springs the tint in or out with a small
+            // bounce of the symbol.
+            .symbolEffect(.bounce, value: isOn)
+            .animation(TUFFMotion.standard, value: isOn)
+            .animation(TUFFMotion.hover, value: isHovered)
+            .onHover { isHovered = $0 }
             .overlay(alignment: .topTrailing) {
                 if let badge {
                     Circle().fill(badge).frame(width: 7, height: 7).offset(x: -2, y: 2)
@@ -138,12 +172,4 @@ struct ComposerIcon: View {
             .contentShape(Circle())
     }
 
-    static func background(isOn: Bool) -> some View {
-        Capsule()
-            .fill(isOn ? TUFFMacTheme.accentColor.opacity(0.14) : Color.primary.opacity(0.06))
-            .overlay {
-                Capsule().stroke(isOn ? TUFFMacTheme.accentColor.opacity(0.35)
-                                 : Color.primary.opacity(0.08), lineWidth: 0.5)
-            }
-    }
 }
