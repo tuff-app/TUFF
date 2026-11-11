@@ -277,12 +277,20 @@ public final class AppModel {
             persistSettings()
         }
     }
-    public var translucentWindow: Bool {
-        get { settingsStore.translucentWindow }
+    public var windowTransparency: Double {
+        get { settingsStore.windowTransparency }
         set {
-            guard settingsStore.translucentWindow != newValue else { return }
-            settingsStore.translucentWindow = newValue
+            let value = MacAppSettings.normalizedWindowTransparency(newValue)
+            guard settingsStore.windowTransparency != value else { return }
+            settingsStore.windowTransparency = value
             persistSettings()
+        }
+    }
+    public var translucentWindow: Bool {
+        get { windowTransparency > 0 }
+        set {
+            if !newValue { windowTransparency = 0 }
+            else if windowTransparency == 0 { windowTransparency = 0.7 }
         }
     }
     public var appearanceMode: AppAppearanceMode {
@@ -614,7 +622,7 @@ public final class AppModel {
         self.settingsStore.loadModelOnLaunch = settings.loadModelOnLaunch
         self.settingsStore.smoothStreaming = settings.smoothStreaming
         self.settingsStore.appearanceMode = settings.appearanceMode
-        self.settingsStore.translucentWindow = settings.translucentWindow
+        self.settingsStore.windowTransparency = settings.windowTransparency
         self.settingsStore.accentColorMode = settings.accentColorMode
         self.customAccentColorHex = settings.customAccentColorHex
         self.settingsStore.zoomLevel = settings.zoomLevel
@@ -2884,7 +2892,7 @@ public final class AppModel {
             settingsStore.loadModelOnLaunch = settings.loadModelOnLaunch
             settingsStore.smoothStreaming = settings.smoothStreaming
             settingsStore.appearanceMode = settings.appearanceMode
-            settingsStore.translucentWindow = settings.translucentWindow
+            settingsStore.windowTransparency = settings.windowTransparency
             settingsStore.accentColorMode = settings.accentColorMode
             customAccentColorHex = settings.customAccentColorHex
             settingsStore.zoomLevel = settings.zoomLevel
@@ -3033,6 +3041,7 @@ public final class AppModel {
         settings.smoothStreaming = smoothStreaming
         settings.appearanceMode = appearanceMode
         settings.translucentWindow = translucentWindow
+        settings.windowTransparency = windowTransparency
         settings.accentColorMode = accentColorMode
         settings.customAccentColorHex = customAccentColorHex
         settings.zoomLevel = zoomLevel

@@ -6,6 +6,32 @@ import TUFFModelCatalog
 @testable import TUFFAppCore
 
 @Suite struct MacAppSettingsTests {
+    @Test(arguments: [false, true])
+    func transparencyMigratesTheOldToggle(enabled: Bool) throws {
+        let data = try JSONEncoder().encode(MacAppSettings())
+        var legacy = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        legacy.removeValue(forKey: "windowTransparency")
+        legacy["translucentWindow"] = enabled
+        let restored = try JSONDecoder().decode(MacAppSettings.self,
+            from: JSONSerialization.data(withJSONObject: legacy))
+        #expect(restored.windowTransparency == (enabled ? 0.7 : 0))
+    }
+
+    @MainActor
+    @Test func transparencyStepsPersistAcrossRelaunchIncludingOpaque() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
+        let model = makeAppModel(modelDirectory: directory, settingsPersistenceEnabled: true)
+        for percentage in [0.3, 0.8, 0.0, 1.0] {
+            model.windowTransparency = percentage
+            model.flushPendingSettings()
+            let restored = makeAppModel(modelDirectory: directory, settingsPersistenceEnabled: true)
+            #expect(restored.windowTransparency == percentage)
+            #expect(restored.translucentWindow == (percentage > 0))
+        }
+    }
+
     @Test func workspacePermissionsDefaultOffAndPersist() throws {
         let data = try JSONEncoder().encode(MacAppSettings())
         var old = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])

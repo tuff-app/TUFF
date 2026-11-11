@@ -22,11 +22,11 @@ struct StatusHUDView: View {
         let collapsed = sidebarIsHidden
         strip
             // Same height whether or not the sidebar is shown. Collapsed, it
-            // only moves right to make room for the sidebar toggle, which
-            // takes the strip's height and glass and sits just before it.
+            // only moves right to make room for the small sidebar toggle,
+            // centred beside it.
             .padding(.top, collapsed ? Self.collapsedTop : Self.contentInset)
             .padding(.leading, collapsed
-                     ? Self.contentInset + Self.stripHeight + 10
+                     ? Self.contentInset + SidebarToggleButton.openSize + 10
                      : Self.contentInset)
             .padding(.trailing, Self.contentInset)
             // The extra top room when collapsed comes out of the bottom

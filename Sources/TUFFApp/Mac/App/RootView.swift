@@ -27,6 +27,7 @@ struct RootView: View {
     let backgroundAPI: AppBackgroundAPIController
     let updateController: AppUpdateController
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
     /// `TUFF_OPEN_SCREEN=models` (or server, settings…) opens that screen
     /// first, for screenshots and testing a screen without clicking to it.
@@ -39,7 +40,7 @@ struct RootView: View {
     /// The chat a Delete is waiting on confirmation for. Deleting has no
     /// undo, so one stray click in a context menu used to lose a chat.
     @State private var deletionTarget: AppConversationRecord?
-    @State private var columnVisibility = NavigationSplitViewVisibility.all
+    @State private var sidebarIsHidden = false
     @State private var footerHovered = false
     /// Each chat row's frame in the list, for the one glass pill that marks
     /// the open chat and slides between rows.
@@ -80,7 +81,7 @@ struct RootView: View {
         // sidebar collapsed, for checking that layout without driving the UI.
         .task {
             if ProcessInfo.processInfo.environment["TUFF_DEBUG_SIDEBAR"] == "hidden" {
-                columnVisibility = .detailOnly
+                sidebarIsHidden = true
             }
         }
         #endif
@@ -106,20 +107,7 @@ struct RootView: View {
         // Translucent: the desktop shows through behind the chat, blurred and
         // tinted with the page color, which is also what the glass controls
         // refract. Reduce Transparency keeps it solid.
-        .containerBackground(for: .window) {
-            if reduceTransparency || !model.translucentWindow {
-                TUFFDesign.pageColor
-            } else {
-                ZStack {
-                    // In light appearance the window-background material is
-                    // itself a nearly opaque grey, so with a tint on top the
-                    // desktop barely showed; the sidebar material stays
-                    // translucent in light.
-                    WindowBlurView(material: colorScheme == .dark ? .underWindowBackground : .fullScreenUI)
-                    TUFFDesign.pageColor.opacity(colorScheme == .dark ? 0.45 : 0.3)
-                }
-            }
-        }
+        .containerBackground(.clear, for: .window)
         .tint(TUFFMacTheme.accentTextColor)
         // The whole window draws as the active window even when another app
         // is in front: text fields, spinners and other system-drawn controls
@@ -198,80 +186,63 @@ struct RootView: View {
         }
     }
 
+    /// One full-window surface, including the title bar. Registering a
+    /// material separately as the native window background let AppKit tint
+    /// the toolbar and content regions differently.
+    private var windowSurface: some View {
+        Group {
+            if navigation.destination != .chat || reduceTransparency || model.windowTransparency == 0 {
+                TUFFDesign.pageColor
+            } else {
+                ZStack {
+                    WindowBlurView(material: colorScheme == .dark ? .underWindowBackground : .fullScreenUI)
+                    TUFFDesign.pageColor.opacity(1 - model.windowTransparency)
+                }
+            }
+        }
+        .ignoresSafeArea()
+    }
+
     /// The sidebar and detail columns are sized in points, so they are scaled
     /// with the text they hold — at 150% an unscaled 160pt sidebar clipped its
     /// own labels.
     private var zoom: CGFloat { model.zoomLevel.scale }
 
-    /// macOS 27 removed the native floating sidebar's outer inset. Keep the
-    /// panel and its content width aligned with the macOS 26 presentation.
-    private var sidebarOuterInset: CGFloat {
-        if #available(macOS 27, *) { return SidebarToggleButton.panelInset }
-        return 0
-    }
+    private let sidebarOuterInset = SidebarToggleButton.panelInset
 
     private var sidebarColumnWidth: CGFloat {
         AppWindowLayout.sidebarIdealWidth * zoom + sidebarOuterInset * 2
     }
 
-    @ViewBuilder private var splitView: some View {
-        NavigationSplitView(columnVisibility: $columnVisibility) {
+    /// A fixed column rather than a native split view: there is no divider,
+    /// saved split position, or second animation controlling its width.
+    private var splitView: some View {
+        HStack(spacing: 0) {
             sidebar
+                .frame(width: AppWindowLayout.sidebarIdealWidth * zoom)
                 .padding(.horizontal, sidebarOuterInset)
-                .background(TUFFDesign.pageColor.ignoresSafeArea())
-                // Fixed width: dragging the divider only made the chat
-                // titles and the header reflow. Scaled with the zoom.
-                .navigationSplitViewColumnWidth(sidebarColumnWidth)
-                .background {
-                    SidebarWidthLock(width: sidebarColumnWidth)
-                        .accessibilityHidden(true)
-                }
-                // Our own toggle (below) replaces the system one.
-                .toolbar(removing: .sidebarToggle)
-        } detail: {
+                .frame(width: sidebarIsHidden ? 0 : sidebarColumnWidth, alignment: .leading)
+                .clipped()
+                .allowsHitTesting(!sidebarIsHidden)
+                .accessibilityHidden(sidebarIsHidden)
             workspace
-                .environment(\.windowSidebarIsHidden, columnVisibility == .detailOnly)
-                // Keeps the window's toolbar once the system sidebar
-                // toggle is gone; without any toolbar item the sidebar
-                // stopped running up under the title bar.
-                .toolbar {
-                    InvisibleToolbarItem()
-                    // Collapsed, outside Chat: a real toolbar button
-                    // beside the traffic lights. A button drawn over the
-                    // title bar there never received the click.
-                    CollapsedSidebarToolbarButton(
-                        isShown: columnVisibility == .detailOnly && navigation.destination != .chat,
-                        action: toggleSidebar)
-                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .environment(\.windowSidebarIsHidden, sidebarIsHidden)
         }
-        .navigationSplitViewStyle(.balanced)
-        // The sidebar's width is fixed, but its edge still showed the
-        // resize pointer. This strip over the edge keeps the arrow.
+        .ignoresSafeArea(.container, edges: .top)
+        .background { windowSurface }
         .overlay(alignment: .topLeading) {
-            if columnVisibility != .detailOnly {
-                Color.clear
-                    .frame(width: 12)
-                    .contentShape(Rectangle())
-                    .pointerStyle(.default)
-                    .padding(.leading, SidebarToggleButton.panelInset + AppWindowLayout.sidebarIdealWidth * zoom - 6)
-                    .ignoresSafeArea()
-            }
+            SidebarToggleButton(collapsed: sidebarIsHidden,
+                                besideStrip: navigation.destination == .chat,
+                                sidebarWidth: AppWindowLayout.sidebarIdealWidth * zoom,
+                                action: toggleSidebar)
+                .ignoresSafeArea()
         }
-        .overlay(alignment: .topLeading) {
-            if columnVisibility != .detailOnly || navigation.destination == .chat {
-                SidebarToggleButton(collapsed: columnVisibility == .detailOnly,
-                                    besideStrip: navigation.destination == .chat,
-                                    sidebarWidth: AppWindowLayout.sidebarIdealWidth * zoom,
-                                    action: toggleSidebar)
-                    .ignoresSafeArea()
-                    .transition(.opacity)
-            }
-        }
-
-        // The native split-view container also reads this value, outside
-        // the sidebar content's environment.
         .environment(\.controlActiveState, .active)
-        .background(SidebarActiveAppearance())
+        .animation(reduceMotion ? nil : TUFFMotion.sidebar, value: sidebarIsHidden)
+        .background(WindowChromeConfiguration())
+        .toolbar { InvisibleToolbarItem() }
+        .toolbarBackground(.hidden, for: .windowToolbar)
     }
 
     private var workspace: some View {
@@ -376,7 +347,7 @@ struct RootView: View {
         // another window becomes key; focus must not restyle navigation.
         .environment(\.controlActiveState, .active)
         .safeAreaInset(edge: .top, spacing: 0) {
-            brandHeader.padding(.top, sidebarOuterInset)
+            brandHeader.padding(.top, sidebarOuterInset + 44)
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             selectedModelFooter.padding(.bottom, sidebarOuterInset)
@@ -385,7 +356,7 @@ struct RootView: View {
             // The floating panel's tone. Opaque on purpose: a blurred,
             // see-through panel took on the wallpaper's color (blue over a
             // blue desktop).
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
+            RoundedRectangle(cornerRadius: AppWindowLayout.sidebarCornerRadius, style: .continuous)
                 .fill(TUFFDesign.sidebarColor)
                 .padding(.vertical, sidebarOuterInset)
                 .ignoresSafeArea(.container, edges: [.top, .bottom])
@@ -393,7 +364,7 @@ struct RootView: View {
         // A quiet edge on the floating panel, drawn by us so it stays when
         // the window is not key.
         .overlay {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
+            RoundedRectangle(cornerRadius: AppWindowLayout.sidebarCornerRadius, style: .continuous)
                 .strokeBorder(Color.primary.opacity(0.10), lineWidth: 1)
                 .padding(.vertical, sidebarOuterInset)
                 .ignoresSafeArea(.container, edges: [.top, .bottom])
@@ -470,9 +441,7 @@ struct RootView: View {
     private static let chatListSpace = "TUFFChatList"
 
     private func toggleSidebar() {
-        withAnimation(TUFFMotion.sidebar) {
-            columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
-        }
+        sidebarIsHidden.toggle()
     }
 
     /// The glass pill's frame: the open (or dragged-over) chat's row, or
@@ -806,82 +775,23 @@ private struct SidebarDestinationRow: View {
     }
 }
 
-/// Keep the native sidebar material active without changing keyboard focus.
-private struct SidebarActiveAppearance: NSViewRepresentable {
-    func makeNSView(context: Context) -> Observer { Observer() }
-    // Not on every SwiftUI update: the walk covers the whole window, and the
-    // material only changes state when the window's key status does.
-    func updateNSView(_ view: Observer, context: Context) {}
+/// Keep the native window frame and its controls. Only the toolbar backing
+/// is hidden; the page's background continues through the title bar.
+struct WindowChromeConfiguration: NSViewRepresentable {
+    func makeNSView(context: Context) -> ChromeView { ChromeView() }
+    func updateNSView(_ view: ChromeView, context: Context) {}
 
-    final class Observer: NSView {
+    final class ChromeView: NSView {
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            NotificationCenter.default.removeObserver(self)
             guard let window else { return }
-            for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
-                NotificationCenter.default.addObserver(
-                    self, selector: #selector(refresh), name: name, object: window)
-            }
-            refresh()
-        }
-
-        @objc func refresh() {
-            DispatchQueue.main.async { [weak self] in
-                guard let root = self?.window?.contentView?.superview else { return }
-                func activateSidebar(in view: NSView) {
-                    if let effect = view as? NSVisualEffectView, effect.material == .sidebar {
-                        effect.state = .active
-                        effect.isEmphasized = true
-                    }
-                    for child in view.subviews { activateSidebar(in: child) }
-                }
-                activateSidebar(in: root)
-            }
-        }
-    }
-}
-
-/// Holds the sidebar column at one width.
-///
-/// `navigationSplitViewColumnWidth` only sets the width the sidebar starts
-/// at: the divider could still be dragged, and macOS kept the dragged width
-/// for later launches.
-private struct SidebarWidthLock: NSViewRepresentable {
-    let width: CGFloat
-
-    func makeNSView(context: Context) -> LockView {
-        let view = LockView()
-        view.width = width
-        return view
-    }
-
-    func updateNSView(_ view: LockView, context: Context) {
-        view.width = width
-    }
-
-    final class LockView: NSView {
-        var width: CGFloat = 0 {
-            didSet { if width != oldValue { apply() } }
-        }
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            apply()
-        }
-
-        private func apply() {
-            // Deferred: this is called inside a SwiftUI update, and changing
-            // the split view there would re-enter its layout.
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.window != nil, self.width > 0 else { return }
-                var ancestor = self.superview
-                while let view = ancestor, !(view is NSSplitView) { ancestor = view.superview }
-                guard let splitView = ancestor as? NSSplitView,
-                      let item = (splitView.delegate as? NSSplitViewController)?.splitViewItems
-                        .first(where: { self.isDescendant(of: $0.viewController.view) }) else { return }
-                if item.minimumThickness != self.width { item.minimumThickness = self.width }
-                if item.maximumThickness != self.width { item.maximumThickness = self.width }
-            }
+            window.titlebarAppearsTransparent = true
+            window.titleVisibility = .hidden
+            window.titlebarSeparatorStyle = .none
+            window.styleMask.insert(.fullSizeContentView)
+            window.toolbarStyle = .unified
+            window.isOpaque = false
+            window.backgroundColor = .clear
         }
     }
 }
@@ -960,15 +870,18 @@ private struct ChatWorkspaceView: View {
             .ignoresSafeArea(.container, edges: .top)
             .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { transcriptWidth = $0 }
             .onChange(of: sidebarIsHidden) { _, _ in
-                frozenTranscriptWidth = transcriptWidth
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.26) {
-                    var settle = Transaction()
-                    settle.disablesAnimations = true
-                    withTransaction(settle) {
-                        frozenTranscriptWidth = nil
-                        if let held = heldChromeHeight { conversationChromeHeight = held }
-                        heldChromeHeight = nil
-                    }
+                if frozenTranscriptWidth == nil { frozenTranscriptWidth = transcriptWidth }
+            }
+            .task(id: sidebarIsHidden) {
+                guard frozenTranscriptWidth != nil else { return }
+                do { try await Task.sleep(for: .milliseconds(260)) }
+                catch { return }
+                var settle = Transaction()
+                settle.disablesAnimations = true
+                withTransaction(settle) {
+                    frozenTranscriptWidth = nil
+                    if let held = heldChromeHeight { conversationChromeHeight = held }
+                    heldChromeHeight = nil
                 }
             }
     }
@@ -1293,10 +1206,9 @@ private struct WindowBlurView: NSViewRepresentable {
     }
 }
 
-/// A toolbar item with nothing in it, so the window keeps a toolbar.
 private struct InvisibleToolbarItem: ToolbarContent {
     var body: some ToolbarContent {
-        if #available(macOS 26.0, *) {
+        if #available(macOS 26, *) {
             ToolbarItem(placement: .primaryAction) { Color.clear.frame(width: 1, height: 1) }
                 .sharedBackgroundVisibility(.hidden)
         } else {
@@ -1306,11 +1218,10 @@ private struct InvisibleToolbarItem: ToolbarContent {
 }
 
 /// Shows or hides the sidebar. Open, a small glass circle at the sidebar's
-/// top right, where the system toggle sat. Collapsed, the same button grows
-/// to the chat strip's height and glass and sits just before the strip, so
-/// the two read as one row. One view throughout, so it moves between the
-/// two places instead of disappearing and reappearing.
-private struct SidebarToggleButton: View {
+/// top right. Collapsed, the same small button is centred beside the chat
+/// strip, or stays beside the window controls in Settings. One view moves
+/// between those positions without changing its size.
+struct SidebarToggleButton: View {
     let collapsed: Bool
     /// In Chat, collapsed, it joins the status strip; elsewhere there is no
     /// strip and it stays small in the title bar row.
@@ -1323,21 +1234,20 @@ private struct SidebarToggleButton: View {
     /// radius. Open, the button is concentric with that corner: its centre
     /// is the corner's centre, so the gap to the top, the right and the
     /// curve between them is the same.
-    static let panelInset: CGFloat = 8.5
-    private static let panelRadius: CGFloat = 20
-    private static let openSize: CGFloat = 30
+    static let panelInset = AppWindowLayout.sidebarPanelInset
+    private static let panelRadius = AppWindowLayout.sidebarCornerRadius
+    static let openSize: CGFloat = 30
     private static let extraInset: CGFloat = 4
 
     var body: some View {
-        let large = collapsed && besideStrip
-        let size: CGFloat = large ? StatusHUDView.stripHeight : Self.openSize
+        let size = Self.openSize
         // Moved in by the same amount from the top and the right, so the
         // two gaps stay equal with a little more room from the corner.
         let openCentre = CGPoint(x: Self.panelInset + sidebarWidth - Self.panelRadius - Self.extraInset,
                                  y: Self.panelInset + Self.panelRadius + Self.extraInset)
         Button(action: action) {
             Image(systemName: "sidebar.left")
-                .appFont(large ? .title3.weight(.medium) : .body.weight(.medium))
+                .appFont(.body.weight(.medium))
                 .foregroundStyle(isHovered ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
                 .frame(width: size, height: size)
                 .tuffGlass(Circle(), highlighted: isHovered)
@@ -1346,37 +1256,16 @@ private struct SidebarToggleButton: View {
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
-        // Collapsed, it sits below the traffic lights at the page's left
-        // margin: in Chat at the strip's size, first in the strip's row;
-        // elsewhere small, above the page title. Kept out of the title bar
-        // row, where the window's toolbar took the clicks.
-        .padding(.top, collapsed ? StatusHUDView.collapsedTop
-                                 : openCentre.y - Self.openSize / 2)
-        .padding(.leading, collapsed ? StatusHUDView.contentInset
-                                     : openCentre.x - Self.openSize / 2)
-        .animation(TUFFMotion.sidebar, value: collapsed)
-        .animation(TUFFMotion.sidebar, value: large)
+        // In Chat it joins the strip below the window controls. In Settings
+        // the small control sits beside them. One view handles every state.
+        .padding(.top, collapsed && besideStrip
+                  ? StatusHUDView.collapsedTop + (StatusHUDView.stripHeight - size) / 2
+                  : openCentre.y - size / 2)
+        .padding(.leading, collapsed ? (besideStrip ? StatusHUDView.contentInset : 110)
+                  : openCentre.x - Self.openSize / 2)
+        .keyboardShortcut("s", modifiers: [.control, .command])
         .animation(TUFFMotion.hover, value: isHovered)
         .help("Show or Hide Sidebar (⌃⌘S)")
         .accessibilityLabel("Toggle sidebar")
-    }
-}
-
-/// The sidebar toggle as a toolbar button, shown beside the traffic lights
-/// while the sidebar is collapsed on a screen without the chat strip.
-private struct CollapsedSidebarToolbarButton: ToolbarContent {
-    let isShown: Bool
-    let action: () -> Void
-
-    var body: some ToolbarContent {
-        ToolbarItem(placement: .navigation) {
-            if isShown {
-                Button(action: action) {
-                    Image(systemName: "sidebar.left")
-                }
-                .help("Show Sidebar (⌃⌘S)")
-                .accessibilityLabel("Show sidebar")
-            }
-        }
     }
 }

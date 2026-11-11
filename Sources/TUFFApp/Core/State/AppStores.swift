@@ -639,7 +639,7 @@ public final class AppSettingsStore {
     public var loadModelOnLaunch = false
     public var smoothStreaming = true
     public var appearanceMode: AppAppearanceMode = .system
-    public var translucentWindow = true
+    public var windowTransparency = 0.7
     public var accentColorMode: AppAccentColorMode = .appDefault
     public var customAccentColorHex: String = AppHexColor.defaultPurple.hexString
     public var zoomLevel: AppZoomLevel = .default

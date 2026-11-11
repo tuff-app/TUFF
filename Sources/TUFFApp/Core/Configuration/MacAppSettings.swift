@@ -179,6 +179,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     var appearanceMode: AppAppearanceMode = .system
     /// The desktop shows through behind the chat, blurred.
     var translucentWindow: Bool = true
+    var windowTransparency: Double = 0.7
     var accentColorMode: AppAccentColorMode = .appDefault
     var customAccentColorHex: String = AppHexColor.defaultPurple.hexString
     var zoomLevel: AppZoomLevel = .default
@@ -247,6 +248,11 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         set { updateDefaultProfile { $0.rdadvisePolicy = newValue } }
     }
 
+    static func normalizedWindowTransparency(_ value: Double) -> Double {
+        guard value.isFinite else { return 0.7 }
+        return (min(1, max(0, value)) * 10).rounded() / 10
+    }
+
     private enum CodingKeys: String, CodingKey {
         case version
         case modelProfiles
@@ -257,6 +263,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         case smoothStreaming
         case appearanceMode
         case translucentWindow
+        case windowTransparency
         case accentColorMode
         case customAccentColorHex
         case bypassModelRestrictions
@@ -357,6 +364,10 @@ struct MacAppSettings: Codable, Equatable, Sendable {
                 AppAppearanceMode.self, forKey: .appearanceMode) ?? .system
             translucentWindow = try container.decodeIfPresent(
                 Bool.self, forKey: .translucentWindow) ?? true
+            windowTransparency = Self.normalizedWindowTransparency(
+                try container.decodeIfPresent(Double.self, forKey: .windowTransparency)
+                    ?? (translucentWindow ? 0.7 : 0))
+            translucentWindow = windowTransparency > 0
             accentColorMode = try container.decodeIfPresent(
                 AppAccentColorMode.self, forKey: .accentColorMode) ?? .appDefault
             customAccentColorHex = try container.decodeIfPresent(

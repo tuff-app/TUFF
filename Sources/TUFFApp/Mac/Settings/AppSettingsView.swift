@@ -87,9 +87,18 @@ struct AppSettingsView: View {
             Section("Appearance") {
                 GlassChoiceRow(title: "Appearance", selection: $model.appearanceMode,
                                options: AppAppearanceMode.allCases, label: \.settingsLabel)
-                Toggle("Translucent window", isOn: $model.translucentWindow)
-                    .help("Shows the desktop, blurred, behind the chat. "
-                        + "Reduce Transparency in System Settings turns it off too.")
+                LabeledContent("Transparency") {
+                    HStack(spacing: 10) {
+                        Slider(value: $model.windowTransparency, in: 0...1, step: 0.1)
+                            .frame(minWidth: 80, maxWidth: 180)
+                            .accessibilityLabel("Window transparency")
+                        Text("\(Int((model.windowTransparency * 100).rounded()))%")
+                            .monospacedDigit()
+                            .frame(width: 42 * model.zoomLevel.scale, alignment: .trailing)
+                    }
+                }
+                .help("Adjusts how much of the blurred desktop shows behind chat. "
+                    + "Reduce Transparency in System Settings keeps it opaque.")
                 GlassChoiceRow(title: "Zoom", selection: $model.zoomLevel,
                                options: AppZoomLevel.allCases, label: \.settingsLabel)
                     .help("Scales text, icons and controls. Also in the View menu: "
