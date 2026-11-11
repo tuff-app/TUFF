@@ -203,14 +203,27 @@ struct RootView: View {
     /// own labels.
     private var zoom: CGFloat { model.zoomLevel.scale }
 
+    /// macOS 27 removed the native floating sidebar's outer inset. Keep the
+    /// panel and its content width aligned with the macOS 26 presentation.
+    private var sidebarOuterInset: CGFloat {
+        if #available(macOS 27, *) { return SidebarToggleButton.panelInset }
+        return 0
+    }
+
+    private var sidebarColumnWidth: CGFloat {
+        AppWindowLayout.sidebarIdealWidth * zoom + sidebarOuterInset * 2
+    }
+
     @ViewBuilder private var splitView: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             sidebar
+                .padding(.horizontal, sidebarOuterInset)
+                .background(TUFFDesign.pageColor.ignoresSafeArea())
                 // Fixed width: dragging the divider only made the chat
                 // titles and the header reflow. Scaled with the zoom.
-                .navigationSplitViewColumnWidth(AppWindowLayout.sidebarIdealWidth * zoom)
+                .navigationSplitViewColumnWidth(sidebarColumnWidth)
                 .background {
-                    SidebarWidthLock(width: AppWindowLayout.sidebarIdealWidth * zoom)
+                    SidebarWidthLock(width: sidebarColumnWidth)
                         .accessibilityHidden(true)
                 }
                 // Our own toggle (below) replaces the system one.
@@ -362,13 +375,19 @@ struct RootView: View {
         // Keep labels, accents and controls at their focused appearance when
         // another window becomes key; focus must not restyle navigation.
         .environment(\.controlActiveState, .active)
-        .safeAreaInset(edge: .top, spacing: 0) { brandHeader }
-        .safeAreaInset(edge: .bottom, spacing: 0) { selectedModelFooter }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            brandHeader.padding(.top, sidebarOuterInset)
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            selectedModelFooter.padding(.bottom, sidebarOuterInset)
+        }
         .background {
             // The floating panel's tone. Opaque on purpose: a blurred,
             // see-through panel took on the wallpaper's color (blue over a
             // blue desktop).
-            TUFFDesign.sidebarColor
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(TUFFDesign.sidebarColor)
+                .padding(.vertical, sidebarOuterInset)
                 .ignoresSafeArea(.container, edges: [.top, .bottom])
         }
         // A quiet edge on the floating panel, drawn by us so it stays when
@@ -376,6 +395,7 @@ struct RootView: View {
         .overlay {
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .strokeBorder(Color.primary.opacity(0.10), lineWidth: 1)
+                .padding(.vertical, sidebarOuterInset)
                 .ignoresSafeArea(.container, edges: [.top, .bottom])
                 .allowsHitTesting(false)
         }

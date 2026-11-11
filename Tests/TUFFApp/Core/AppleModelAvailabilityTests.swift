@@ -19,6 +19,23 @@ import Testing
         #expect(AppleModelAvailability.intelligenceDisabled.action == .openSystemSettings)
         #expect(AppleModelAvailability.preparing.action == .refresh)
         #expect(AppleModelAvailability.unknown.action == .refresh)
+        #expect(AppleModelAvailability.appNotConfigured.action == .none)
+    }
+
+    @Test func cloudEligibilityNeverQueriesSDKWithoutAppEntitlement() {
+        var queried = false
+        let result = AppleModelAvailability.privateCloudAvailability(hasEntitlement: false) {
+            queried = true
+            return .available
+        }
+        #expect(result == .appNotConfigured)
+        #expect(!queried)
+    }
+
+    @Test func entitledCloudStillRequiresDeviceAndServiceAvailability() {
+        for state in [AppleModelAvailability.available, .preparing, .notSupported, .unknown] {
+            #expect(AppleModelAvailability.privateCloudAvailability(hasEntitlement: true) { state } == state)
+        }
     }
 
     @Test func realAvailableAdapter() async throws {
