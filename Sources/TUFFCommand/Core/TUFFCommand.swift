@@ -88,6 +88,9 @@ public enum TUFFCommand {
       bench    Benchmark installed models and optionally share the result on
                GitHub Discussions.
 
+    Apple Foundation Model: --model apple (or apple.on-device),
+    when available on this Mac.
+
     \(modelNames)
 
     Run `tuff prompt --help`, `tuff serve --help` or `tuff bench --help` for
@@ -209,7 +212,7 @@ public enum TUFFCommand {
                     to: &forwarded)
             }
         }
-        if !forwarded.contains("--prefill-chunk-tokens") {
+        if !model.isApple, !forwarded.contains("--prefill-chunk-tokens") {
             forwarded += ["--prefill-chunk-tokens", "auto"]
             if let descriptor = model.descriptor,
                !forwarded.contains("--prefill-chunk-max") {
@@ -221,7 +224,7 @@ public enum TUFFCommand {
             named: "TUFFCLI", beside: executableURL, fileExists: fileExists)
         return .run(
             executableURL: child,
-            arguments: ["--model", model.url.path] + forwarded)
+            arguments: ["--model", model.isApple ? "apple.on-device" : model.url.path] + forwarded)
     }
 
     /// The benchmark runs inside the app executable, which links the same
@@ -266,6 +269,10 @@ public enum TUFFCommand {
                 fileExists: fileExists).deletingLastPathComponent()
             forwarded += ["--models-root", root.path]
         }
+        if !forwarded.contains("--default-model"),
+           let selectedModel, ["apple", "apple.on-device"].contains(selectedModel) {
+            forwarded += ["--default-model", "apple.on-device"]
+        }
         // `default` follows the app, as `tuff prompt` does.
         if !forwarded.contains("--default-model"),
            let selectedModel,
@@ -304,12 +311,18 @@ public enum TUFFCommand {
             environment: environment,
             selectedModel: selectedModel,
             fileExists: fileExists)
-        guard let descriptor = model.descriptor else {
-            throw TUFFCommandError.unknownModel(selection ?? model.url.path)
-        }
-        guard fileExists(model.url.appendingPathComponent("manifest.json").path),
-              fileExists(model.url.appendingPathComponent("verified-install.json").path) else {
-            throw TUFFCommandError.modelNotInstalled(model.url.path)
+        let resolvedSelection: String
+        if model.isApple {
+            resolvedSelection = "apple.on-device"
+        } else {
+            guard let descriptor = model.descriptor else {
+                throw TUFFCommandError.unknownModel(selection ?? model.url.path)
+            }
+            guard fileExists(model.url.appendingPathComponent("manifest.json").path),
+                  fileExists(model.url.appendingPathComponent("verified-install.json").path) else {
+                throw TUFFCommandError.modelNotInstalled(model.url.path)
+            }
+            resolvedSelection = descriptor.selector
         }
 
         let resolvedExecutable = executableURL.resolvingSymlinksInPath().standardizedFileURL
@@ -332,13 +345,14 @@ public enum TUFFCommand {
         return .load(
             launcherURL: launcher,
             arguments: launcherArguments,
-            selection: descriptor.selector,
+            selection: resolvedSelection,
             modelURL: model.url)
     }
 
     private struct ResolvedModel {
         let descriptor: TUFFModelDescriptor?
         let url: URL
+        var isApple: Bool { url.scheme == "apple" }
     }
 
     private static func resolveModel(
@@ -354,6 +368,9 @@ public enum TUFFCommand {
             ?? environment["TUFF_MODEL"]
             ?? selectedModel
             ?? TUFFModelCatalog.default.selector
+        if ["apple", "apple.on-device"].contains(selection) {
+            return ResolvedModel(descriptor: nil, url: URL(string: "apple://on-device")!)
+        }
         if let descriptor = descriptor(selection: selection) {
             return ResolvedModel(
                 descriptor: descriptor,

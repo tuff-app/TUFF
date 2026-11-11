@@ -497,7 +497,10 @@ final class InferenceAdapterWire: @unchecked Sendable {
         return completion.finishReason == "length" ? "max_tokens" : "end_turn"
     }
     private func messagesUsage(_ usage: OpenAIUsage?) -> [String: Any] {
-        ["input_tokens": usage?.promptTokens ?? 0, "output_tokens": usage?.completionTokens ?? 0]
+        if usage?.tokenCountsAvailable == false {
+            return ["input_tokens": NSNull(), "output_tokens": NSNull(), "token_counts_available": false]
+        }
+        return ["input_tokens": usage?.promptTokens ?? 0, "output_tokens": usage?.completionTokens ?? 0]
     }
     private func message(content: [[String: Any]], usage: OpenAIUsage?, reason: String?) -> [String: Any] {
         ["id": id, "type": "message", "role": "assistant", "model": model, "content": content,
@@ -522,6 +525,7 @@ final class InferenceAdapterWire: @unchecked Sendable {
             let usage = completion.usage
             value["usage"] = ["input_tokens": usage.promptTokens, "input_tokens_details": ["cached_tokens": usage.promptTokensDetails.cachedTokens],
                 "output_tokens": usage.completionTokens, "output_tokens_details": ["reasoning_tokens": usage.completionTokensDetails?.reasoningTokens ?? 0], "total_tokens": usage.totalTokens]
+            if usage.tokenCountsAvailable == false { value["usage"] = NSNull() }
             if completion.finishReason == "length" { value["incomplete_details"] = ["reason": "max_output_tokens"] }
             value["tuff_timings_seconds"] = completion.timingSeconds
         }

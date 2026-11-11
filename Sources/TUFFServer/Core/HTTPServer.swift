@@ -478,7 +478,8 @@ final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 modelID: target.requestedID,
                 dialect: target.dialect,
                 preStagedImages: body.stagedImages,
-                attachmentLease: body.lease)
+                attachmentLease: body.lease,
+                appleModel: modelID == "apple.on-device")
             // A router stages images before it knows the model, so the model
             // it chose must take them. Images never pass silently unused.
             if !request.imageFiles.isEmpty, target.visionCapability != "ready" {
@@ -992,6 +993,11 @@ final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     private func usageObject(_ usage: OpenAIUsage) -> [String: Any] {
+        if usage.tokenCountsAvailable == false {
+            return ["prompt_tokens": NSNull(), "completion_tokens": NSNull(),
+                    "total_tokens": NSNull(), "prompt_tokens_details": NSNull(),
+                    "token_counts_available": false]
+        }
         var object: [String: Any] = [
             "prompt_tokens": usage.promptTokens,
             "completion_tokens": usage.completionTokens,

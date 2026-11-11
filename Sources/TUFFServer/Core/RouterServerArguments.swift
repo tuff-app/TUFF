@@ -16,7 +16,8 @@ public struct RouterServerArguments: Equatable, Sendable {
     usage: TUFFServer [options]
            TUFFServer --background
 
-    Serves every installed model on one local endpoint. A model loads when a
+    Serves installed models and the available Apple Foundation Model. A local
+    model loads when a
     request names it and unloads after it has been idle. Requests that name
     `default` use the default model. Each model uses its memory settings from
     the app's Settings > Models, within this Mac's memory budget. /v1/models
@@ -95,7 +96,8 @@ public struct RouterServerArguments: Equatable, Sendable {
                 }
                 arguments.port = parsed
             case "--default-model":
-                guard ServerInstalledModels.descriptor(named: value) != nil else {
+                guard ["apple", "apple.on-device"].contains(value)
+                    || ServerInstalledModels.descriptor(named: value) != nil else {
                     throw ServerArgumentError.invalid("unknown model: \(value)")
                 }
                 arguments.defaultModel = value

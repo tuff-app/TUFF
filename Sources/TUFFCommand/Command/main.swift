@@ -64,7 +64,8 @@ do {
         preferences?.set(selection, forKey: "model")
         let status = try run(launcher, arguments: arguments)
         if status == 0 {
-            print("Loading \(selection) from \(modelURL.path)")
+            if modelURL.scheme == "apple" { print("Selected Apple Foundation Model") }
+            else { print("Loading \(selection) from \(modelURL.path)") }
         }
         exit(status)
     }

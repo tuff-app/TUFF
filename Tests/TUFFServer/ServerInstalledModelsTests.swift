@@ -75,7 +75,8 @@ import TUFFDecodeProtocol
         return HostRoutedModelProvider(installed: .init(modelsRoot: root, device: .init(
             unifiedMemoryBytes: memory, macOSMajorVersion: 26, appleSiliconGeneration: 2)),
             settings: .init(url: nil, fallback: .init(defaultModel: "gemma4-e2b")),
-            link: HostServingLink(launching: refuse, existing: refuse))
+            link: HostServingLink(launching: refuse, existing: refuse),
+            appleAvailability: { .notSupported })
     }
 
     /// An imported checkpoint is offered under a name made from its own,

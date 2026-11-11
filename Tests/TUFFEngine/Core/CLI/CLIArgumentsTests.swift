@@ -444,3 +444,16 @@ import TUFFEngine
     }
 
 }
+
+extension CLIArgumentsTests {
+    @Test func appleRejectsEngineAndUnsupportedSamplingOptions() throws {
+        let base = ["--model", "apple.on-device", "--chat-prompt", "Hello"]
+        #expect(try Args.parse(base).model == "apple.on-device")
+        #expect(try Args.parse(["--model", "apple", "--prompt", "--top-k"]).prompt == "--top-k")
+        for options in [["--max-context", "8192"], ["--top-k", "64"], ["--top-p", "0.9"], ["--seed", "2"],
+                        ["--prefill-chunk-tokens", "auto"], ["--memory-auto"],
+                        ["--speculative", "off"]] {
+            #expect(throws: ArgsError.self) { try Args.parse(base + options) }
+        }
+    }
+}

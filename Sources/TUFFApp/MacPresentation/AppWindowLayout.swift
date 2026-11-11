@@ -5,6 +5,7 @@ public enum AppWindowLayout {
     public static let minimumHeight: CGFloat = 440
     public static let defaultWidth: CGFloat = 1_080
     public static let defaultHeight: CGFloat = 720
+    // Reference geometry from the macOS 26 product screenshots.
     public static let windowCornerRadius: CGFloat = 28
     public static let sidebarPanelInset: CGFloat = 8.5
     public static let sidebarCornerRadius = windowCornerRadius - sidebarPanelInset

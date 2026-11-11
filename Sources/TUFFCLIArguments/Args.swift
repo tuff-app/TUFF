@@ -145,7 +145,7 @@ extension Args {
     public static let usage = """
     TUFFCLI — local text generation
 
-    usage: TUFFCLI --model <dir>
+    usage: TUFFCLI --model <dir|apple.on-device>
            (--prompt <string> | --chat-prompt <string> | --messages-file <path>) [options]
 
     `tuff prompt <text> [--model <name|path>]` runs this with the text as the
@@ -153,8 +153,11 @@ extension Args {
     model's own context, cache, temperature, top-k and top-p, so the defaults
     below apply only where neither you nor the model set them.
 
+    Apple uses text, instructions, temperature and output limits only.
+    Engine settings and explicit sampling filters are unavailable for Apple.
+
     required:
-      --model <dir>             Path to a .gturbo model directory.
+      --model <dir|apple>       A .gturbo directory or Apple Foundation Model.
       --prompt <string>         Raw-completion prompt.
       --chat-prompt <string>    Single-turn instruction chat; pairs with --image
       --system-prompt <string>  System message for a single-turn chat.
@@ -285,8 +288,10 @@ extension Args {
         var automaticMemory: Bool? = nil
 
         var index = 0
+        var providedFlags = Set<String>()
         while index < argv.count {
             let flag = argv[index]
+            providedFlags.insert(flag)
             switch flag {
             case "--memory-auto":
                 automaticMemory = true
@@ -494,6 +499,13 @@ extension Args {
             throw ArgsError.invalidValue(
                 flag: "--top-p",
                 value: "\(topP) requires --top-k between 1 and 256")
+        }
+        if ["apple", "apple.on-device"].contains(model) {
+            let supported: Set<String> = ["--model", "--prompt", "--chat-prompt", "--system-prompt",
+                "--messages-file", "--max-new", "--temperature", "--quiet"]
+            if let flag = providedFlags.subtracting(supported).sorted().first {
+                throw ArgsError.invalidValue(flag: flag, value: "unsupported by Apple Foundation Model")
+            }
         }
         var arguments = Args(model: model,
                              prompt: prompt,

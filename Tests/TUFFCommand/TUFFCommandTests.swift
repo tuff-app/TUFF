@@ -279,3 +279,29 @@ struct TUFFCommandTests {
         #expect(TUFFCommand.usage.split(separator: "\n").allSatisfy { $0.count <= 80 })
     }
 }
+
+extension TUFFCommandTests {
+    @Test func applePromptBypassesModelFilesAndMemoryPlanner() throws {
+        for selection in ["apple", "apple.on-device"] {
+            let plan = try TUFFCommand.plan(arguments: ["prompt", "hello", "--model", selection],
+                executableURL: URL(fileURLWithPath: "/repo/.build/debug/TUFFCommand"),
+                currentDirectoryURL: URL(fileURLWithPath: "/repo"),
+                applicationSupportURL: URL(fileURLWithPath: "/support"),
+                fileExists: { $0 == "/repo/.build/debug/TUFFCLI" })
+            guard case .run(_, let arguments) = plan else { Issue.record("expected CLI"); return }
+            #expect(arguments == ["--model", "apple.on-device", "--chat-prompt", "hello"])
+        }
+    }
+}
+
+extension TUFFCommandTests {
+    @Test func loadAppleSelectsProviderWithoutRequiringWeightFiles() throws {
+        let plan = try TUFFCommand.plan(arguments: ["load", "apple"],
+            executableURL: URL(fileURLWithPath: "/repo/.build/debug/TUFFCommand"),
+            currentDirectoryURL: URL(fileURLWithPath: "/repo"),
+            applicationSupportURL: URL(fileURLWithPath: "/support"),
+            fileExists: { $0 == "/repo/.build/debug/TUFF" })
+        guard case .load(_, _, let selection, _) = plan else { Issue.record("expected app selection"); return }
+        #expect(selection == "apple.on-device")
+    }
+}

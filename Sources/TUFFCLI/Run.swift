@@ -19,6 +19,9 @@ public enum CLIRuntimeRegistry {
 
 public func run(args: Args, stdout: FileHandle = .standardOutput,
                 stderr: FileHandle = .standardError) async -> RunResult {
+    if ["apple", AppleModelKind.onDevice.rawValue].contains(args.model) {
+        return await runApple(args: args, stdout: stdout, stderr: stderr)
+    }
     if let runner = CLIRuntimeRegistry.current() { return await runner(args, stdout, stderr) }
     do {
         var args = args

@@ -124,11 +124,14 @@ struct ServerWorkspaceView: View {
     /// Label on the left, control on the right, one row each with a divider
     /// between, as in Settings.
     private var configurationCard: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        let appleReady = AppleModelAvailability.current().canGenerate
+        let appleID = AppleModelKind.onDevice.rawValue
+        let availableIDs = installedModels.map(\.apiModelID) + (appleReady ? [appleID] : [])
+        return VStack(alignment: .leading, spacing: 0) {
             Text("Configuration")
                 .appFont(.headline)
                 .padding(.bottom, TUFFDesign.Space.xxs)
-            if installedModels.isEmpty {
+            if availableIDs.isEmpty {
                 Text("Install a model in the Models tab to serve it.")
                     .appFont(.callout)
                     .foregroundStyle(TUFFDesign.secondaryTextColor)
@@ -138,10 +141,12 @@ struct ServerWorkspaceView: View {
                     GlassMenuPicker("Default model", selection: Binding(
                         get: { controller.defaultModelID },
                         set: { value in controller.update { $0.defaultModel = value } }),
-                        options: installedModels.map(\.apiModelID)
-                            + (installedModels.contains { $0.apiModelID == controller.defaultModelID }
-                               ? [] : [controller.defaultModelID]),
+                        options: availableIDs + (availableIDs.contains(controller.defaultModelID)
+                            ? [] : [controller.defaultModelID]),
                         label: { id in
+                            if id == appleID {
+                                return AppleModelKind.onDevice.name + (appleReady ? "" : " (unavailable)")
+                            }
                             if let installed = installedModels.first(where: { $0.apiModelID == id }) {
                                 return installed.displayName
                             }

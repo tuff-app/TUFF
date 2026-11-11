@@ -26,7 +26,7 @@ struct StatusHUDView: View {
             // centred beside it.
             .padding(.top, collapsed ? Self.collapsedTop : Self.contentInset)
             .padding(.leading, collapsed
-                     ? Self.contentInset + SidebarToggleButton.openSize + 10
+                     ? Self.contentInset + SidebarToggleButton.collapsedSize + 10
                      : Self.contentInset)
             .padding(.trailing, Self.contentInset)
             // The extra top room when collapsed comes out of the bottom

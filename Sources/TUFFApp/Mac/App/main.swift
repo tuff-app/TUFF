@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import TUFFAppCore
+import TUFFMacPresentation
 import TUFFCLICore
 import TUFFServerCore
 
@@ -26,5 +27,15 @@ case .server:
 case .commandLine:
     exit(CLICommand.main(Array(CommandLine.arguments.dropFirst())))
 case .app:
+    if #available(macOS 26, *) {
+        // AppKit's native frame mask keeps the macOS 26 screenshot geometry.
+        // This is an undocumented AppKit preference: scope it to this process,
+        // before any window is created. Never persist it or change global defaults.
+        // Native controls, resizing, glass clipping and shadows remain AppKit-owned.
+        let defaults = UserDefaults.standard
+        var arguments = defaults.volatileDomain(forName: UserDefaults.argumentDomain)
+        arguments["NSConvolutionOverride1"] = Double(AppWindowLayout.windowCornerRadius)
+        defaults.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+    }
     TUFFMacApp.main()
 }

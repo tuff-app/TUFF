@@ -209,6 +209,7 @@ struct RootView: View {
     private var zoom: CGFloat { model.zoomLevel.scale }
 
     private let sidebarOuterInset = SidebarToggleButton.panelInset
+    private let sidebarCornerStyle: RoundedCornerStyle = .continuous
 
     private var sidebarColumnWidth: CGFloat {
         AppWindowLayout.sidebarIdealWidth * zoom + sidebarOuterInset * 2
@@ -356,7 +357,7 @@ struct RootView: View {
             // The floating panel's tone. Opaque on purpose: a blurred,
             // see-through panel took on the wallpaper's color (blue over a
             // blue desktop).
-            RoundedRectangle(cornerRadius: AppWindowLayout.sidebarCornerRadius, style: .continuous)
+            RoundedRectangle(cornerRadius: AppWindowLayout.sidebarCornerRadius, style: sidebarCornerStyle)
                 .fill(TUFFDesign.sidebarColor)
                 .padding(.vertical, sidebarOuterInset)
                 .ignoresSafeArea(.container, edges: [.top, .bottom])
@@ -364,7 +365,7 @@ struct RootView: View {
         // A quiet edge on the floating panel, drawn by us so it stays when
         // the window is not key.
         .overlay {
-            RoundedRectangle(cornerRadius: AppWindowLayout.sidebarCornerRadius, style: .continuous)
+            RoundedRectangle(cornerRadius: AppWindowLayout.sidebarCornerRadius, style: sidebarCornerStyle)
                 .strokeBorder(Color.primary.opacity(0.10), lineWidth: 1)
                 .padding(.vertical, sidebarOuterInset)
                 .ignoresSafeArea(.container, edges: [.top, .bottom])
@@ -1230,27 +1231,23 @@ struct SidebarToggleButton: View {
     let action: () -> Void
     @State private var isHovered = false
 
-    /// The floating sidebar panel's inset from the window and its corner
-    /// radius. Open, the button is concentric with that corner: its centre
-    /// is the corner's centre, so the gap to the top, the right and the
-    /// curve between them is the same.
+    // Keep the control aligned with the titlebar row as native window
+    // corner geometry changes between macOS releases.
     static let panelInset = AppWindowLayout.sidebarPanelInset
-    private static let panelRadius = AppWindowLayout.sidebarCornerRadius
+    private static let titlebarInset: CGFloat = 23.5
     static let openSize: CGFloat = 30
-    private static let extraInset: CGFloat = 4
+    static let collapsedSize = StatusHUDView.stripHeight
 
     var body: some View {
-        let size = Self.openSize
-        // Moved in by the same amount from the top and the right, so the
-        // two gaps stay equal with a little more room from the corner.
-        let openCentre = CGPoint(x: Self.panelInset + sidebarWidth - Self.panelRadius - Self.extraInset,
-                                 y: Self.panelInset + Self.panelRadius + Self.extraInset)
+        let size = collapsed && besideStrip ? Self.collapsedSize : Self.openSize
+        let openCentre = CGPoint(x: Self.panelInset + sidebarWidth - Self.titlebarInset,
+                                 y: Self.panelInset + Self.titlebarInset)
         Button(action: action) {
             Image(systemName: "sidebar.left")
                 .appFont(.body.weight(.medium))
                 .foregroundStyle(isHovered ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
                 .frame(width: size, height: size)
-                .tuffGlass(Circle(), highlighted: isHovered)
+                .tuffChrome(Circle())
                 .contentShape(Circle())
                 .scaleEffect(isHovered ? 1.05 : 1)
         }

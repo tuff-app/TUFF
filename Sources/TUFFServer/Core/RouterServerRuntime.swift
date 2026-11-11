@@ -116,11 +116,11 @@ public enum RouterServerRuntime {
         // and starts the host when none runs. A failure is retried with the
         // first request that needs it.
         do {
-            _ = try await link.attach()
+            if !installed.available().isEmpty { _ = try await link.attach() }
         } catch {
             write("warning: the inference host is not reachable yet: \(error)")
         }
-        let names = installed.available().map(\.apiModelID).joined(separator: ",")
+        let names = provider.modelList().data.map(\.id).joined(separator: ",")
         if apiKey != nil {
             print("Other devices on your network can connect. They must send the API key in "
                 + ServerAPIKey.fileURL(applicationSupport: support).path)

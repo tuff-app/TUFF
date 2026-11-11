@@ -450,6 +450,7 @@ public struct OpenAIUsage: Codable, Equatable, Sendable {
         }
     }
 
+    public let tokenCountsAvailable: Bool?
     public let promptTokens: Int
     public let completionTokens: Int
     public let totalTokens: Int
@@ -458,6 +459,7 @@ public struct OpenAIUsage: Codable, Equatable, Sendable {
     public let completionTokensDetails: CompletionTokensDetails?
 
     enum CodingKeys: String, CodingKey {
+        case tokenCountsAvailable = "token_counts_available"
         case promptTokens = "prompt_tokens"
         case completionTokens = "completion_tokens"
         case totalTokens = "total_tokens"
@@ -469,13 +471,42 @@ public struct OpenAIUsage: Codable, Equatable, Sendable {
                 completionTokens: Int,
                 totalTokens: Int,
                 cachedTokens: Int = 0,
-                reasoningTokens: Int? = nil) {
+                reasoningTokens: Int? = nil,
+                tokenCountsAvailable: Bool? = nil) {
+        self.tokenCountsAvailable = tokenCountsAvailable
         self.promptTokens = promptTokens
         self.completionTokens = completionTokens
         self.totalTokens = totalTokens
         self.promptTokensDetails = PromptTokensDetails(cachedTokens: cachedTokens)
         self.completionTokensDetails = reasoningTokens.map(CompletionTokensDetails.init)
     }
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encodeIfPresent(tokenCountsAvailable, forKey: .tokenCountsAvailable)
+        if tokenCountsAvailable == false {
+            try values.encodeNil(forKey: .promptTokens)
+            try values.encodeNil(forKey: .completionTokens)
+            try values.encodeNil(forKey: .totalTokens)
+            try values.encodeNil(forKey: .promptTokensDetails)
+        } else {
+            try values.encode(promptTokens, forKey: .promptTokens)
+            try values.encode(completionTokens, forKey: .completionTokens)
+            try values.encode(totalTokens, forKey: .totalTokens)
+            try values.encode(promptTokensDetails, forKey: .promptTokensDetails)
+            try values.encodeIfPresent(completionTokensDetails, forKey: .completionTokensDetails)
+        }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        tokenCountsAvailable = try values.decodeIfPresent(Bool.self, forKey: .tokenCountsAvailable)
+        promptTokens = try values.decodeIfPresent(Int.self, forKey: .promptTokens) ?? 0
+        completionTokens = try values.decodeIfPresent(Int.self, forKey: .completionTokens) ?? 0
+        totalTokens = try values.decodeIfPresent(Int.self, forKey: .totalTokens) ?? 0
+        promptTokensDetails = try values.decodeIfPresent(PromptTokensDetails.self, forKey: .promptTokensDetails) ?? .init(cachedTokens: 0)
+        completionTokensDetails = try values.decodeIfPresent(CompletionTokensDetails.self, forKey: .completionTokensDetails)
+    }
+
 }
 
 public struct OpenAIModelList: Codable, Equatable, Sendable {
@@ -688,7 +719,8 @@ public enum OpenAIRequestValidator {
                          modelID: String,
                          dialect: ChatDialect = .gemma,
                          preStagedImages: [String: ServerStagedImage],
-                         attachmentLease: ServerAttachmentLease?) throws -> ValidatedChatRequest {
+                         attachmentLease: ServerAttachmentLease?,
+                         appleModel: Bool = false) throws -> ValidatedChatRequest {
         guard request.model == modelID else { throw ServerRequestError.unknownModel }
         guard request.n == nil || request.n == 1 else {
             throw request.n.map { $0 < 1 } == true
@@ -710,6 +742,13 @@ public enum OpenAIRequestValidator {
         }
         try validateResponseFormat(request.responseFormat)
 
+        let isApple = appleModel || ["apple", "apple.on-device"].contains(modelID)
+        if isApple, request.topK != nil || request.topP != nil || request.seed != nil
+            || !(request.stop?.values.isEmpty ?? true) || request.enableThinking == true
+            || request.reasoningEffort != nil || !(request.tools?.isEmpty ?? true)
+            || (request.repetitionPenalty ?? 1) != 1 {
+            throw invalid("Apple supports text, temperature and output limits; sampling filters, seeds, stops, reasoning, tools and penalties are unsupported", "model", "unsupported_parameter")
+        }
         let temperature = request.temperature ?? 0.2
         guard temperature >= 0, temperature <= 2 else {
             throw invalid("temperature must be between 0 and 2",
@@ -791,8 +830,8 @@ public enum OpenAIRequestValidator {
             attachmentLease: attachmentLease)
         let config = GenerationConfig(maxNewTokens: maximum,
                                       temperature: temperature,
-                                      topK: topK,
-                                      topP: topP,
+                                      topK: isApple ? nil : topK,
+                                      topP: isApple ? nil : topP,
                                       repetitionPenalty: repetitionPenalty,
                                       seed: request.seed,
                                       stopStrings: request.stop?.values ?? [])

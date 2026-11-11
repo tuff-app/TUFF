@@ -240,7 +240,7 @@ private final class Harness: @unchecked Sendable {
                 unifiedMemoryBytes: 16 << 30, macOSMajorVersion: 26, appleSiliconGeneration: 2)),
             settings: ServerSettingsSource(url: nil, fallback: .init(
                 defaultModel: "gemma4-e2b", unloadDelay: unloadDelay, queueLimit: queueLimit)),
-            link: link, automaticPlan: { _ in plan })
+            link: link, automaticPlan: { _ in plan }, appleAvailability: { .notSupported })
     }
 
     func finish() async {

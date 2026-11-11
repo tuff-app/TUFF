@@ -21,6 +21,7 @@ public final class HostRoutedModelProvider: ServerModelProvider {
     public let installed: ServerInstalledModels
     public let settings: ServerSettingsSource
     let link: HostServingLink
+    let appleAvailability: @Sendable () -> AppleModelAvailability
     let gate: ServerCoordinator
     /// The allocation a load requests. Tests substitute a fixed plan.
     let automaticPlan: @Sendable (TUFFModelDescriptor) -> AppAutomaticMemoryPlan?
@@ -50,10 +51,12 @@ public final class HostRoutedModelProvider: ServerModelProvider {
     public init(installed: ServerInstalledModels, settings: ServerSettingsSource,
                 link: HostServingLink,
                 automaticPlan: (@Sendable (TUFFModelDescriptor) -> AppAutomaticMemoryPlan?)? = nil,
+                appleAvailability: @escaping @Sendable () -> AppleModelAvailability = { .current() },
                 onActivity: @escaping @Sendable (ServerCoordinatorActivity) -> Void = { _ in }) {
         self.installed = installed
         self.settings = settings
         self.link = link
+        self.appleAvailability = appleAvailability
         self.automaticPlan = automaticPlan ?? { installed.automaticPlan(for: $0) }
         gate = ServerCoordinator(queueLimit: settings.current.queueLimit, onActivity: onActivity)
         // Staged images from API processes that died are not swept by anyone
@@ -69,18 +72,28 @@ public final class HostRoutedModelProvider: ServerModelProvider {
     }
 
     public func modelList() -> OpenAIModelList {
-        OpenAIModelList(object: "list", data: installed.available().map { descriptor in
+        var models: [OpenAIModelList.Model] = installed.available().map { descriptor in
             let context = installed.inferencePlan(for: descriptor).contextTokens
             return .init(id: descriptor.apiModelID, object: "model", created: 0, ownedBy: "tuff",
                   capabilities: installed.visionCapability(for: descriptor) == "ready"
                     ? ["text", "image"] : ["text"],
                   contextLength: context, maxOutputTokens: min(4_096, context / 4))
-        })
+        }
+        if appleAvailability().canGenerate {
+            models.append(.init(id: AppleModelKind.onDevice.rawValue, object: "model", created: 0, ownedBy: "apple", capabilities: ["text"]))
+        }
+        return OpenAIModelList(object: "list", data: models)
     }
 
     public func route(_ requestedModel: String) throws -> ServerRoutedModel {
         let name = requestedModel == Self.defaultModelAlias
             ? settings.current.defaultModel : requestedModel
+        if ["apple", AppleModelKind.onDevice.rawValue].contains(name) {
+            let availability = appleAvailability()
+            guard availability.canGenerate else { throw ServerRequestError.modelUnavailable(availability.label) }
+            return ServerRoutedModel(id: AppleModelKind.onDevice.rawValue, requestedID: requestedModel,
+                                     dialect: .chatml, visionCapability: "unsupported")
+        }
         guard let descriptor = installed.descriptor(named: name) else {
             throw ServerRequestError.unknownModel
         }
@@ -143,6 +156,19 @@ public final class HostRoutedModelProvider: ServerModelProvider {
         prepare: @escaping @Sendable (any ServerInferenceBackend) async throws -> Prepared,
         operation: @escaping @Sendable (any ServerInferenceBackend, Prepared) async throws -> T
     ) async throws -> T {
+        if model.id == AppleModelKind.onDevice.rawValue {
+            return try await gate.run(onQueued: onQueued) { [self] in
+                let availability = appleAvailability()
+                guard availability.canGenerate else {
+                    throw ServerRequestError.modelUnavailable(availability.label)
+                }
+                beginRun()
+                defer { endRun() }
+                let backend = AppleServerInferenceBackend()
+                let prepared = try await prepare(backend)
+                return try await operation(backend, prepared)
+            }
+        }
         guard let descriptor = installed.descriptor(named: model.id) else {
             throw ServerRequestError.unknownModel
         }
