@@ -1081,7 +1081,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                         fetch: PrefillStreamedTileFetchResult) {
         guard collectingSpeculativeMetrics else { return }
         let misses = fetch.usedPlannedFetch
-            ? fetch.plannedMissSlots.count
+            ? fetch.plannedMissIndices.count
             : fetch.expertIDs.count
         let hits = fetch.usedPlannedFetch ? fetch.plannedHits : 0
         recordDecodeExpertFetch(layer: layer, misses: misses, hits: hits)

@@ -10,8 +10,6 @@ struct InferenceEngineSettingsView: View {
 
     var body: some View {
         Section("Inference engines") {
-            Text("Engines install with models and are shared by compatible models. Required or running engines are kept during cleanup.")
-                .appFont(.caption).foregroundStyle(.secondary)
             ForEach(packages) { package in
                 HStack {
                     VStack(alignment: .leading) {
@@ -32,6 +30,7 @@ struct InferenceEngineSettingsView: View {
             HStack {
                 Button("Refresh") { Task { await refresh() } }
                 Button("Remove unused engines") { Task { await cleanup() } }
+                    .help("Engines are shared by compatible models. Required or running engines are kept.")
             }.disabled(busy)
             if let message { Text(message).appFont(.caption).foregroundStyle(.secondary) }
         }

@@ -155,6 +155,7 @@ struct RootView: View {
             if let deletionTarget { model.deleteConversation(deletionTarget) }
             deletionTarget = nil
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in model.refreshAppleAvailability() }
         .onChange(of: model.error) { _, error in
             if let error, GenericErrorBannerPolicy.shouldShow(error: error, loadState: model.loadState) {
                 TUFFNoticeCenter.shared.show(.init(
@@ -400,12 +401,6 @@ struct RootView: View {
             Text("No chats yet")
                 .appFont(.callout.weight(.medium))
                 .foregroundStyle(.secondary)
-            Text("Your chats are saved here, on this Mac.")
-                .appFont(.caption)
-                .foregroundStyle(.tertiary)
-                .multilineTextAlignment(.center)
-                .lineLimit(3)
-                .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 18)
@@ -521,9 +516,7 @@ struct RootView: View {
     }
 
     private func modelName(for profileKey: String) -> String {
-        model.installs.first {
-            $0.descriptor.settingsProfileKey == profileKey
-        }?.descriptor.shortName ?? profileKey
+        model.modelShortName(forProfileKey: profileKey)
     }
 
     /// Presentation follows the optional target; dismissal clears it.
@@ -570,16 +563,16 @@ struct RootView: View {
                     Text("CURRENT MODEL")
                         .appFont(.caption2.weight(.semibold))
                         .foregroundStyle(.tertiary)
-                    Text(model.selectedDescriptor.displayName)
+                    Text(model.selectedModelName)
                         .appFont(.caption.weight(.medium))
                         .lineLimit(2)
                     HStack(spacing: 5) {
                         Circle()
-                            .fill(model.loadState.isReady
+                            .fill(model.isModelAvailable
                                   ? AnyShapeStyle(TUFFMacTheme.accentTextColor)
                                   : AnyShapeStyle(.tertiary))
                             .frame(width: 6, height: 6)
-                        Text(model.presentation.label)
+                        Text(model.isAppleSelected ? model.selectedAppleAvailability.label : model.presentation.label)
                             .appFont(.caption2)
                             .foregroundStyle(.secondary)
                     }
@@ -604,7 +597,7 @@ struct RootView: View {
         .padding(.bottom, SidebarMetrics.edgeInset)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Current model")
-        .accessibilityValue("\(model.selectedDescriptor.displayName), \(model.presentation.label)")
+        .accessibilityValue("\(model.selectedModelName), \(model.presentation.label)")
         .accessibilityHint("Opens Models")
     }
 
@@ -907,7 +900,7 @@ struct AppWorkspaceView: View {
         Group {
             switch destination {
             case .chat:
-                ChatWorkspaceView(model: model)
+                ChatWorkspaceView(model: model, openModels: { select(.models) })
             case .models, .benchmarks, .server, .settings:
                 SettingsHubView(
                     tab: SettingsHubTab(destination: destination, section: settingsSection),
@@ -926,6 +919,7 @@ struct AppWorkspaceView: View {
 
 private struct ChatWorkspaceView: View {
     let model: AppModel
+    let openModels: () -> Void
     @State private var conversationChromeHeight: CGFloat = 0
     @Environment(\.windowSidebarIsHidden) private var sidebarIsHidden
     @State private var transcriptWidth: CGFloat = 0
@@ -1022,7 +1016,7 @@ private struct ChatWorkspaceView: View {
                 PromptExamplesView { preset in model.promptText = preset.prompt }
             }
             ModelActionBanner(model: model)
-            PromptComposerView(model: model)
+            PromptComposerView(model: model, openModels: openModels)
         }
         .padding(.horizontal, StatusHUDView.contentInset)
         .padding(.bottom, StatusHUDView.contentInset)
@@ -1040,8 +1034,7 @@ private struct ModelsWorkspaceView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 WorkspaceTitle(
-                    title: "Models",
-                    subtitle: "Download and manage the models that run on this Mac.")
+                    title: "Models")
                 ModelLibraryColumnsView(model: model)
             }
             .workspaceColumn()
@@ -1123,8 +1116,7 @@ private struct SettingsHubView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             WorkspaceTitle(
-                title: "Settings",
-                subtitle: "The app, your models, the local server and benchmarks.")
+                title: "Settings")
                 .workspaceColumn()
                 .padding(.bottom, -TUFFDesign.Space.xl)
             TUFFTabBar(
@@ -1227,7 +1219,12 @@ private struct WorkspacePageChrome: ViewModifier {
 
 struct WorkspaceTitle: View {
     let title: String
-    let subtitle: String
+    let subtitle: String?
+
+    init(title: String, subtitle: String? = nil) {
+        self.title = title
+        self.subtitle = subtitle
+    }
     @Environment(\.workspaceEmbedded) private var embedded
 
     var body: some View {
@@ -1239,9 +1236,11 @@ struct WorkspaceTitle: View {
             Text(title)
                 .appFont(.largeTitle.bold())
                 .accessibilityHeading(.h1)
-            Text(subtitle)
-                .appFont(.callout)
-                .foregroundStyle(.secondary)
+            if let subtitle, !subtitle.isEmpty {
+                Text(subtitle)
+                    .appFont(.callout)
+                    .foregroundStyle(.secondary)
+            }
         }
         .accessibilityElement(children: .contain)
     }

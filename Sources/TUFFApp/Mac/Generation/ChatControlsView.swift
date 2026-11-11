@@ -14,7 +14,7 @@ struct ChatControlsView: View {
     var body: some View {
         HStack(spacing: 6) {
             modelMenu
-            reasoningControl
+            if !model.isAppleSelected { reasoningControl }
         }
         .appFont(.callout)
         .disabled(model.isRunning || model.loadState.isLoading)
@@ -26,6 +26,9 @@ struct ChatControlsView: View {
     // screen is where downloads live.
     private var modelMenu: some View {
         Menu {
+            ForEach(model.availableAppleModels) { kind in
+                Button(kind.name) { model.selectAppleModel(kind) }
+            }
             ForEach(model.installedInstalls) { install in
                 Button {
                     model.selectModel(install)
@@ -44,9 +47,9 @@ struct ChatControlsView: View {
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help("Model: \(model.selectedDescriptor.shortName)")
+        .help("Model: \(model.selectedModelName)")
         .accessibilityLabel("Chat model")
-        .accessibilityValue(model.selectedDescriptor.shortName)
+        .accessibilityValue(model.selectedModelName)
     }
 
     @ViewBuilder

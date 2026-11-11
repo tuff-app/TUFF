@@ -23,7 +23,7 @@ import TUFFValidationSupport
         let ctx = try MetalContext()
         let model = try Model.load(directoryURL: dir,
                                    device: ctx.device,
-                                   expecting: .qwen4ExpToy())
+                                   expecting: .qwen4ExpToy()).withSlotCache()
         let runner = try RealForwardRunner(model: model,
                                            context: ctx,
                                            maxContext: maxContext)
@@ -58,9 +58,9 @@ import TUFFValidationSupport
         defer { try? FileManager.default.removeItem(at: dir) }
         let ctx = try MetalContext()
         let coldModel = try Model.load(directoryURL: dir, device: ctx.device,
-                                       expecting: config)
+                                       expecting: config).withSlotCache()
         let mixedModel = try Model.load(directoryURL: dir, device: ctx.device,
-                                        expecting: config)
+                                        expecting: config).withSlotCache()
         // Ten of sixteen experts are routed. Preloading eight guarantees
         // both hits and misses, independently of the router's choices.
         for layer in 0..<config.numLayers {
@@ -83,6 +83,27 @@ import TUFFValidationSupport
         #expect(Fp16Buffer.read(logits, count: config.vocabSize) == expected)
     }
 
+    @Test func mappedExpertsMatchTheSlotCacheExactly() async throws {
+        let config = ArchConfig.qwen4ExpToy()
+        let dir = try Qwen4ExpToySynthetic.write()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let ctx = try MetalContext()
+        let slotModel = try Model.load(directoryURL: dir, device: ctx.device,
+                                       expecting: config).withSlotCache()
+        let mappedModel = try Model.load(directoryURL: dir, device: ctx.device, expecting: config)
+        let slots = try RealForwardRunner(model: slotModel, context: ctx, maxContext: 64)
+        let mapped = try RealForwardRunner(model: mappedModel, context: ctx, maxContext: 64)
+        let logits = try makeLogits(ctx, vocab: config.vocabSize)
+        for (position, token) in [Int32(7), 3, 11, 5].enumerated() {
+            try await slots.produce(token: token, position: position, into: logits)
+            let expected = Fp16Buffer.read(logits, count: config.vocabSize)
+            try await mapped.produce(token: token, position: position, into: logits)
+            #expect(Fp16Buffer.read(logits, count: config.vocabSize) == expected)
+        }
+        #expect(mappedModel.expertCacheAllocatedBytes == 0)
+        #expect(slotModel.expertCacheAllocatedBytes > 0)
+    }
+
     @Test(arguments: [ExpertCachePolicy.lfu, .lru])
     func prefetchedExpertsMatchColdLogitsAndCountTheirFirstDemandHit(policy: ExpertCachePolicy) async throws {
         let config = ArchConfig.qwen4ExpToy()
@@ -90,9 +111,9 @@ import TUFFValidationSupport
         defer { try? FileManager.default.removeItem(at: dir) }
         let ctx = try MetalContext()
         let coldModel = try Model.load(directoryURL: dir, device: ctx.device,
-                                      expecting: config, expertCachePolicy: policy)
+                                      expecting: config, expertCachePolicy: policy).withSlotCache()
         let prefetchedModel = try Model.load(directoryURL: dir, device: ctx.device,
-                                            expecting: config, expertCachePolicy: policy)
+                                            expecting: config, expertCachePolicy: policy).withSlotCache()
         for layer in 0..<config.numLayers {
             let plan = try #require(try prefetchedModel.planRoutedExperts(
                 layer: layer, experts: Array(0..<8), purpose: .prefetch))
@@ -224,7 +245,7 @@ import TUFFValidationSupport
         defer { try? FileManager.default.removeItem(at: dir) }
         let ctx = try MetalContext()
         let model = try Model.load(directoryURL: dir, device: ctx.device,
-                                   expecting: cfg)
+                                   expecting: cfg).withSlotCache()
         let runner = try RealForwardRunner(model: model, context: ctx,
                                            maxContext: 64)
         let logits = try makeLogits(ctx, vocab: cfg.vocabSize)
@@ -248,7 +269,7 @@ import TUFFValidationSupport
         defer { try? FileManager.default.removeItem(at: dir) }
         let ctx = try MetalContext()
         let model = try Model.load(directoryURL: dir, device: ctx.device,
-                                   expecting: cfg)
+                                   expecting: cfg).withSlotCache()
         let runner = try RealForwardRunner(model: model, context: ctx,
                                            maxContext: 64)
         let logits = try makeLogits(ctx, vocab: cfg.vocabSize)
@@ -310,7 +331,7 @@ import TUFFValidationSupport
 
         let ctx = try MetalContext()
         let model = try Model.load(directoryURL: dir, device: ctx.device,
-                                   expecting: cfg)
+                                   expecting: cfg).withSlotCache()
         #expect(throws: (any Error).self) {
             _ = try RealForwardRunner(model: model, context: ctx, maxContext: 64)
         }
@@ -328,7 +349,7 @@ import TUFFValidationSupport
         let model = try Model.load(directoryURL: dir,
                                    device: ctx.device,
                                    expecting: .qwen4ExpToy(),
-                                   streamingMode: .pread(slotCount: 8))
+                                   streamingMode: .pread(slotCount: 8)).withSlotCache()
         #expect(throws: RuntimeConfigurationError.expertCacheTooSmall(
             configured: 8, required: 10)) {
             _ = try RealForwardRunner(model: model, context: ctx, maxContext: 64)

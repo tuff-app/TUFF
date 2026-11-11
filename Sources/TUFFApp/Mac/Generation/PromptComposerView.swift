@@ -8,6 +8,7 @@ import UniformTypeIdentifiers
 
 struct PromptComposerView: View {
     @Bindable var model: AppModel
+    let openModels: () -> Void
     @FocusState private var promptFocused: Bool
     @State private var isImageDropTargeted = false
     @State private var measuredEditorHeight = PromptComposerMetrics.baseMinimumEditorHeight
@@ -110,7 +111,7 @@ struct PromptComposerView: View {
                 if model.promptText.isEmpty {
                     // Matches the NSTextView text origin: 5pt line fragment
                     // padding, no vertical inset.
-                    Text("Message \(model.selectedDescriptor.shortName)")
+                    Text("Message \(model.selectedModelName)")
                         .appFont(PromptComposerMetrics.font)
                         .foregroundStyle(.tertiary)
                         .padding(.leading, 5)
@@ -224,12 +225,11 @@ struct PromptComposerView: View {
             // the message box depending on which model was selected and how far
             // its optional pack had got. That belongs on Models, with the model
             // it is part of; this is the signpost.
-            if !model.isImageInputAvailable,
+            if !model.isAppleSelected, !model.isImageInputAvailable,
                model.selectedDescriptor.supportsImageInput,
                model.isVisionRuntimeSupported {
                 Divider()
-                Text("\(model.selectedDescriptor.shortName) reads images once "
-                    + "its image support is downloaded, in Settings > Models.")
+                Button("Download image support…", action: openModels)
             }
         } label: {
             ComposerIcon(systemImage: "plus", isOn: false)

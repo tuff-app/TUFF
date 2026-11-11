@@ -15,6 +15,15 @@ extension TUFFInferenceTypes.ExpertReadMetrics {
         }
     }
 
+    /// Bytes for a read already counted by `record`: one part of an expert
+    /// read in several pieces.
+    mutating func addBytes(purpose: ExpertReadPurpose, bytes: UInt64) {
+        switch purpose {
+        case .demand: demandBytes += bytes
+        case .prefetch: prefetchBytes += bytes
+        }
+    }
+
     mutating func add(_ other: Self) {
         demandRequests += other.demandRequests
         predictionRequests += other.predictionRequests

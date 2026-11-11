@@ -263,8 +263,9 @@ public struct PrefillStreamedTileBinding: Sendable, Equatable {
             usedPlannedFetch = true
             plannedHits = plan.hits
             plannedMissIndices = plan.misses
-            plannedAssignedSlots = plan.assignedSlots
-            plannedMissSlots = plan.misses.map { plan.assignedSlots[$0] }
+            // A mapped layer has no slots for tiles in flight to share.
+            plannedAssignedSlots = plan.cachePlan.usesSlots ? plan.assignedSlots : []
+            plannedMissSlots = plan.cachePlan.usesSlots ? plan.misses.map { plan.assignedSlots[$0] } : []
         } else {
             views = try await model.fetchRoutedExperts(layer: layer, experts: expertIDs)
             usedPlannedFetch = false

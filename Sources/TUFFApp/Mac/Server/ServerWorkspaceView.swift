@@ -21,8 +21,7 @@ struct ServerWorkspaceView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 WorkspaceTitle(
-                    title: "Server",
-                    subtitle: "Use installed models through an OpenAI-compatible local endpoint.")
+                    title: "Server")
                 if controller.isAvailable {
                     statusCard
                     configurationCard
@@ -70,9 +69,10 @@ struct ServerWorkspaceView: View {
                     .disabled(controller.isChanging)
                     .accessibilityHint("Starts or stops the login item that serves installed models")
             }
-            Text("Serves installed models while TUFF is open or closed. Each request names a model, which loads on demand; one model runs at a time.")
+            Text("Runs even when TUFF is closed.")
                 .appFont(.callout)
                 .foregroundStyle(TUFFDesign.secondaryTextColor)
+                .help("Each request names a model, which loads on demand. One model runs at a time.")
             if controller.requiresApproval {
                 HStack {
                     Label("Allow TUFF in Login Items to start the listener.",

@@ -166,7 +166,7 @@ struct OutputPaneView: View {
             thinking: model.outputThinkingText,
             images: model.outputImageAttachments,
             documents: model.outputDocumentAttachments,
-            modelName: model.selectedDescriptor.shortName,
+            modelName: model.selectedModelName,
             renderer: Self.renderer(scale: fontScale),
             live: TranscriptMessageView.LiveResponse(
                 mailbox: model.hasLiveMessage
@@ -209,18 +209,6 @@ struct OutputPaneView: View {
 
     private var emptyPlaceholderContent: some View {
         VStack(spacing: 8) {
-            if !needsModelLoad {
-                // Examples can be turned off in Settings; then there is
-                // nothing to choose from.
-                Text(model.showPromptExamples
-                     ? "Choose a predefined example or write your own prompt."
-                     : "Write a message to start.")
-                    .appFont(.headline)
-                Text("Describe the goal, relevant context, and any constraints.")
-                    .appFont(.callout)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-            }
             if case .loading(let phase) = model.loadState {
                 Text(phase.label)
                     .appFont(.callout)
@@ -263,7 +251,7 @@ struct OutputPaneView: View {
     }
 
     private var needsModelLoad: Bool {
-        !model.loadState.isReady
+        !model.isAppleSelected && !model.loadState.isReady
     }
 
     private var isLoadingModel: Bool {
@@ -452,10 +440,6 @@ private struct MessagePreview: View {
         Image(systemName: "cube.transparent")
             .appFont(.title2)
             .foregroundStyle(.quaternary)
-        Text("Choose a predefined example or write your own prompt.")
-            .appFont(.headline)
-        Text("Describe the goal, relevant context, and any constraints.")
-            .foregroundStyle(.secondary)
     }
     .frame(width: 720, height: 420)
 }

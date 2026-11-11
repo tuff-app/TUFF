@@ -226,7 +226,7 @@ struct TranscriptMessageView: View {
                 mailbox: live.mailbox,
                 isTerminal: live.isTerminal,
                 showsPrefillPlaceholder: live.showsPrefillPlaceholder,
-                smoothsText: live.smoothsText,
+                smoothsText: live.smoothsText && !reduceMotion,
                 scale: fontScale,
                 height: $liveHeight)
                 // The live answer's text is built at one scale, so changing

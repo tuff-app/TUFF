@@ -13,8 +13,7 @@ struct BenchmarksWorkspaceView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 WorkspaceTitle(
-                    title: "Benchmarks",
-                    subtitle: "See how fast models run on this Mac, and share it with everyone else.")
+                    title: "Benchmarks")
                 if controller.installed.isEmpty {
                     emptyCard
                 } else {
@@ -176,10 +175,10 @@ struct BenchmarksWorkspaceView: View {
             Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 10) {
                 GridRow {
                     header("Model")
-                    header("Writes").gridColumnAlignment(.trailing)
-                    header("Reads prompt").gridColumnAlignment(.trailing)
-                    header("First token").gridColumnAlignment(.trailing)
-                    header("Follow-up").gridColumnAlignment(.trailing)
+                    header("Generation").help("Output tokens generated per second.").gridColumnAlignment(.trailing)
+                    header("Prompt").help("Tokens processed per second for a 1,500-token prompt.").gridColumnAlignment(.trailing)
+                    header("First token").help("Time until the first output token for that prompt.").gridColumnAlignment(.trailing)
+                    header("Follow-up").help("Time until the first output token when reusing the earlier conversation.").gridColumnAlignment(.trailing)
                     header("Check").gridColumnAlignment(.center)
                 }
                 Divider().gridCellUnsizedAxes(.horizontal)
@@ -203,9 +202,6 @@ struct BenchmarksWorkspaceView: View {
                     }
                 }
             }
-            Text("Writes is decode speed. Reads prompt is how fast a 1,500-token prompt is processed. First token is the wait for that prompt; Follow-up is the same wait when TUFF reuses the earlier conversation.")
-                .appFont(.caption)
-                .foregroundStyle(TUFFDesign.secondaryTextColor)
             Divider()
             HStack(spacing: 10) {
                 Button {

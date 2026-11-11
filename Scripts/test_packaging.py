@@ -73,7 +73,7 @@ def check_standalone_serve(app, support):
                TUFF_ENGINE_CATALOG_PATH=str(app / 'Contents/Resources/engine-catalog.json'))
     lock = support / 'TUFF/Server/serving-host.lock'
     lock.parent.mkdir(parents=True, exist_ok=True)
-    with lock.open('a') as lease:
+    with os.fdopen(os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600), 'a') as lease:
         # Do not pass by attaching to a previously started host.
         fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
         fcntl.flock(lease, fcntl.LOCK_UN)

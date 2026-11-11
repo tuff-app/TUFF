@@ -23,9 +23,13 @@ struct AppSettingsView: View {
             Group {
                 switch section {
                 case .general: generalSettings
-                case .models: modelSettings(advanced: false)
+                case .models:
+                    if model.isAppleSelected { appleManagedSettings }
+                    else { modelSettings(advanced: false) }
                 case .search: SearchSettingsView(model: model)
-                case .advanced: modelSettings(advanced: true)
+                case .advanced:
+                    if model.isAppleSelected { appleManagedSettings }
+                    else { modelSettings(advanced: true) }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -37,6 +41,25 @@ struct AppSettingsView: View {
         // the cards below move, instead of the page jumping.
         .animation(TUFFMotion.standard, value: rowsKey)
         .tuffPageBackground()
+    }
+
+    private var appleManagedSettings: some View {
+        Form {
+            Section("System Prompt") {
+                TextEditor(text: $model.modelSystemPrompt)
+                    .appFont(.body)
+                    .scrollContentBackground(.hidden)
+                    .padding(10)
+                    .frame(minHeight: 120)
+                    .background(TUFFDesign.insetColor, in: RoundedRectangle(cornerRadius: TUFFDesign.Radius.control))
+                    .accessibilityLabel("Apple system prompt")
+                Text("Applies from the next message.")
+                    .settingsNote()
+                Button("Clear System Prompt") { model.modelSystemPrompt = "" }
+                    .disabled(model.modelSystemPrompt.isEmpty)
+            }
+        }
+        .formStyle(TUFFFormStyle())
     }
 
     /// The settings whose value decides which rows the page has.
@@ -69,8 +92,6 @@ struct AppSettingsView: View {
                         + "Reduce Transparency in System Settings turns it off too.")
                 GlassChoiceRow(title: "Zoom", selection: $model.zoomLevel,
                                options: AppZoomLevel.allCases, label: \.settingsLabel)
-                Text("Also in the View menu: ⌘+, ⌘− and ⌘0.")
-                    .settingsNote()
                     .help("Scales text, icons and controls. Also in the View menu: "
                     + "Zoom In (⌘+), Zoom Out (⌘−) and Actual Size (⌘0).")
                 GlassChoiceRow(title: "Accent color", selection: $model.accentColorMode,
@@ -91,9 +112,6 @@ struct AppSettingsView: View {
                                 .frame(width: 28, height: 24)
                         }
                     }
-                } else if model.accentColorMode == .system {
-                    Text("Follows the accent color set in System Settings.")
-                        .settingsNote()
                 }
             }
             Section("Model restrictions") {
@@ -135,8 +153,6 @@ struct AppSettingsView: View {
                         updateController.checkForUpdates()
                     }
                     .disabled(!updateController.canCheckForUpdates)
-                    Text("Signed releases from GitHub.")
-                        .settingsNote()
                         .help("Updates come from TUFF's GitHub Releases feed. Each "
                         + "download must pass Sparkle's embedded EdDSA signature "
                         + "check before it can be installed.")
@@ -280,16 +296,6 @@ struct AppSettingsView: View {
                 .frame(minHeight: 96)
                 .background(TUFFDesign.insetColor,
                             in: RoundedRectangle(cornerRadius: TUFFDesign.Radius.control, style: .continuous))
-                .overlay(alignment: .topLeading) {
-                    if selectedProfile.systemPrompt.isEmpty {
-                        Text("Sent ahead of every chat with this model.")
-                            .appFont(.body)
-                            .foregroundStyle(.tertiary)
-                            .padding(.leading, 12)
-                            .padding(.top, 8)
-                            .allowsHitTesting(false)
-                    }
-                }
                 .accessibilityLabel("System prompt")
             HStack {
                 Text("Applies from the next message.")
@@ -327,10 +333,7 @@ struct AppSettingsView: View {
                                    label: { $0.rawValue.capitalized })
                 case .alwaysOn:
                     LabeledContent("Thinking", value: "Always On")
-                    Text("Reasoning is kept separate from the answer.")
-                        .settingsNote()
-                        .help("This model always reasons before answering. TUFF keeps "
-                        + "that reasoning separate from the visible answer.")
+                        .help("This model always reasons before answering.")
                 }
                 if control != .alwaysOn {
                     Text("Chat can override this for the current conversation.")

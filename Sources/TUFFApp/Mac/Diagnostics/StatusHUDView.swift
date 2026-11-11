@@ -42,8 +42,10 @@ struct StatusHUDView: View {
     private var strip: some View {
         HStack(spacing: 12) {
             ModelStatusBadge(model: model)
-            Divider().frame(height: 16)
-            PhaseLabel(model: model)
+            if !model.isAppleSelected {
+                Divider().frame(height: 16)
+                PhaseLabel(model: model)
+            }
             Spacer(minLength: 12)
             if let notice = noticeCenter.current, notice.compact {
                 TUFFStripNotice(notice: notice, center: noticeCenter)
@@ -130,7 +132,7 @@ struct StatusHUDView: View {
     /// Only while a model is loaded: the last reply's numbers would
     /// otherwise linger after an eject.
     private var showsMetrics: Bool {
-        model.loadState.isReady || model.isRunning
+        !model.isAppleSelected && (model.loadState.isReady || model.isRunning)
     }
 }
 
@@ -144,7 +146,7 @@ private struct PhaseLabel: View {
                 ProgressView().controlSize(.mini)
                 Text(label)
             case .pulse(let label):
-                PulsingDot()
+                if !model.isAppleSelected { PulsingDot() }
                 RollingText(label)
             case .steady(let label):
                 Circle().fill(TUFFMacTheme.accentColor).frame(width: 7, height: 7)
@@ -159,7 +161,7 @@ private struct PhaseLabel: View {
         .lineLimit(1)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Model status")
-        .accessibilityValue(model.presentation.label)
+        .accessibilityValue(statusText)
     }
 
     private enum Content {
@@ -170,11 +172,23 @@ private struct PhaseLabel: View {
     }
 
     private var content: Content {
+        if model.isAppleSelected {
+            return model.isSelectedConversationRunning
+                ? .pulse("Generating")
+                : .quiet(model.selectedAppleAvailability.label)
+        }
         let presentation = model.presentation
         if presentation.showsActivity { return .loading(presentation.label) }
         if model.isRunning && model.phase == .prefill { return .pulse(presentation.label) }
         if model.isRunning && model.phase == .decode { return .steady(presentation.label) }
         return .quiet(presentation.label)
+    }
+
+    private var statusText: String {
+        switch content {
+        case .loading(let label), .pulse(let label), .steady(let label), .quiet(let label):
+            label
+        }
     }
 }
 

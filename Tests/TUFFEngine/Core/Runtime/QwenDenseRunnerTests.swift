@@ -11,7 +11,7 @@ import TUFFModelMetadata
         let context = try MetalContext()
         let model = try Model.load(directoryURL: directory, device: context.device,
             expecting: .qwen36Toy(dense: false), streamingMode: .pread(slotCount: 8),
-            denseResidency: .bounded(residentLayers: []))
+            denseResidency: .bounded(residentLayers: [])).withSlotCache()
         let first = try await model.fetchRoutedExperts(layer: 0, experts: [0])
         let view = try #require(first.first)
         let bytes = Data(bytes: view.buffer.contents(), count: view.buffer.length)
@@ -42,7 +42,7 @@ import TUFFModelMetadata
         var referencePrefill: [Float16] = []
         for policy: DenseResidencyPolicy in [.resident, .bounded(residentLayers: []), .bounded(residentLayers: [1, 3])] {
             let model = try Model.load(directoryURL: directory, device: context.device,
-                expecting: .qwen36Toy(dense: dense), denseResidency: policy)
+                expecting: .qwen36Toy(dense: dense), denseResidency: policy).withSlotCache()
             let runner = try RealForwardRunner(model: model, context: context, maxContext: 64,
                 runtimeConfiguration: RuntimeConfiguration(forceLogitsHead: true))
             for (position, token) in prompt.enumerated() {

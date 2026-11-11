@@ -87,7 +87,8 @@ let package = Package(
                 .product(name: "Hub", package: "swift-transformers"),
             ],
             path: "Sources/TUFFEngine",
-            exclude: engineFamily == "gpt-oss-mxfp4" ? ["Runtime/Inference/RealForwardRunner.swift"] : [],
+            exclude: engineFamily == "gpt-oss-mxfp4"
+                ? ["Runtime/Inference/RealForwardRunner.swift"] : [],
             resources: [
                 .copy("Metal"),
             ],

@@ -30,6 +30,9 @@ public struct Model {
     public let device: MTLDevice
     public let config: ArchConfig
     public let streamingMode: ExpertStreamingMode
+    /// Whether layers this model opens bind experts from the mapped file.
+    /// Defaults to `mapsExpertFiles`; tests of the slot cache turn it off.
+    private(set) var mapsExperts = Model.mapsExpertFiles
     public let expertCachePolicy: ExpertCachePolicy
     public let integrityPolicy: ModelIntegrityPolicy
     public var modelID: String { manifest.modelID }
@@ -82,6 +85,24 @@ public struct Model {
     ///
     /// Size alone is not the rule. Qwen 3.8 Flash Next has 76 GB of experts,
     /// never paged with the cache, and decoded 10% slower without it.
+    /// Whether routed experts are bound straight from the mapped layer file
+    /// instead of copied into cache slots, so the file cache is the expert
+    /// cache and an expert already in memory is never copied. On a 16 GB M2,
+    /// warm, greedy, 64 tokens: Gemma 4 26B 17.4 against 11.2 tokens a
+    /// second, Qwen 3.6 35B 16.1 against 11.1, Flint 40B 7.3 against 6.7 and
+    /// Flash Next 3.0 against 2.7, with the same tokens. A layer whose reads
+    /// skip the file cache keeps the slots. `TUFF_MAPPED_EXPERTS=0` turns it
+    /// off.
+    static let mapsExpertFiles = ProcessInfo.processInfo.environment["TUFF_MAPPED_EXPERTS"] != "0"
+
+    /// This model with the slot cache instead of mapped experts. Only before
+    /// any layer is opened: the copies share their layer streamers.
+    func withSlotCache() -> Model {
+        var model = self
+        model.mapsExperts = false
+        return model
+    }
+
     static func readsExpertsPastFileCache(variant: ModelVariant?, expertStride: UInt64,
                                           expertsPerLayer: Int, layers: Int,
                                           physicalMemory: UInt64) -> Bool {
@@ -132,6 +153,9 @@ public struct Model {
          modelDirectory: GTurboModelDirectory) {
         self.device = device
         self.config = config
+        if config.family == .gptOss || config.family == .minimaxM2 {
+            self.mapsExperts = false
+        }
         self.streamingMode = streamingMode
         self.expertCachePolicy = expertCachePolicy
         self.integrityPolicy = integrityPolicy
@@ -702,7 +726,8 @@ public struct Model {
                     || Self.readsExpertsPastFileCache(variant: config.variant,
                         expertStride: layerStride,
                         expertsPerLayer: packedExpertsLayout.expertsPerLayer,
-                        layers: config.numLayers, physicalMemory: ProcessInfo.processInfo.physicalMemory))
+                        layers: config.numLayers, physicalMemory: ProcessInfo.processInfo.physicalMemory),
+                mapExperts: mapsExperts)
         }
         streamersBox.layerVerified[L] = true
     }

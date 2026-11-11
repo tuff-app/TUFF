@@ -66,11 +66,11 @@ import TUFFValidationSupport
             let config = ArchConfig.qwen4ExpToy()
             directory = try Qwen4ExpToySynthetic.write(config: config)
             model = try Model.load(directoryURL: directory, device: context.device,
-                                   expecting: config, streamingMode: .pread(slotCount: 16))
+                                   expecting: config, streamingMode: .pread(slotCount: 16)).withSlotCache()
         case .qwen36:
             directory = try QwenToySynthetic.write()
             model = try Model.load(directoryURL: directory, device: context.device,
-                                   expecting: .qwen36Toy())
+                                   expecting: .qwen36Toy()).withSlotCache()
         }
         let runner = try RealForwardRunner(
             model: model, context: context, maxContext: 128,

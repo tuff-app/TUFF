@@ -94,9 +94,11 @@ do {
           parts.allSatisfy({ $0 >= 0 }) else { throw PackageFailure("invalid engine version") }
     let version = InferenceEngineVersion(major: parts[0], minor: parts[1], patch: parts[2])
     let fm = FileManager.default
-    let binary = URL(fileURLWithPath: arguments[0]).standardizedFileURL
-    let output = URL(fileURLWithPath: arguments[1]).standardizedFileURL
-    let keyURL = URL(fileURLWithPath: arguments[2]).standardizedFileURL
+    let binary = URL(fileURLWithPath: arguments[0]).standardizedFileURL.resolvingSymlinksInPath()
+    // Directory enumeration resolves /tmp to /private/tmp on macOS. Keep
+    // the root canonical too, so relative archive paths use the same prefix.
+    let output = URL(fileURLWithPath: arguments[1]).standardizedFileURL.resolvingSymlinksInPath()
+    let keyURL = URL(fileURLWithPath: arguments[2]).standardizedFileURL.resolvingSymlinksInPath()
     guard !keyURL.path.hasPrefix(output.path + "/") else { throw PackageFailure("private key must be outside output directory") }
     try fm.createDirectory(at: output, withIntermediateDirectories: true)
     try fm.createDirectory(at: keyURL.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -127,8 +129,16 @@ do {
         ("minimax-affine", ["minimax-m2.7"], ["affine"]),
         ("flint-affine", ["flint-40b-a2.5b"], ["affine"])
     ]
+    let selectedFamilies = ProcessInfo.processInfo.environment["TUFF_ENGINE_FAMILIES"]
+        .map { Set($0.split(whereSeparator: { $0.isWhitespace }).map(String.init)) }
+    if let selectedFamilies {
+        guard !selectedFamilies.isEmpty, selectedFamilies.isSubset(of: Set(families.map { $0.0 })) else {
+            throw PackageFailure("invalid engine family selection")
+        }
+    }
     var releases: [InferenceEngineRelease] = []
     for (id, architectures, layouts) in families {
+        if let selectedFamilies, !selectedFamilies.contains(id) { continue }
         let familyBinary = binary.appendingPathComponent(id)
         guard fm.fileExists(atPath: familyBinary.path) else { throw PackageFailure("missing separately built engine family: \(id)") }
         let stage = output.appendingPathComponent(".package-staging-\(UUID().uuidString)")
@@ -156,7 +166,10 @@ do {
             let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
             guard values.isSymbolicLink != true else { throw PackageFailure("engine resources contain a symbolic link") }
             if values.isRegularFile == true {
-                let path = String(url.path.dropFirst(stage.path.count + 1))
+                let rootComponents = stage.resolvingSymlinksInPath().pathComponents
+                let fileComponents = url.resolvingSymlinksInPath().pathComponents
+                guard fileComponents.starts(with: rootComponents) else { throw PackageFailure("engine file escaped staging root") }
+                let path = fileComponents.dropFirst(rootComponents.count).joined(separator: "/")
                 files.append(.init(path: path, bytes: UInt64(values.fileSize!), sha256: try Sha256Verifier.hashFile(at: url), executable: path == "TUFFInferenceEngine"))
             }
         }

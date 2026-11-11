@@ -40,6 +40,9 @@ public struct ExpertCachePlan: Sendable, Equatable {
     public let misses: [Int]
     public let hits: Int
     public let purpose: ExpertReadPurpose
+    /// False for a mapped layer, where `assignedSlots` are placeholders: no
+    /// slot is filled or reused, so there is no slot lifetime to track.
+    public var usesSlots = true
 
     public init(experts: [Int], assignedSlots: [Int], misses: [Int], hits: Int) {
         self.init(experts: experts, assignedSlots: assignedSlots, misses: misses,
@@ -75,6 +78,12 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     private var readAheadBytes: UInt64 = 0
     private let slotPointers: [UnsafeMutableRawPointer]
     private let slotBuffers: [MTLBuffer]
+    /// Set when the layer file is mapped instead of copied into slots: one
+    /// no-copy buffer per expert over its page-aligned slice of the mapping.
+    /// The OS file cache is then the expert cache, and an expert already in
+    /// memory costs nothing to bind. The slots are not allocated.
+    private let mappedExperts: MappedExperts?
+    public var mapsExperts: Bool { mappedExperts != nil }
 
     private var nextSlot = 0
     private let cursorLock = NSLock()
@@ -113,7 +122,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                  slotCount: Int,
                  cachePolicy: ExpertCachePolicy = .lfu,
                  fileDescriptor: Int32?,
-                 bypassFilesystemCache: Bool = false) throws {
+                 bypassFilesystemCache: Bool = false,
+                 mapExperts: Bool = false) throws {
         precondition(slotCount > 0, "slotCount must be positive")
         self.layout = layout
         self.slotCount = slotCount
@@ -152,7 +162,13 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         }
 
         let allocationSize = ((Int(layout.expertStride) + pageSize - 1) / pageSize) * pageSize
-        self.slotAllocationSize = allocationSize
+        // A file that cannot be mapped expert by expert (an offset off a page
+        // boundary) keeps the slot cache.
+        let mapped = mapExperts && !bypassFilesystemCache
+            ? MappedExperts(fd: openedFD, layout: layout, device: device, pageSize: pageSize)
+            : nil
+        self.mappedExperts = mapped
+        self.slotAllocationSize = mapped == nil ? allocationSize : 0
         var pointers: [UnsafeMutableRawPointer] = []
         var buffers: [MTLBuffer] = []
         pointers.reserveCapacity(slotCount)
@@ -164,7 +180,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             }
         }
 
-        for _ in 0..<slotCount {
+        for _ in 0..<(mapped == nil ? slotCount : 0) {
             var raw: UnsafeMutableRawPointer?
             let result = posix_memalign(&raw, Self.scratchAlignment, allocationSize)
             guard result == 0, let pointer = raw else {
@@ -214,6 +230,10 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         -> (buffer: MTLBuffer, offset: UInt64, size: UInt64) {
         guard slot >= 0 && slot < slotCount else {
             throw StreamerError.slotOutOfRange(slot)
+        }
+        if let mappedExperts {
+            try faultIn([expert], purpose: purpose)
+            return (mappedExperts.buffers[expert], 0, layout.expertStride)
         }
         let regionOffset = layout.expertOffset(layer: layer, expert: expert)
         guard regionOffset + layout.expertStride <= layout.streamSize else {
@@ -269,6 +289,9 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                                      purpose: ExpertReadPurpose) -> ExpertCachePlan? {
         precondition(experts.count <= slotCount,
                      "expert cache needs at least \(experts.count) slots")
+        if let mappedExperts {
+            return makeMappedPlan(experts: experts, mapped: mappedExperts, purpose: purpose)
+        }
         let avoidingSlots = Set(rawAvoidingSlots.filter { $0 >= 0 && $0 < slotCount })
 
         cacheLock.lock()
@@ -384,6 +407,18 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
         let readPurpose = purpose
         guard !plan.misses.isEmpty else { return expertCachePlanBuffers(plan) }
+        if mappedExperts != nil {
+            let misses = plan.misses.map { plan.experts[$0] }
+            if readPurpose == .prefetch {
+                // A guess at a later layer: ask storage to start reading and
+                // return at once. Whoever needs the experts reads anything
+                // still missing then; nothing waits on a guess.
+                _ = adviseRanges(expertAdviceRanges(experts: misses), requested: misses.count)
+            } else {
+                try faultIn(misses, purpose: readPurpose)
+            }
+            return expertCachePlanBuffers(plan)
+        }
 
         // A single read already runs on the caller's I/O worker. Only fan
         // out when there is more than one independent SSD read to perform.
@@ -429,6 +464,9 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         -> [(buffer: MTLBuffer, offset: UInt64, size: UInt64)] {
         precondition(plan.assignedSlots.count == plan.experts.count,
                      "expert cache plan slot count mismatch")
+        if let mappedExperts {
+            return plan.experts.map { (mappedExperts.buffers[$0], UInt64(0), layout.expertStride) }
+        }
         return plan.assignedSlots.map { slot in
             (slotBuffers[slot], UInt64(0), layout.expertStride)
         }
@@ -448,9 +486,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     public func readAheadExpertMisses(experts: [Int], concurrency: Int = 8,
                                       lowPriority: Bool = false) {
         guard !bypassesFileCache, concurrency > 0 else { return }
-        cacheLock.lock()
-        let misses = experts.filter { !slotExpert.contains($0) }
-        cacheLock.unlock()
+        let misses = uncached(experts)
         let ranges = expertAdviceRanges(experts: misses)
         guard !ranges.isEmpty else { return }
         readAheadLock.lock()
@@ -516,15 +552,16 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     }
 
     public func adviseExpertMisses(experts: [Int]) -> ExpertIOAdviceResult {
-        cacheLock.lock()
-        let misses = experts.filter { !slotExpert.contains($0) }
-        cacheLock.unlock()
+        let misses = uncached(experts)
         return adviseRanges(expertAdviceRanges(experts: misses), requested: misses.count)
     }
 
     static func coalescedAdjacentAdviceRanges(_ ranges: [(offset: UInt64, count: UInt64)])
         -> [(offset: UInt64, count: UInt64)] {
-        let sorted = ranges.filter { $0.count > 0 }.sorted {
+        let sorted = ranges.filter {
+            $0.count > 0 && $0.offset <= UInt64(Int64.max)
+                && $0.count <= UInt64(Int64.max) - $0.offset
+        }.sorted {
             $0.offset == $1.offset ? $0.count < $1.count : $0.offset < $1.offset
         }
         var result: [(offset: UInt64, count: UInt64)] = []
@@ -533,8 +570,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                 result.append(range)
                 continue
             }
-            let lastEnd = last.offset &+ last.count
-            let rangeEnd = range.offset &+ range.count
+            let lastEnd = last.offset + last.count
+            let rangeEnd = range.offset + range.count
             if range.offset <= lastEnd {
                 last.count = max(lastEnd, rangeEnd) - last.offset
                 result.append(last)
@@ -542,6 +579,23 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                 result.append(last)
                 result.append(range)
             }
+        }
+        return result
+    }
+
+    /// Advice is best effort. Cap each invocation so a large fanout cannot
+    /// synchronously submit unbounded I/O. Demand reads remain authoritative.
+    static func boundedAdviceRanges(_ ranges: [(offset: UInt64, count: UInt64)],
+                                    maximumCalls: Int = 32,
+                                    maximumBytes: UInt64 = 64 * 1024 * 1024)
+        -> [(offset: UInt64, count: UInt64)] {
+        var remaining = maximumBytes
+        var result: [(offset: UInt64, count: UInt64)] = []
+        for range in coalescedAdjacentAdviceRanges(ranges) {
+            guard result.count < max(0, maximumCalls), remaining > 0 else { break }
+            let count = min(range.count, remaining, UInt64(Int32.max))
+            result.append((range.offset, count))
+            remaining -= count
         }
         return result
     }
@@ -578,7 +632,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     }
 
     private func expertAdviceRanges(experts: [Int]) -> [(offset: UInt64, count: UInt64)] {
-        experts.compactMap { expert in
+        Set(experts).sorted().compactMap { expert in
+            guard expert >= 0, expert < layout.expertsPerLayer else { return nil }
             let regionOffset = layout.expertOffset(layer: 0, expert: expert)
             guard regionOffset + layout.expertStride <= layout.streamSize else { return nil }
             return (layout.streamOffset + regionOffset, layout.expertStride)
@@ -587,7 +642,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
     private func adviseRanges(_ ranges: [(offset: UInt64, count: UInt64)],
                               requested: Int) -> ExpertIOAdviceResult {
-        let coalesced = Self.coalescedAdjacentAdviceRanges(ranges)
+        let coalesced = Self.boundedAdviceRanges(ranges)
         var failed = 0
         var bytes: UInt64 = 0
         var maxCallNanos: UInt64 = 0
@@ -627,10 +682,185 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         }
     }
 
+    /// The experts not already in memory: not in a slot, or with a mapped
+    /// layer, not in the file cache.
+    private func uncached(_ experts: [Int]) -> [Int] {
+        if let mappedExperts { return experts.filter { !mappedExperts.isResident($0) } }
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return experts.filter { !slotExpert.contains($0) }
+    }
+
+    /// With a mapped layer every expert is bound where it lies; only the
+    /// ones not in the file cache are misses, read in before the GPU needs
+    /// them rather than faulted in one page at a time while it runs. A
+    /// wrong "resident" only costs a GPU page fault, never a wrong answer.
+    private func makeMappedPlan(experts: [Int], mapped: MappedExperts,
+                                purpose: ExpertReadPurpose) -> ExpertCachePlan {
+        let misses = experts.indices.filter { !mapped.isResident(experts[$0]) }
+        metricsLock.lock()
+        if purpose == .demand { metrics.demandRequests += UInt64(experts.count) }
+        else { metrics.predictionRequests += UInt64(experts.count) }
+        metricsLock.unlock()
+        var plan = ExpertCachePlan(
+            experts: experts, assignedSlots: Array(experts.indices), misses: misses,
+            hits: experts.count - misses.count, purpose: purpose)
+        plan.usesSlots = false
+        return plan
+    }
+
+    /// Reads mapped experts into the file cache, each as several concurrent
+    /// `pread`s, and returns when every byte is there. The copy goes to a
+    /// scratch buffer and is discarded; the resident page is the point.
+    private func faultIn(_ experts: [Int], purpose: ExpertReadPurpose) throws {
+        guard let mappedExperts else { return }
+        let valid = experts.filter { $0 >= 0 && $0 < layout.expertsPerLayer }
+        guard !valid.isEmpty else { return }
+        let stride = Int(layout.expertStride)
+        let page = Int(getpagesize())
+        let part = (stride / MappedExperts.readSplit + page - 1) / page * page
+        let parts = (stride + part - 1) / part
+        let errorLock = NSLock()
+        nonisolated(unsafe) var firstError: Error?
+        DispatchQueue.concurrentPerform(iterations: valid.count * parts) { index in
+            let expert = valid[index / parts]
+            let start = (index % parts) * part
+            let count = min(part, stride - start)
+            var bytes: UInt64 = 0
+            var succeeded = false
+            defer {
+                metricsLock.lock()
+                if index % parts == 0 {
+                    metrics.record(purpose: purpose, bytes: bytes, succeeded: succeeded)
+                } else {
+                    metrics.addBytes(purpose: purpose, bytes: bytes)
+                }
+                metricsLock.unlock()
+            }
+            do {
+                try mappedExperts.withScratch(bytes: part) { scratch in
+                    try readFull(into: scratch,
+                                 fileOffset: layout.streamOffset
+                                    + layout.expertOffset(layer: 0, expert: expert) + UInt64(start),
+                                 count: count, bytesRead: &bytes)
+                }
+                succeeded = true
+            } catch {
+                errorLock.lock()
+                if firstError == nil { firstError = error }
+                errorLock.unlock()
+            }
+        }
+        if let firstError { throw firstError }
+    }
+
     /// Model-derived CPU-side scratch owned by this streamer: its aligned
     /// slot allocation. Diagnostic metadata for residency reporting, not an
     /// ownership or lifetime API.
     public var diagnosticSlotScratchBytes: UInt64 {
         UInt64(slotCount) * UInt64(slotAllocationSize)
+    }
+}
+
+/// A routed-expert layer file mapped read-only, with one no-copy Metal buffer
+/// per expert. Adapted from zw5/ane-fieldfare's MappedExpertLayer (Apache 2.0).
+final class MappedExperts: @unchecked Sendable {
+    // SAFETY: every stored property is a `let`. The buffers alias a
+    // `PROT_READ` mapping, so neither the CPU nor the GPU can write through
+    // them, and each buffer's deallocator keeps the mapping alive.
+
+    /// Owns the mapping. Unmapped when the last expert buffer is released,
+    /// so a command buffer still in flight never reads unmapped memory.
+    private final class Mapping: @unchecked Sendable {
+        let base: UnsafeMutableRawPointer
+        let bytes: Int
+        init(base: UnsafeMutableRawPointer, bytes: Int) {
+            self.base = base
+            self.bytes = bytes
+        }
+        deinit { munmap(base, bytes) }
+    }
+
+    /// Each expert read is split into this many concurrent `pread`s; one
+    /// read at queue depth 1 leaves most SSD bandwidth idle.
+    static let readSplit = 4
+    /// Pages probed per residency check. An expert's pages are read and used
+    /// together, so they age out together; a spread sample decides as well
+    /// as every page, at a fraction of the `mincore` cost.
+    static let residencyProbes = 8
+
+    let buffers: [MTLBuffer]
+    private let mapping: Mapping
+    private let expertStarts: [UnsafeMutableRawPointer]
+    private let pageSize: Int
+    private let expertPages: Int
+    private let scratchLock = NSLock()
+    private var scratch: [UnsafeMutableRawPointer] = []
+
+    /// Nil when the layout cannot be mapped expert by expert: an expert that
+    /// does not start on a page boundary, or a mapping or buffer refused.
+    init?(fd: Int32, layout: StreamLayout, device: MTLDevice, pageSize: Int) {
+        let stride = Int(layout.expertStride)
+        let length = (stride + pageSize - 1) / pageSize * pageSize
+        guard stride > 0, layout.expertsPerLayer > 0,
+              layout.streamOffset % UInt64(pageSize) == 0 else { return nil }
+        let offsets = (0..<layout.expertsPerLayer).map { layout.expertOffset(layer: 0, expert: $0) }
+        guard offsets.allSatisfy({ $0 % UInt64(pageSize) == 0 }),
+              let last = offsets.max(), last + UInt64(length) <= layout.streamSize + UInt64(pageSize) else {
+            return nil
+        }
+        let mappedBytes = Int(last) + length
+        guard let raw = mmap(nil, mappedBytes, PROT_READ, MAP_SHARED, fd, off_t(layout.streamOffset)),
+              raw != MAP_FAILED else { return nil }
+        let mapping = Mapping(base: raw, bytes: mappedBytes)
+        var buffers: [MTLBuffer] = []
+        buffers.reserveCapacity(offsets.count)
+        for (expert, offset) in offsets.enumerated() {
+            guard let buffer = device.makeBuffer(
+                bytesNoCopy: raw + Int(offset), length: length, options: .storageModeShared,
+                deallocator: { _, _ in withExtendedLifetime(mapping) {} }) else { return nil }
+            buffer.label = "\((layout.path as NSString).lastPathComponent).e\(expert)"
+            buffers.append(buffer)
+        }
+        self.mapping = mapping
+        self.buffers = buffers
+        self.expertStarts = offsets.map { raw + Int($0) }
+        self.pageSize = pageSize
+        self.expertPages = length / pageSize
+    }
+
+    deinit {
+        for pointer in scratch { free(pointer) }
+    }
+
+    func isResident(_ expert: Int) -> Bool {
+        guard expert >= 0, expert < expertStarts.count else { return false }
+        let probes = min(Self.residencyProbes, expertPages)
+        var state: CChar = 0
+        for probe in 0..<probes {
+            let page = probe * (expertPages - 1) / max(1, probes - 1)
+            guard mincore(expertStarts[expert] + page * pageSize, pageSize, &state) == 0,
+                  state & CChar(MINCORE_INCORE) != 0 else { return false }
+        }
+        return true
+    }
+
+    /// A reusable destination for page-cache fills.
+    func withScratch<T>(bytes: Int, _ body: (UnsafeMutableRawPointer) throws -> T) throws -> T {
+        scratchLock.lock()
+        var buffer = scratch.popLast()
+        scratchLock.unlock()
+        if buffer == nil {
+            var raw: UnsafeMutableRawPointer?
+            let result = posix_memalign(&raw, pageSize, bytes)
+            guard result == 0, let raw else { throw StreamerError.allocFailed(errno: result) }
+            buffer = raw
+        }
+        defer {
+            scratchLock.lock()
+            scratch.append(buffer!)
+            scratchLock.unlock()
+        }
+        return try body(buffer!)
     }
 }

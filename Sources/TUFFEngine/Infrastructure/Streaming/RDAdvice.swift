@@ -24,6 +24,14 @@ enum RDAdvice {
                             offset: UInt64,
                             byteCount: UInt64) -> RDAdviceCallResult {
         let clippedCount = clippedByteCount(byteCount)
+        // No syscall for empty advice, and never trap converting untrusted
+        // unsigned offsets to Darwin's signed off_t.
+        guard clippedCount > 0 else {
+            return RDAdviceCallResult(requestedBytes: 0, errnoValue: 0, elapsedNanos: 0)
+        }
+        guard offset <= UInt64(Int64.max), clippedCount <= UInt64(Int64.max) - offset else {
+            return RDAdviceCallResult(requestedBytes: 0, errnoValue: EINVAL, elapsedNanos: 0)
+        }
         let start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         var errnoValue: CInt = 0
 

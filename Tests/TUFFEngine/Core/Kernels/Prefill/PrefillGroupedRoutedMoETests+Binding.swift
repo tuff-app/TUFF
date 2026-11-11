@@ -155,7 +155,7 @@ extension PrefillGroupedRoutedMoETests {
       directoryURL: dir,
       device: device,
       expecting: .gemma4Toy(),
-      streamingMode: .pread(slotCount: 16))
+      streamingMode: .pread(slotCount: 16)).withSlotCache()
     let routes = try Self.tileFetchRoutes()
 
     let first = try await PrefillStreamedTileBinding.fetchBindingForTile(
@@ -200,7 +200,7 @@ extension PrefillGroupedRoutedMoETests {
       directoryURL: dir,
       device: device,
       expecting: .gemma4Toy(),
-      streamingMode: .pread(slotCount: 16))
+      streamingMode: .pread(slotCount: 16)).withSlotCache()
     let routes = try Self.tileFetchRoutes()
 
     let first = try await PrefillStreamedTileBinding.fetchBindingForTile(

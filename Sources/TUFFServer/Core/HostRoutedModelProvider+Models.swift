@@ -76,6 +76,7 @@ extension HostRoutedModelProvider {
             var plan: AppAutomaticMemoryPlan?
             var adopted = false
             var weLoad = false
+            var replacedOwnModel = false
             if let loaded {
                 if loaded.forceLogitsHead == forceLogitsHead {
                     target = try ServingModelPreparation(
@@ -86,6 +87,9 @@ extension HostRoutedModelProvider {
                     guard status.activeRequests == 0 else {
                         throw ServerRequestError.modelBusy(
                             "\(descriptor.displayName) is in use by another TUFF client in a mode this request cannot share. Retry when it is idle.")
+                    }
+                    replacedOwnModel = state.withLock { current in
+                        current.apiLoaded[modelID].map { Self.sameConfiguration($0, loaded) } ?? false
                     }
                     guard try await link.unload(modelID: modelID) else {
                         throw ServerRequestError.modelBusy(
@@ -115,6 +119,9 @@ extension HostRoutedModelProvider {
                 if weLoad {
                     current.apiLoaded[modelID] = target
                     current.ranOwnPlan[modelID] = true
+                } else if replacedOwnModel {
+                    current.apiLoaded[modelID] = target
+                    current.ranOwnPlan[modelID] = false
                 } else if let loaded, adopted,
                           let mine = current.apiLoaded[modelID], Self.sameConfiguration(mine, loaded) {
                     current.ranOwnPlan[modelID] = true

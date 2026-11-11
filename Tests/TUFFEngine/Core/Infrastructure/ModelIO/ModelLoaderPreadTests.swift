@@ -3,7 +3,7 @@ import Foundation
 import Metal
 @testable import TUFFEngine
 
-/// `Model.load(streamingMode:)` integration for the bounded pread cache.
+/// `Model.load(streamingMode:).withSlotCache()` integration for the bounded pread cache.
 @Suite struct ModelLoaderPreadTests {
 
     @Test func cachedFetchOverloadsPreserveRequestedOrderAndBuffers() async throws {
@@ -12,7 +12,7 @@ import Metal
         let device = try #require(MTLCreateSystemDefaultDevice())
         let model = try Model.load(directoryURL: dir, device: device,
                                    expecting: .gemma4Toy(),
-                                   streamingMode: .pread(slotCount: 3))
+                                   streamingMode: .pread(slotCount: 3)).withSlotCache()
         let warmed = try await model.fetchRoutedExperts(layer: 1, experts: [4, 2])
         let hits = try await model.fetchRoutedExperts(layer: 1, experts: [2, 4])
         #expect(hits[0].buffer === warmed[1].buffer)
@@ -41,7 +41,7 @@ import Metal
         let device = try #require(MTLCreateSystemDefaultDevice())
         let model = try Model.load(directoryURL: dir, device: device,
                                    expecting: .gemma4Toy(),
-                                   streamingMode: .pread(slotCount: 2))
+                                   streamingMode: .pread(slotCount: 2)).withSlotCache()
 
         #expect(model.openLayerFileCount() == 0)
         let view = try model.routedExpert(layer: 1, expert: 4)
@@ -64,7 +64,7 @@ import Metal
         let device = try #require(MTLCreateSystemDefaultDevice())
         let model = try Model.load(directoryURL: dir, device: device,
                                    expecting: .gemma4Toy(),
-                                   streamingMode: .pread(slotCount: 2))
+                                   streamingMode: .pread(slotCount: 2)).withSlotCache()
 
         #expect(model.openLayerFileCount() == 0)
         #expect(model.routedExpertCacheSlotCount(layer: 1) == 2)
@@ -77,7 +77,7 @@ import Metal
         let device = try #require(MTLCreateSystemDefaultDevice())
         let model = try Model.load(directoryURL: dir, device: device,
                                    expecting: .gemma4Toy(),
-                                   streamingMode: .pread(slotCount: 128))
+                                   streamingMode: .pread(slotCount: 128)).withSlotCache()
 
         #expect(model.openLayerFileCount() == 0)
         #expect(model.routedExpertCacheSlotCount(layer: 1) == 16)
@@ -90,7 +90,7 @@ import Metal
         let device = try #require(MTLCreateSystemDefaultDevice())
         let model = try Model.load(directoryURL: dir, device: device,
                                    expecting: .gemma4Toy(),
-                                   streamingMode: .pread(slotCount: 2))
+                                   streamingMode: .pread(slotCount: 2)).withSlotCache()
 
         model.beginOpeningRoutedExpertStreamer(layer: 1)
         let view = try model.routedExpert(layer: 1, expert: 4)
@@ -107,7 +107,7 @@ import Metal
         let device = try #require(MTLCreateSystemDefaultDevice())
         let model = try Model.load(directoryURL: dir, device: device,
                                    expecting: .gemma4Toy(),
-                                   streamingMode: .pread(slotCount: 2))
+                                   streamingMode: .pread(slotCount: 2)).withSlotCache()
         _ = try model.routedExpert(layer: 1, expert: 4)
         let before = model.expertReadMetrics
         #expect(before.demandReads == 1)
@@ -140,7 +140,7 @@ import Metal
         defer { try? FileManager.default.removeItem(at: dir) }
         let device = try #require(MTLCreateSystemDefaultDevice())
         var model: Model? = try Model.load(directoryURL: dir, device: device,
-          expecting: .gemma4Toy(), streamingMode: .pread(slotCount: 3))
+          expecting: .gemma4Toy(), streamingMode: .pread(slotCount: 3)).withSlotCache()
         let plan = try #require(try model!.planRoutedExperts(layer: 1, experts: [4, 2], purpose: .prefetch))
         let operation = try model!.expertPrefetchOperation(plan: plan)
         let views = try model!.routedExpertBuffers(for: plan)
@@ -160,7 +160,7 @@ import Metal
         defer { try? FileManager.default.removeItem(at: dir) }
         let device = try #require(MTLCreateSystemDefaultDevice())
         let model = try Model.load(directoryURL: dir, device: device,
-          expecting: .gemma4Toy(), streamingMode: .pread(slotCount: 3))
+          expecting: .gemma4Toy(), streamingMode: .pread(slotCount: 3)).withSlotCache()
         let plan = try #require(try model.planRoutedExperts(layer: 1, experts: [4, 2], purpose: .prefetch))
         try model.expertPrefetchOperation(plan: plan)()
         #expect(model.expertReadMetrics.prefetchReads == 2)

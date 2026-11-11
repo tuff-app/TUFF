@@ -607,6 +607,17 @@ private func post(_ port: Int, _ body: [String: Any], path: String = "/v1/chat/c
         await h.finish()
     }
 
+    @Test func replacingOwnSamplingModelPreservesIdleUnloadOwnership() async throws {
+        let h = try Harness(); defer { Task { await h.finish() } }
+        _ = try await h.complete(try h.validated([user("sample")], extra: ["temperature": 0.8]))
+        _ = try await h.complete(try h.validated([user("greedy")], extra: ["temperature": 0]))
+        #expect(h.host.record.withLock { $0.loads.count } == 2)
+        #expect(await h.provider.unloadIfIdle())
+        #expect(h.host.record.withLock { $0.resident.isEmpty })
+        #expect(h.host.record.withLock { $0.unloads.count } == 2)
+        await h.finish()
+    }
+
     @Test func aGreedyRequestAgainstASamplingModelReplacesItOnlyWhenIdle() async throws {
         let h = try Harness(); defer { Task { await h.finish() } }
         let resident = try ServingModelPreparation(

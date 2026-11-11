@@ -7,13 +7,13 @@ struct ModelStatusBadge: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            statusDot
-            Text(model.installDescriptor.displayName)
+            if !model.isAppleSelected { statusDot }
+            Text(model.selectedModelName)
                 .appFont(.callout.weight(.semibold))
                 .lineLimit(1)
-                .help(model.installDescriptor.repoID)
+                .help(model.isAppleSelected ? model.selectedModelName : model.installDescriptor.repoID)
                 .accessibilityLabel("Model")
-                .accessibilityValue(model.installDescriptor.repoID)
+                .accessibilityValue(model.isAppleSelected ? model.selectedModelName : model.installDescriptor.repoID)
         }
     }
 

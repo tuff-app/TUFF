@@ -104,4 +104,25 @@ import Testing
         #expect(after.last == full)
         #expect(after.allSatisfy { full.utf8.starts(with: $0.utf8) })
     }
+    @Test func longMarkdownFlushAndRestartPreserveExactBytes() {
+        var pacer = StreamingTextPacer()
+        let answer = String(repeating: "Reasoning: Cafe\u{301} 👩‍💻\n```swift\nlet value = 42\n```\n", count: 400)
+        var arrived = ""
+        var time = 0.0
+        for character in answer {
+            arrived.append(character)
+            time += 0.0001
+            pacer.receive(arrived, at: time)
+            if let shown = pacer.advance(to: time) {
+                #expect(answer.utf8.starts(with: shown.utf8))
+            }
+        }
+        #expect(pacer.flush().utf8.elementsEqual(answer.utf8))
+        // Completion, cancellation and disabling pacing share this flush.
+        #expect(pacer.flush().utf8.elementsEqual(answer.utf8))
+        pacer.receive("new reply", at: time + 1)
+        #expect(pacer.displayed.isEmpty)
+        #expect(pacer.flush() == "new reply")
+    }
+
 }

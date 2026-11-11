@@ -690,6 +690,11 @@ public final class AppModel {
                 return addition.overflow ? .max : addition.partialValue
             }
         }
+        if settingsPersistenceEnabled {
+            for kind in AppleModelKind.allCases {
+                appleSystemPrompts[kind.rawValue] = UserDefaults.standard.string(forKey: kind.rawValue + ".systemPrompt") ?? ""
+            }
+        }
         applySelectedConversationModelBinding()
         // Staged images of runs that were killed before they could clean up;
         // nothing else ever removes them. The v2 root is swept too, or the
@@ -710,12 +715,53 @@ public final class AppModel {
         #endif
     }
 
+    public static let appleModelID = "apple.on-device"
+    public var selectedAppleModel: AppleModelKind? { AppleModelKind(rawValue: selectedModelID) }
+    public var isAppleSelected: Bool { selectedAppleModel != nil }
+    public var selectedProviderKey: String { isAppleSelected ? selectedModelID : selectedDescriptor.settingsProfileKey }
+    public var selectedModelName: String { selectedAppleModel?.name ?? selectedDescriptor.shortName }
+    public private(set) var appleAvailability = AppleModelAvailability.current()
+    @ObservationIgnored var appleAvailabilityProvider: () -> AppleModelAvailability = { .current() }
+    @ObservationIgnored var appleCloudAvailabilityProvider: () -> AppleModelAvailability = { .current(for: .privateCloudCompute) }
+    public private(set) var appleCloudAvailability = AppleModelAvailability.current(for: .privateCloudCompute)
+    private var lastLocalModelID: String?
+    private var appleSystemPrompts: [String: String] = [:]
+    public var availableAppleModels: [AppleModelKind] {
+        AppleModelKind.allCases.filter { availability(for: $0).canGenerate }
+    }
+    public func availability(for kind: AppleModelKind) -> AppleModelAvailability {
+        kind == .onDevice ? appleAvailability : appleCloudAvailability
+    }
+    public var selectedAppleAvailability: AppleModelAvailability {
+        availability(for: selectedAppleModel ?? .onDevice)
+    }
+    public func refreshAppleAvailability() {
+        appleAvailability = appleAvailabilityProvider()
+        appleCloudAvailability = appleCloudAvailabilityProvider()
+    }
+    public func selectAppleModel(_ kind: AppleModelKind = .onDevice) {
+        refreshAppleAvailability()
+        guard !isRunning, !loadState.isLoading else { return }
+        guard !conversationHasAttachments, conversation.allSatisfy({ $0.toolRounds.isEmpty }) else {
+            error = .invalidRequest("Start a text-only chat to use Apple.")
+            return
+        }
+        if let id = conversationStore.selectedConversationID { endConversationSession(id) }
+        persistSettings()
+        if !isAppleSelected { lastLocalModelID = selectedModelID }
+        selectedModelID = kind.rawValue
+        if conversationStore.selectedConversationID == nil { conversationStore.startNewConversation(modelID: kind.rawValue) }
+        conversationStore.rebindConversation(to: kind.rawValue)
+        error = nil
+    }
+
     // MARK: - Model catalog
 
     /// The coordinator for the selected model. Every single-model property
     /// below reports this one.
     public var selectedInstall: ModelInstallCoordinator {
-        installs.first { $0.id == selectedModelID } ?? installs[0]
+        installs.first { $0.id == selectedModelID }
+            ?? installs.first { $0.id == lastLocalModelID } ?? installs[0]
     }
 
     public var selectedDescriptor: AppModelInstallDescriptor {
@@ -732,13 +778,19 @@ public final class AppModel {
     /// The short name of the model a saved turn was answered by. Turns written
     /// before chats recorded it fall back to the chat's model.
     public func modelShortName(forProfileKey key: String?) -> String {
-        guard let key else { return selectedDescriptor.shortName }
+        guard let key else { return selectedModelName }
+        if let kind = AppleModelKind(rawValue: key) { return kind.name }
         return installs.first {
             $0.descriptor.settingsProfileKey == key
         }?.descriptor.shortName ?? key
     }
 
     private func applySelectedConversationModelBinding() {
+        if let key = conversationStore.selectedConversation?.modelID, AppleModelKind(rawValue: key) != nil {
+            if !isAppleSelected { lastLocalModelID = selectedModelID }
+            selectedModelID = key
+            return
+        }
         guard let modelID = conversationStore.selectedConversation?.modelID,
               let coordinator = installs.first(where: {
                   $0.descriptor.settingsProfileKey == modelID
@@ -913,6 +965,10 @@ public final class AppModel {
         guard canSelectConversation(record) else { return }
         if !isRunning { releaseTranscriptImages() }
         conversationStore.selectConversation(id: record.id)
+        if AppleModelKind(rawValue: record.modelID) != nil {
+            if !isAppleSelected { lastLocalModelID = selectedModelID }
+            selectedModelID = record.modelID
+        }
         if let coordinator = installs.first(where: {
             $0.descriptor.settingsProfileKey == record.modelID
         }), coordinator.id != selectedModelID {
@@ -1025,7 +1081,7 @@ public final class AppModel {
 
     /// A run is using the selected model's loaded runtime.
     private var selectedModelIsRunning: Bool {
-        activeAnswerRuns.values.contains { $0.modelProfileKey == selectedDescriptor.settingsProfileKey }
+        activeAnswerRuns.values.contains { $0.modelProfileKey == selectedProviderKey }
     }
 
     /// Whether running chats forbid loading, reloading or unloading the
@@ -1041,15 +1097,15 @@ public final class AppModel {
         conversationStore.selectedConversationID.map { activeAnswerRuns[$0] != nil } ?? false
     }
 
-    public var isModelAvailable: Bool { loadState.isReady }
+    public var isModelAvailable: Bool { isAppleSelected ? selectedAppleAvailability.canGenerate : loadState.isReady }
 
     public var hasStaleLoadedRuntime: Bool {
-        guard loadState.isReady, let loadedRuntimeKey else { return false }
+        guard !isAppleSelected, loadState.isReady, let loadedRuntimeKey else { return false }
         return loadedRuntimeKey != currentRuntimeKey
     }
 
     public var canLoadModel: Bool {
-        isModelInstalled && hardwareRequirementsSatisfied(for: selectedInstall)
+        !isAppleSelected && isModelInstalled && hardwareRequirementsSatisfied(for: selectedInstall)
             && memoryRequirementsSatisfied
             && !runsBlockModelLifecycle
             && !isVisionCompanionOperationInProgress
@@ -1062,7 +1118,7 @@ public final class AppModel {
     }
 
     public var canReloadModel: Bool {
-        isModelInstalled && hardwareRequirementsSatisfied(for: selectedInstall)
+        !isAppleSelected && isModelInstalled && hardwareRequirementsSatisfied(for: selectedInstall)
             && memoryRequirementsSatisfied
             && !runsBlockModelLifecycle
             && !isVisionCompanionOperationInProgress
@@ -1070,7 +1126,7 @@ public final class AppModel {
     }
 
     public var canUnloadModel: Bool {
-        isModelInstalled && !runsBlockModelLifecycle
+        !isAppleSelected && isModelInstalled && !runsBlockModelLifecycle
             && !isVisionCompanionOperationInProgress
             && loadState.isReady
     }
@@ -1093,7 +1149,7 @@ public final class AppModel {
 
     public var isModelInstalled: Bool { selectedInstall.isInstalled }
 
-    public var requiresModelInstallation: Bool { !isModelInstalled }
+    public var requiresModelInstallation: Bool { !isAppleSelected && !isModelInstalled }
 
     public var installDescriptor: AppModelInstallDescriptor { selectedDescriptor }
 
@@ -1437,6 +1493,11 @@ public final class AppModel {
     }
 
     public var canRun: Bool {
+        if isAppleSelected {
+            return selectedAppleAvailability.canGenerate && !isRunning && !loadState.isLoading && !isAddingImages
+                && imageAttachments.isEmpty && conversation.allSatisfy { $0.images.isEmpty && $0.toolRounds.isEmpty }
+                && hasComposedInput
+        }
         // Staging copies the files a request will carry. Starting a run while
         // it is in flight sent a request without those images and then landed
         // them on the next message instead.
@@ -1447,7 +1508,7 @@ public final class AppModel {
             && (activeAnswerRuns.isEmpty || client is any AppSessionInferenceClient)
             && activeAnswerRuns.values.allSatisfy {
             // Chats on another model do not constrain this model's runtime.
-            $0.modelProfileKey != selectedDescriptor.settingsProfileKey
+            $0.modelProfileKey != selectedProviderKey
                 || $0.runtimeKey == requestedRuntime
         }
         return !selectedAlreadyRunning && !(selectedID.map { sessionCleanups[$0] != nil } ?? false)
@@ -1509,6 +1570,7 @@ public final class AppModel {
         // already written is carried here. Without it the finished turn would
         // replace a long truncated answer with its own tail.
         let liveTranscript = activeRunConversationID == conversationStore.selectedConversationID
+            && !isAppleSelected
             && !(client is any AppSessionInferenceClient)
             ? generationTranscriptMailbox?.completeText : nil
         return conversationStore.outputAssistantPrefix + (liveTranscript ?? outputText)
@@ -1520,7 +1582,7 @@ public final class AppModel {
 
     public var outputConversationPlainText: String {
         let response = outputResponsePlainText
-        let modelLabel = selectedDescriptor.shortName
+        let modelLabel = selectedModelName
         switch (outputPromptText.isEmpty, response.isEmpty) {
         case (true, true):
             return ""
@@ -1558,7 +1620,7 @@ public final class AppModel {
             requiresInstallation: requiresModelInstallation,
             installState: installState,
             installReadiness: installReadiness,
-            loadState: loadState,
+            loadState: isAppleSelected ? (selectedAppleAvailability.canGenerate ? .ready(modelDirectory: URL(fileURLWithPath: "/"), loadSeconds: 0) : .notLoaded) : loadState,
             hasStaleRuntime: hasStaleLoadedRuntime,
             isRunning: isSelectedConversationRunning,
             isGenerationCancellationPending: isCancellationPending,
@@ -1765,7 +1827,7 @@ public final class AppModel {
 
     /// Captures live settings without replacing Auto's saved manual values.
     private func captureSelectedSettingsProfile() {
-        let profileKey = selectedDescriptor.settingsProfileKey
+        let profileKey = selectedProviderKey
         settingsStore.modelProfiles[profileKey] = Self.preservingManualMemorySettings(
             in: currentSettingsProfile,
             from: storedSettingsProfile(for: selectedInstall))
@@ -1873,13 +1935,13 @@ public final class AppModel {
     /// offered an Add-images button with no tower behind it, and the failure
     /// only surfaced when the user pressed Generate.
     public var isImageInputAvailable: Bool {
-        selectedDescriptor.supportsImageInput
+        !isAppleSelected && selectedDescriptor.supportsImageInput
             && isVisionRuntimeSupported && isVisionPackInstalled
     }
 
     /// Image support is part of this build. Hardware support and companion-pack
     /// availability are separate so the inspector can explain either absence.
-    public var visionRuntimeEnabled: Bool { selectedDescriptor.supportsImageInput }
+    public var visionRuntimeEnabled: Bool { !isAppleSelected && selectedDescriptor.supportsImageInput }
 
     /// Room left for the prompt when working out how many images fit. The
     /// runtime still rejects a combination that does not fit, so this only has
@@ -2072,11 +2134,12 @@ public final class AppModel {
     }
 
     public var canTuneAutomaticMemory: Bool {
-        automaticMemory && isModelInstalled && loadState.isReady && !isRunning
+        !isAppleSelected && automaticMemory && isModelInstalled && loadState.isReady && !isRunning
             && !isVisionCompanionOperationInProgress && hardwareRequirementsSatisfied(for: selectedInstall)
     }
 
     private func beginLoad(calibrate: Bool = false) {
+        guard !isAppleSelected else { return }
         guard let lifecycle = client as? AppModelLifecycleClient else {
             loadState = .failed(.modelLoadFailed("This client has no model load lifecycle."))
             return
@@ -2808,7 +2871,7 @@ public final class AppModel {
     private func applyPersistedSettings(forModelDirectory modelDirectory: URL,
                                         adoptingStoredProfile: Bool) {
         if settingsPersistenceEnabled {
-            let profileKey = selectedDescriptor.settingsProfileKey
+            let profileKey = selectedProviderKey
             let settings = MacAppSettingsFileStore.loadOrCreate(
                 forModelDirectory: modelDirectory,
                 profileKey: profileKey)
@@ -2952,7 +3015,7 @@ public final class AppModel {
 
     private func persistSettings() {
         // Keep the profile cache current even when persistence is disabled.
-        captureSelectedSettingsProfile()
+        if !isAppleSelected { captureSelectedSettingsProfile() }
         guard settingsPersistenceEnabled else {
             unsavedProfileKeys.removeAll()
             return
@@ -3145,7 +3208,7 @@ public final class AppModel {
 
     public func clearOutput() {
         if isRunning {
-            beginNewConversation(modelID: selectedDescriptor.settingsProfileKey)
+            beginNewConversation(modelID: selectedProviderKey)
             // The new chat is idle; show its state, not the running chat's.
             diagnostics = nil
             error = nil
@@ -3153,7 +3216,7 @@ public final class AppModel {
             return
         }
         releaseTranscriptImages()
-        beginNewConversation(modelID: selectedDescriptor.settingsProfileKey)
+        beginNewConversation(modelID: selectedProviderKey)
         if !(client is any AppSessionInferenceClient) { generationTranscriptMailbox?.reset() }
         diagnostics = nil
         error = nil
@@ -3173,77 +3236,80 @@ public final class AppModel {
     }
 
     public func run() {
+        if isAppleSelected { refreshAppleAvailability() }
         guard canRun else { return }
-        if automaticMemory, let summary = AppAutomaticMemoryPlanner.layoutSummary(at: URL(fileURLWithPath: modelPathText)) {
-            // Leave room for the answer and tool results before selecting a
-            // larger window. The helper checks the actual tokenizer count.
-            let reserve = maxNewTokensOverride ?? 1_024
-            let required = contextUsage.estimatedTokens + reserve
-                + ((effectiveChatCapabilities.web || effectiveChatCapabilities.files) ? 2_048 : 256)
-            if required > effectiveMaxContextTokens {
+        if !isAppleSelected {
+            if automaticMemory, let summary = AppAutomaticMemoryPlanner.layoutSummary(at: URL(fileURLWithPath: modelPathText)) {
+                // Leave room for the answer and tool results before selecting a
+                // larger window. The helper checks the actual tokenizer count.
+                let reserve = maxNewTokensOverride ?? 1_024
+                let required = contextUsage.estimatedTokens + reserve
+                    + ((effectiveChatCapabilities.web || effectiveChatCapabilities.files) ? 2_048 : 256)
+                if required > effectiveMaxContextTokens {
+                    guard !selectedModelIsRunning else {
+                        error = .invalidRequest("This chat needs a larger context. Wait for the other chat to finish before changing the shared model runtime.")
+                        return
+                    }
+                    let choices = AppContextLengthOption.options(for: selectedDescriptor).map(\.tokens).sorted()
+                    let plan = choices.lazy.filter { $0 >= required }.compactMap {
+                        AppAutomaticMemoryPlanner.plan(for: self.selectedDescriptor, on: self.deviceCapabilities,
+                            profile: self.automaticMemoryProfile, layoutSummary: summary, workloadKey: self.autoWorkloadKey,
+                            modelDirectory: URL(fileURLWithPath: self.modelPathText), contextTokens: $0,
+                            engineIdentity: (self.client as? any AppInferenceEngineReporting)?.currentEngineIdentity)
+                    }.first
+                    guard let plan else {
+                        error = .invalidRequest("The full conversation and answer reserve cannot fit safely on this Mac. Reduce the answer limit or start a new chat; no history was removed.")
+                        return
+                    }
+                    maxContextTokens = plan.contextTokens
+                    runtimeOptions.expertCacheSlots = plan.expertCacheSlots
+                    runtimeOptions.prefillChunkTokens = plan.prefillChunkTokens
+                    runtimeOptions.prefillEnabled = plan.expertCacheSlots >= 16
+                    runtimeOptions.denseResidencyPolicy = plan.denseResidencyPolicy
+                    runtimeOptions.retainedConversationBytes = plan.retainedConversationBytes
+                    runsAfterCurrentLoad = true
+                    beginLoad()
+                    return
+                }
+            }
+            // Image spans need chunked prefill, and chunked prefill needs 16 expert
+            // slots. Auto can settle below that to avoid paging, and the image then
+            // failed partway through its prompt. Auto reloads with a cache that
+            // can take it; a manual setting is the user's to change.
+            if imageTurnNeedsLargerExpertCache {
                 guard !selectedModelIsRunning else {
-                    error = .invalidRequest("This chat needs a larger context. Wait for the other chat to finish before changing the shared model runtime.")
+                    error = .invalidRequest("Image input needs a different runtime configuration. Wait for the other chat to finish before reloading the model.")
                     return
                 }
-                let choices = AppContextLengthOption.options(for: selectedDescriptor).map(\.tokens).sorted()
-                let plan = choices.lazy.filter { $0 >= required }.compactMap {
-                    AppAutomaticMemoryPlanner.plan(for: self.selectedDescriptor, on: self.deviceCapabilities,
-                        profile: self.automaticMemoryProfile, layoutSummary: summary, workloadKey: self.autoWorkloadKey,
-                        modelDirectory: URL(fileURLWithPath: self.modelPathText), contextTokens: $0,
-                        engineIdentity: (self.client as? any AppInferenceEngineReporting)?.currentEngineIdentity)
-                }.first
-                guard let plan else {
-                    error = .invalidRequest("The full conversation and answer reserve cannot fit safely on this Mac. Reduce the answer limit or start a new chat; no history was removed.")
+                let directory = URL(fileURLWithPath: modelPathText)
+                // The installed layout when it can be read, else the catalog's.
+                if automaticMemory,
+                   let plan = AppAutomaticMemoryPlanner.plan(for: selectedDescriptor, on: deviceCapabilities,
+                        profile: automaticMemoryProfile, workloadKey: autoWorkloadKey,
+                        modelDirectory: directory, useBundledLayout: true, contextTokens: effectiveMaxContextTokens,
+                        engineIdentity: (client as? any AppInferenceEngineReporting)?.currentEngineIdentity,
+                        imageInput: true),
+                   plan.expertCacheSlots >= RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill {
+                    maxContextTokens = plan.contextTokens
+                    runtimeOptions.expertCacheSlots = plan.expertCacheSlots
+                    runtimeOptions.prefillChunkTokens = plan.prefillChunkTokens
+                    runtimeOptions.prefillEnabled = true
+                    runtimeOptions.denseResidencyPolicy = plan.denseResidencyPolicy
+                    runtimeOptions.retainedConversationBytes = plan.retainedConversationBytes
+                    runsAfterCurrentLoad = true
+                    beginLoad()
                     return
                 }
-                maxContextTokens = plan.contextTokens
-                runtimeOptions.expertCacheSlots = plan.expertCacheSlots
-                runtimeOptions.prefillChunkTokens = plan.prefillChunkTokens
-                runtimeOptions.prefillEnabled = plan.expertCacheSlots >= 16
-                runtimeOptions.denseResidencyPolicy = plan.denseResidencyPolicy
-                runtimeOptions.retainedConversationBytes = plan.retainedConversationBytes
+                error = .invalidRequest(automaticMemory
+                    ? "Images need at least \(RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill) expert cache slots, and they don't fit safely on this Mac right now. Close other apps and try again, or remove the image."
+                    : "Images need at least \(RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill) expert cache slots. Raise Slots to \(RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill) in this model's settings, or remove the image.")
+                return
+            }
+            if automaticMemory, let loadedRuntimeKey, loadedRuntimeKey != currentRuntimeKey {
                 runsAfterCurrentLoad = true
                 beginLoad()
                 return
             }
-        }
-        // Image spans need chunked prefill, and chunked prefill needs 16 expert
-        // slots. Auto can settle below that to avoid paging, and the image then
-        // failed partway through its prompt. Auto reloads with a cache that
-        // can take it; a manual setting is the user's to change.
-        if imageTurnNeedsLargerExpertCache {
-            guard !selectedModelIsRunning else {
-                error = .invalidRequest("Image input needs a different runtime configuration. Wait for the other chat to finish before reloading the model.")
-                return
-            }
-            let directory = URL(fileURLWithPath: modelPathText)
-            // The installed layout when it can be read, else the catalog's.
-            if automaticMemory,
-               let plan = AppAutomaticMemoryPlanner.plan(for: selectedDescriptor, on: deviceCapabilities,
-                    profile: automaticMemoryProfile, workloadKey: autoWorkloadKey,
-                    modelDirectory: directory, useBundledLayout: true, contextTokens: effectiveMaxContextTokens,
-                    engineIdentity: (client as? any AppInferenceEngineReporting)?.currentEngineIdentity,
-                    imageInput: true),
-               plan.expertCacheSlots >= RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill {
-                maxContextTokens = plan.contextTokens
-                runtimeOptions.expertCacheSlots = plan.expertCacheSlots
-                runtimeOptions.prefillChunkTokens = plan.prefillChunkTokens
-                runtimeOptions.prefillEnabled = true
-                runtimeOptions.denseResidencyPolicy = plan.denseResidencyPolicy
-                runtimeOptions.retainedConversationBytes = plan.retainedConversationBytes
-                runsAfterCurrentLoad = true
-                beginLoad()
-                return
-            }
-            error = .invalidRequest(automaticMemory
-                ? "Images need at least \(RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill) expert cache slots, and they don't fit safely on this Mac right now. Close other apps and try again, or remove the image."
-                : "Images need at least \(RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill) expert cache slots. Raise Slots to \(RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill) in this model's settings, or remove the image.")
-            return
-        }
-        if automaticMemory, let loadedRuntimeKey, loadedRuntimeKey != currentRuntimeKey {
-            runsAfterCurrentLoad = true
-            beginLoad()
-            return
         }
         var request: AppGenerationRequest
         let capabilities = effectiveChatCapabilities
@@ -3321,10 +3387,10 @@ public final class AppModel {
                 response: "",
                 documents: outputDocumentAttachments,
                 images: retained,
-                modelID: selectedDescriptor.settingsProfileKey,
+                modelID: selectedProviderKey,
                 capabilities: capabilities),
             attachments: retained,
-            modelID: selectedDescriptor.settingsProfileKey)
+            modelID: selectedProviderKey)
         guard let conversationID = conversationStore.selectedConversationID else {
             error = .unknown("Could not create a chat for this answer.")
             runState = activeAnswerRuns.isEmpty ? .idle : .running
@@ -3353,14 +3419,16 @@ public final class AppModel {
         }
 
         let scopedClient: any AppInferenceClient
-        if let sessionClient = client as? any AppSessionInferenceClient {
+        if isAppleSelected {
+            scopedClient = AppleInferenceClient(kind: selectedAppleModel ?? .onDevice)
+        } else if let sessionClient = client as? any AppSessionInferenceClient {
             scopedClient = sessionClient.scopedSession(conversationStore.sessionID(for: conversationID))
         } else {
             scopedClient = client
         }
         let answerRun = ActiveAnswerRun(
             conversationID: conversationID, runtimeKey: runRuntimeKey,
-            modelProfileKey: selectedDescriptor.settingsProfileKey,
+            modelProfileKey: selectedProviderKey,
             scopedClient: scopedClient)
         activeAnswerRuns[conversationID] = answerRun
         runState = .running
@@ -3522,7 +3590,7 @@ public final class AppModel {
     /// prompt would not land in the reply. Gemma and ChatML both end their
     /// prompt exactly where the assistant's text starts.
     private var supportsAssistantContinuation: Bool {
-        selectedDescriptor.family != .gptOss
+        !isAppleSelected && selectedDescriptor.family != .gptOss
     }
 
     private var lastRunWasCutOff: Bool {
@@ -3554,8 +3622,13 @@ public final class AppModel {
     /// Set in Settings and stored with the rest of that model's profile, so
     /// each model carries its own.
     public var modelSystemPrompt: String {
-        get { settingsStore.systemPrompt }
+        get { isAppleSelected ? (appleSystemPrompts[selectedModelID] ?? "") : settingsStore.systemPrompt }
         set {
+            if isAppleSelected {
+                appleSystemPrompts[selectedModelID] = newValue
+                if settingsPersistenceEnabled { UserDefaults.standard.set(newValue, forKey: selectedModelID + ".systemPrompt") }
+                return
+            }
             guard settingsStore.systemPrompt != newValue else { return }
             settingsStore.systemPrompt = newValue
             persistSettings()
@@ -3650,6 +3723,13 @@ public final class AppModel {
         // the loaded session". The settings still apply on reload, which is
         // what the Memory section promises; they simply no longer break the
         // run in the meantime.
+        if isAppleSelected {
+            refreshAppleAvailability()
+            guard selectedAppleAvailability.canGenerate else { throw AppInferenceError.invalidRequest(selectedAppleAvailability.label) }
+            return AppGenerationRequest(modelDirectory: URL(fileURLWithPath: "/"), prompt: composedPromptText,
+                systemPrompt: effectiveSystemPrompt ?? "", history: conversation,
+                maxNewTokens: maxNewTokensOverride ?? 1024, temperature: Float(temperature), topK: nil, topP: nil)
+        }
         let effective = loadedRuntimeKey ?? currentRuntimeKey
         let instructions = AppToolCatalog.systemInstructions(
             for: capabilities, currentDate: Self.toolDate())
@@ -3766,9 +3846,9 @@ public final class AppModel {
     private func recordAutoPerformance(_ diagnostics: AppDiagnostics, completed: Bool = true) {
         // The run's own model, not whatever is selected now: the selection may
         // have moved to another model while this chat kept generating.
-        guard automaticMemory, settingsPersistenceEnabled, diagnostics.toolRounds == 0,
+        guard AppleModelKind(rawValue: handlingAnswerRun?.modelProfileKey ?? "") == nil, automaticMemory, settingsPersistenceEnabled, diagnostics.toolRounds == 0,
               let runKey = handlingAnswerRun?.runtimeKey,
-              handlingAnswerRun?.modelProfileKey == selectedDescriptor.settingsProfileKey,
+              handlingAnswerRun?.modelProfileKey == selectedProviderKey,
               let summary = AppAutomaticMemoryPlanner.layoutSummary(at: runKey.modelDirectory) else { return }
         guard let layers = AppAutoPerformanceRecords.residentDenseLayers(
             diagnostics.runtimeOptions.denseResidencyPolicy, summary: summary) else { return }
@@ -3835,7 +3915,7 @@ public final class AppModel {
     }
 
     private func materializeServiceTranscript() {
-        guard !(client is any AppSessionInferenceClient), activeAnswerRuns.count <= 1 else { return }
+        guard AppleModelKind(rawValue: handlingAnswerRun?.modelProfileKey ?? "") == nil, !(client is any AppSessionInferenceClient), activeAnswerRuns.count <= 1 else { return }
         guard let reporter = client as? any AppInferenceTranscriptReporting else { return }
         outputText = reporter.generationTranscriptMailbox.completeText
     }
@@ -3843,6 +3923,10 @@ public final class AppModel {
     private func finishWithError(_ appError: AppInferenceError) {
         guard let run = handlingAnswerRun, !run.hasHandledTerminalEvent else { return }
         run.hasHandledTerminalEvent = true
+        if appError.isEngineTransportFailure, loadedRuntimeKey == run.runtimeKey {
+            loadedRuntimeKey = nil
+            loadState = .notLoaded
+        }
         if run.conversationID == conversationStore.selectedConversationID { error = appError }
         recordAnswer()
         finishTerminalRun()
@@ -3867,7 +3951,7 @@ public final class AppModel {
         // memory, so after an ordinary answer the composer asked for a reload
         // nobody had caused (#54). `run` still reloads with a larger window
         // when the conversation outgrows the loaded one.
-        if activeAnswerRuns.isEmpty, automaticMemory, settingsPersistenceEnabled, !loadState.isReady {
+        if !isAppleSelected, activeAnswerRuns.isEmpty, automaticMemory, settingsPersistenceEnabled, !loadState.isReady {
             applySettingsProfile(storedSettingsProfile(for: selectedInstall))
         }
     }
@@ -3877,6 +3961,7 @@ public final class AppModel {
     /// What the composer's Web and Files switches allow for the next message,
     /// limited by the model and by having folders to search.
     public var effectiveChatCapabilities: AppChatCapabilities {
+        if isAppleSelected { return .none }
         let support = toolSupport
         guard support.allowsTools else { return .none }
         return AppChatCapabilities(
@@ -3890,6 +3975,7 @@ public final class AppModel {
     }
 
     public var toolSupport: AppToolSupport {
+        if isAppleSelected { return .unavailable("Apple supports text chat only; tools are unavailable.") }
         guard let id = selectedDescriptor.catalogID else { return .untested }
         return AppToolSupport.forModel(id)
     }

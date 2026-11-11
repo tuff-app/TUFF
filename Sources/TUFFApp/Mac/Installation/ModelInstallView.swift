@@ -34,11 +34,6 @@ struct ModelInstallView: View {
             Text("Choose a model")
                 .appFont(.title.bold())
                 .accessibilityHeading(.h1)
-            Text("Download a model to start chatting. You can add more later.")
-                .appFont(.body)
-                .foregroundStyle(TUFFDesign.secondaryTextColor)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

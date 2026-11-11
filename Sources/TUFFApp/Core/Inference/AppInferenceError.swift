@@ -17,7 +17,20 @@ public enum AppInferenceError: Error, Equatable, Sendable, CustomStringConvertib
 
     public var description: String { userMessage }
 
+    /// The serving host has lost its family helper, so the cached ready state
+    /// must be invalidated before the next submission can reload it.
+    public var isEngineTransportFailure: Bool {
+        switch self {
+        case .unknown(let message), .modelLoadFailed(let message):
+            return message.contains("ServingHelperTransportLost")
+        default: return false
+        }
+    }
+
     public var userMessage: String {
+        if isEngineTransportFailure {
+            return "The model engine stopped unexpectedly. Load the model again to retry."
+        }
         switch self {
         case .invalidRequest(let message):
             return message
@@ -45,6 +58,12 @@ public enum AppInferenceError: Error, Equatable, Sendable, CustomStringConvertib
     }
 
     public var technicalDetail: String {
+        if isEngineTransportFailure {
+            switch self {
+            case .unknown(let message), .modelLoadFailed(let message): return message
+            default: break
+            }
+        }
         switch self {
         case .tokenizerUnavailable:
             return "The installed tokenizer sidecar is missing or invalid. A Hugging Face fallback may require network access when no local sidecar is available."

@@ -15,9 +15,6 @@ struct PromptExamplesView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Try an example")
                         .appFont(.headline)
-                    Text("Choose a prompt, edit it, or write your own.")
-                        .appFont(.caption)
-                        .foregroundStyle(TUFFDesign.secondaryTextColor)
                 }
                 Spacer()
                 moreExamples

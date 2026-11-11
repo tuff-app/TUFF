@@ -1,6 +1,7 @@
 import TUFFAppCore
 import TUFFMacPresentation
 import SwiftUI
+import AppKit
 
 /// The model catalog: every supported model, each with its own download.
 ///
@@ -15,10 +16,40 @@ struct ModelCatalogView: View {
     /// inspector, where the row sits in a narrow column.
     var compact: Bool = false
     var showsAddOns: Bool = true
+    @State private var isAppleExpanded = true
     @State private var expandedGroups: Set<ModelCatalogGroup> = [.streaming, .resident]
 
     var body: some View {
         VStack(alignment: .leading, spacing: compact ? 8 : 14) {
+            DisclosureGroup(isExpanded: $isAppleExpanded) {
+                VStack(alignment: .leading, spacing: 12) {
+                    if model.availableAppleModels.isEmpty {
+                        Text("No Apple Models Found On This Mac").appFont(.body.weight(.medium))
+                        Text(model.appleAvailability.label)
+                            .appFont(.caption).foregroundStyle(TUFFDesign.secondaryTextColor)
+                        if model.appleAvailability.action == .openSystemSettings {
+                            Button(model.appleAvailability == .updateRequired ? "Open Software Update" : "Set Up Apple Intelligence") {
+                                let pane = model.appleAvailability == .updateRequired ? "com.apple.Software-Update-Settings.extension" : "com.apple.Siri-Settings.extension"
+                                if let url = URL(string: "x-apple.systempreferences:" + pane) { NSWorkspace.shared.open(url) }
+                            }
+                        }
+                        Button("Check Again") { model.refreshAppleAvailability() }
+                    } else {
+                        ForEach(model.availableAppleModels) { kind in
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(kind == .onDevice ? kind.name : "Private Cloud Compute").appFont(.body.weight(.semibold))
+                                Text(kind == .onDevice ? "Runs on this Mac." : "Runs on Apple's Private Cloud Compute. Requires a network connection.")
+                                    .appFont(.caption).foregroundStyle(TUFFDesign.secondaryTextColor)
+                                Button(model.selectedAppleModel == kind ? "Selected" : "Use Model") { model.selectAppleModel(kind) }
+                                    .disabled(model.selectedAppleModel == kind || model.isRunning || model.loadState.isLoading)
+                            }
+                        }
+                    }
+                }.tuffCard(padding: TUFFDesign.Radius.cardPadding)
+                .padding(.top, 8)
+            } label: {
+                Text("Apple").appFont(.headline).accessibilityAddTraits(.isHeader)
+            }
             // Legacy models stay available in their own catalog section.
             ForEach(ModelCatalogGroup.allCases) { group in
                 let installs = model.installs.filter {

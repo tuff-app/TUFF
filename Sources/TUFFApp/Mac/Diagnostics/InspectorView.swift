@@ -8,6 +8,9 @@ struct InspectorView: View {
 
     var body: some View {
         Form {
+            if model.isAppleSelected {
+                Section("Apple / On This Mac") { Text(model.appleAvailability.label); Text("Text chat. Managed by Apple Intelligence.") }
+            } else {
             modelSection
             catalogSection
             // Second, beside Model: image support is an install concern, not a
@@ -21,6 +24,7 @@ struct InspectorView: View {
             generationSection
             runtimeSection
             RunnerDiagnosticsSection(diagnostics: model.diagnostics)
+            }
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
