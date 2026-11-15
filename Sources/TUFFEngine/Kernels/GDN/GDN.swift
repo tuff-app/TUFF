@@ -17,6 +17,7 @@ final class GDN {
     private let qkNormPSO: MTLComputePipelineState
     private let deltaDecodePSO: MTLComputePipelineState
     private let deltaPrefillPSO: MTLComputePipelineState
+    private let deltaPrefillDk128PSO: MTLComputePipelineState?
     private let gatedNormPSO: MTLComputePipelineState
     private let inProjPSO: MTLComputePipelineState
     private let inProjSpecializedPSO: MTLComputePipelineState?
@@ -52,6 +53,8 @@ final class GDN {
         self.qkNormPSO = try context.pipeline("gdn_qk_norm")
         self.deltaDecodePSO = try context.pipeline("gdn_delta_step_decode")
         self.deltaPrefillPSO = try context.pipeline("gdn_delta_step_prefill")
+        // Optional: a device that rejects it keeps the general kernel.
+        self.deltaPrefillDk128PSO = try? context.pipeline("gdn_delta_step_prefill_dk128")
         self.gatedNormPSO = try context.pipeline("gdn_gated_norm")
         precondition(Quantization.supportedGroupSizes.contains(groupSize),
                      "unsupported affine group size \(groupSize)")
@@ -239,8 +242,19 @@ final class GDN {
         encoder.endEncoding()
     }
 
+    /// Whether `encodeDeltaStepPrefill` takes the Dk = 128 kernel, which
+    /// gives each SIMD group eight value rows (32 per threadgroup).
+    var usesDk128DeltaPrefill: Bool {
+        guard let pipeline = deltaPrefillDk128PSO else { return false }
+        return config.keyHeadDim == 128 && config.valueHeadDim % 32 == 0
+            && pipeline.maxTotalThreadsPerThreadgroup >= 128
+    }
+
     /// Prefill: the recurrence runs sequentially over `rows` inside the
     /// kernel; state persists in registers and is written back once.
+    /// Shapes the Dk = 128 kernel covers use it; its results are
+    /// bit-identical to the general kernel. `generalKernel` forces the
+    /// general one, which parity tests use as the reference.
     func encodeDeltaStepPrefill(commandBuffer: MTLCommandBuffer,
                                 convOut: MTLBuffer, convOutOffset: Int = 0,
                                 aProj: MTLBuffer, aProjOffset: Int = 0,
@@ -249,9 +263,15 @@ final class GDN {
                                 dtBias: MTLBuffer, dtBiasOffset: Int,
                                 state: MTLBuffer,
                                 y: MTLBuffer, yOffset: Int = 0,
-                                rows: Int) {
+                                rows: Int,
+                                generalKernel: Bool = false) {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
-        encoder.setComputePipelineState(deltaPrefillPSO)
+        let dk128PSO = usesDk128DeltaPrefill && !generalKernel ? deltaPrefillDk128PSO : nil
+        let dk128 = dk128PSO != nil
+        // The Dk = 128 kernel reads q and k as half4.
+        precondition(!dk128 || convOutOffset % 8 == 0,
+                     "gdn_delta_step_prefill_dk128 needs an 8-aligned convOut offset")
+        encoder.setComputePipelineState(dk128PSO ?? deltaPrefillPSO)
         encoder.setBuffer(convOut, offset: convOutOffset, index: 0)
         encoder.setBuffer(aProj, offset: aProjOffset, index: 1)
         encoder.setBuffer(bProj, offset: bProjOffset, index: 2)
@@ -266,7 +286,7 @@ final class GDN {
         encoder.setBytes(&rowStride, length: MemoryLayout<UInt32>.size, index: 12)
         encoder.dispatchThreadgroups(
             MTLSize(width: config.numVHeads,
-                    height: config.valueHeadDim / 4,
+                    height: config.valueHeadDim / (dk128 ? 32 : 4),
                     depth: 1),
             threadsPerThreadgroup: MTLSize(width: 32, height: 4, depth: 1))
         encoder.endEncoding()

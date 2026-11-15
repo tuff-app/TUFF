@@ -459,6 +459,105 @@ kernel void gdn_delta_step_prefill(
     }
 }
 
+// Prefill for Dk = 128, the head size of every shipped GDN model. Same
+// per-row arithmetic in the same order as gdn_delta_step_prefill: lane owns
+// state[dv][lane*4 .. lane*4+3], a sequential FMA chain over those four
+// elements, then simd_sum. Two things make it faster:
+//  - the per-lane tile has a compile-time size, so the state stays in
+//    registers (the runtime-sized `s[8]` above is indexed dynamically);
+//  - each SIMD group owns kGdnPrefillRows consecutive dv rows of one head, so
+//    the q/k loads and the g/beta transcendentals are shared by those rows
+//    and the rows' reductions are independent work for the scheduler.
+// Threadgroups (Hv, Dv / (4 * kGdnPrefillRows)); threads (32, 4).
+constant constexpr uint kGdnPrefillRows = 8;
+
+kernel void gdn_delta_step_prefill_dk128(
+    device const half*   conv_out [[buffer(0)]],   // [T, C]
+    device const half*   a_proj   [[buffer(1)]],   // [T, Hv]
+    device const half*   b_proj   [[buffer(2)]],   // [T, Hv]
+    device const bfloat* A_log    [[buffer(3)]],   // [Hv]
+    device const bfloat* dt_bias  [[buffer(4)]],   // [Hv]
+    device float*        state    [[buffer(5)]],   // [Hv, Dv, 128]
+    device half*         y        [[buffer(6)]],   // [T, Hv * Dv]
+    constant uint&       kHeads   [[buffer(7)]],
+    constant uint&       vHeads   [[buffer(8)]],
+    constant uint&       keyDim   [[buffer(9)]],   // must be 128
+    constant uint&       valueDim [[buffer(10)]],
+    constant uint&       rows     [[buffer(11)]],
+    constant uint&       rowStride [[buffer(12)]], // C, conv_out elements/row
+    uint2 tg [[threadgroup_position_in_grid]],
+    uint2 tpos [[thread_position_in_threadgroup]]
+) {
+    constexpr uint R = kGdnPrefillRows;
+    constexpr uint Dk = 128u;
+    const uint Hk = kHeads;
+    const uint Hv = vHeads;
+    const uint Dv = valueDim;
+    const uint T = rows;
+    const uint C = rowStride;
+    const uint h = tg.x;
+    const uint dv0 = (tg.y * 4u + tpos.y) * R;
+    const uint lane = tpos.x;
+    if (h >= Hv || dv0 + R > Dv) return;
+
+    const uint hk = h / (Hv / Hk);
+    const float expA = exp(float(A_log[h]));
+    const float dtb = float(dt_bias[h]);
+
+    device float4* srows = (device float4*)(state + (uint(h) * Dv + dv0) * Dk) + lane;
+    float4 s[R];
+    for (uint r = 0; r < R; ++r) {
+        s[r] = srows[r * (Dk / 4u)];
+    }
+
+    device const half* qBase = conv_out + hk * Dk;
+    device const half* kBase = conv_out + Hk * Dk + hk * Dk;
+    device const half* vBase = conv_out + 2u * Hk * Dk + h * Dv + dv0;
+
+    for (uint t = 0; t < T; ++t) {
+        const float4 k = float4(((device const half4*)(kBase + t * C))[lane]);
+        const float4 q = float4(((device const half4*)(qBase + t * C))[lane]);
+        device const half* v = vBase + t * C;
+
+        const float g = exp(-expA * gdn_softplus(float(a_proj[t * Hv + h]) + dtb));
+        const float beta = 1.0f / (1.0f + exp(-float(b_proj[t * Hv + h])));
+
+        float kv[R];
+        for (uint r = 0; r < R; ++r) {
+            kv[r] = 0.0f;
+            for (uint i = 0; i < 4u; ++i) {
+                s[r][i] *= g;
+                kv[r] = fma(s[r][i], k[i], kv[r]);
+            }
+        }
+        for (uint r = 0; r < R; ++r) {
+            kv[r] = simd_sum(kv[r]);
+        }
+
+        float out[R];
+        for (uint r = 0; r < R; ++r) {
+            const float delta = (float(v[r]) - kv[r]) * beta;
+            out[r] = 0.0f;
+            for (uint i = 0; i < 4u; ++i) {
+                s[r][i] = fma(k[i], delta, s[r][i]);
+                out[r] = fma(s[r][i], q[i], out[r]);
+            }
+        }
+        for (uint r = 0; r < R; ++r) {
+            out[r] = simd_sum(out[r]);
+        }
+        // Every lane holds every row's sum; lane r stores row r.
+        device half* yRow = y + t * Hv * Dv + h * Dv + dv0;
+        for (uint r = 0; r < R; ++r) {
+            if (lane == r) yRow[r] = half(out[r]);
+        }
+    }
+
+    for (uint r = 0; r < R; ++r) {
+        srows[r * (Dk / 4u)] = s[r];
+    }
+}
+
 // ----------------------------------------------------------------------------
 // Gated output norm: out = rmsnorm(y; weight, eps) * gate(z), per value head,
 // where `gate` is silu or sigmoid according to `gateKind`. Qwen 3.6 gates with
