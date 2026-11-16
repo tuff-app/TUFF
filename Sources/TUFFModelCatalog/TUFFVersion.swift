@@ -6,5 +6,5 @@
 /// and `Scripts/check_app_version.rb` fails CI when it falls behind the newest
 /// published release.
 public enum TUFFVersion {
-    public static let current = "11.1.0"
+    public static let current = "11.2.0"
 }
