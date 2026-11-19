@@ -365,8 +365,16 @@ struct AppSettingsView: View {
             }
             Toggle("Top-K", isOn: profileBinding(\.topKEnabled))
             if selectedProfile.topKEnabled {
-                Stepper(value: profileBinding(\.topK), in: 1...256) {
-                    LabeledContent("K value", value: "\(selectedProfile.topK)")
+                // The number sits beside its stepper at the trailing edge,
+                // where the Temperature and P rows show theirs. As the
+                // stepper's own label it hugged the row's title instead.
+                LabeledContent("K value") {
+                    HStack(spacing: 10) {
+                        Text("\(selectedProfile.topK)")
+                            .monospacedDigit()
+                        Stepper("K value", value: profileBinding(\.topK), in: 1...256)
+                            .labelsHidden()
+                    }
                 }
                 Toggle("Top-P", isOn: profileBinding(\.topPEnabled))
                 if selectedProfile.topPEnabled {

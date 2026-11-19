@@ -16,11 +16,13 @@ import TUFFMacPresentation
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         let dark = env["TUFF_VISUAL_APPEARANCE"] == "dark"
         let width = Double(env["TUFF_VISUAL_WIDTH"] ?? "1080") ?? 1080
-        let height = 720.0
+        let height = Double(env["TUFF_VISUAL_HEIGHT"] ?? "720") ?? 720
         let model = AppModel(modelDirectory: output.appendingPathComponent("missing.gturbo"),
             client: VisualClient(), otherInstalls: [], settingsPersistenceEnabled: false)
         model.appleAvailabilityProvider = { .available }
-        model.selectAppleModel()
+        // `TUFF_VISUAL_MODEL=catalog` keeps the default catalog model, whose
+        // Generation and Advanced settings have rows the Apple model hides.
+        if env["TUFF_VISUAL_MODEL"] != "catalog" { model.selectAppleModel() }
         model.appearanceMode = dark ? .dark : .light
         model.windowTransparency = Double(env["TUFF_VISUAL_TRANSPARENCY"] ?? "0") ?? 0
         let root = RootView(model: model,
@@ -48,6 +50,7 @@ import TUFFMacPresentation
             "pixelWidth": bitmap.pixelsWide, "pixelHeight": bitmap.pixelsHigh,
             "transparency": model.windowTransparency,
             "screen": env["TUFF_OPEN_SCREEN"] ?? "chat",
+            "model": env["TUFF_VISUAL_MODEL"] ?? "apple",
             "sidebar": env["TUFF_DEBUG_SIDEBAR"] ?? "expanded",
             "capture": "offscreen-content; excludes native frame and desktop compositing"]
         try JSONSerialization.data(withJSONObject: metadata, options: [.prettyPrinted, .sortedKeys])
