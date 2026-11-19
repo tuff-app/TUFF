@@ -1,5 +1,6 @@
 import Foundation
 import Metal
+import Synchronization
 
 @frozen
 public struct MoEExpertOffsets {
@@ -62,6 +63,22 @@ final class MoE {
     private let routerGemvSpecializedPSO: MTLComputePipelineState
     private let routerSelectK8PSO: MTLComputePipelineState
     private let routerSelectK8SpecializedPSO: MTLComputePipelineState
+    /// `router_topk_select_k8_ranked`, the same selection on a whole
+    /// threadgroup; nil where it is unavailable or did not match on this GPU.
+    private let routerSelectK8RankedPSO: MTLComputePipelineState?
+    private let routerSelectK8RankedSpecializedPSO: MTLComputePipelineState?
+
+    /// Whether the router's top-K runs as the ranked kernel.
+    var usesRankedRouterSelection: Bool { routerSelectK8RankedPSO != nil }
+
+    enum RouterSelection {
+        /// The ranked kernel where it is available and matches the scan on
+        /// this GPU. `TUFF_ROUTER_SELECT=serial` keeps the scan, for comparisons.
+        case automatic
+        case serial
+        /// The ranked kernel without the comparison; the parity tests use it.
+        case ranked
+    }
     private let routerSelectMiniMaxK8PSO: MTLComputePipelineState
     private let routerSelectMiniMaxK8SpecializedPSO: MTLComputePipelineState
     private let routerLogits: MTLBuffer
@@ -88,7 +105,8 @@ final class MoE {
          topKExperts: Int = MoE.defaultStreamedExperts,
          groupSize: Int = Quantization.groupSize,
          wideIntermediate: Bool = false,
-         floatIntermediate: Bool = false) throws {
+         floatIntermediate: Bool = false,
+         routerSelection: RouterSelection = .automatic) throws {
         precondition(Quantization.supportedGroupSizes.contains(groupSize),
                      "unsupported affine group size \(groupSize)")
         precondition(!floatIntermediate || wideIntermediate)
@@ -153,6 +171,32 @@ final class MoE {
         self.routerSelectK8SpecializedPSO = try context.pipeline(
             "router_topk_select_k8",
             constants: routerConstants)
+        let wantsRanked: Bool
+        switch routerSelection {
+        case .serial: wantsRanked = false
+        case .ranked: wantsRanked = true
+        case .automatic:
+            wantsRanked = ProcessInfo.processInfo.environment["TUFF_ROUTER_SELECT"] != "serial"
+        }
+        if wantsRanked,
+           let ranked = try? context.pipeline(
+               "router_topk_select_k8_ranked", constants: expertCountConstants),
+           let rankedSpecialized = try? context.pipeline(
+               "router_topk_select_k8_ranked", constants: routerConstants),
+           // Every slot is cleared by its own thread.
+           ranked.maxTotalThreadsPerThreadgroup >= Self.maxStreamedExperts,
+           rankedSpecialized.maxTotalThreadsPerThreadgroup >= Self.maxStreamedExperts,
+           routerSelection == .ranked || Self.rankedSelectionMatchesOnce(
+               pairs: [(routerSelectK8PSO, ranked),
+                       (routerSelectK8SpecializedPSO, rankedSpecialized)],
+               device: context.device,
+               numExperts: Int(specializedNumExperts), topK: topKExperts) {
+            self.routerSelectK8RankedPSO = ranked
+            self.routerSelectK8RankedSpecializedPSO = rankedSpecialized
+        } else {
+            self.routerSelectK8RankedPSO = nil
+            self.routerSelectK8RankedSpecializedPSO = nil
+        }
         self.routerSelectMiniMaxK8PSO = try context.pipeline(
             "router_topk_select_minimax_k8", constants: expertCountConstants)
         self.routerSelectMiniMaxK8SpecializedPSO = try context.pipeline(
@@ -204,6 +248,192 @@ final class MoE {
         self.reusableRoutedArgBuffer = reusable
     }
 
+    /// The top-K search over router logits, as the scan or the ranked kernel.
+    private static func encodeRouterSelect(_ encoder: MTLComputeCommandEncoder,
+                                           pso: MTLComputePipelineState,
+                                           ranked: Bool,
+                                           logits: MTLBuffer,
+                                           perExpertScale: MTLBuffer,
+                                           perExpertScaleOffset: Int,
+                                           outIndices: MTLBuffer,
+                                           outWeights: MTLBuffer,
+                                           numExperts: UInt32) {
+        var expertCount = numExperts
+        encoder.setComputePipelineState(pso)
+        encoder.setBuffer(logits, offset: 0, index: 0)
+        encoder.setBuffer(perExpertScale, offset: perExpertScaleOffset, index: 1)
+        encoder.setBuffer(outIndices, offset: 0, index: 2)
+        encoder.setBuffer(outWeights, offset: 0, index: 3)
+        encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 4)
+        // The ranked kernel uses every thread of its one group; the scan
+        // only the first.
+        let threads = ranked ? min(pso.maxTotalThreadsPerThreadgroup, 256) : 32
+        encoder.dispatchThreadgroups(
+            MTLSize(width: 1, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: threads, height: 1, depth: 1))
+    }
+
+    /// The selection alone, from logits already in a buffer, for the parity
+    /// tests. `specialized` picks the pipeline built for this instance's
+    /// expert count.
+    func encodeRouterSelectForTesting(commandBuffer: MTLCommandBuffer,
+                                      logits: MTLBuffer,
+                                      perExpertScale: MTLBuffer,
+                                      outIndices: MTLBuffer,
+                                      outWeights: MTLBuffer,
+                                      numExperts: UInt32,
+                                      specialized: Bool) {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        let ranked = specialized ? routerSelectK8RankedSpecializedPSO : routerSelectK8RankedPSO
+        Self.encodeRouterSelect(
+            encoder,
+            pso: ranked ?? (specialized ? routerSelectK8SpecializedPSO : routerSelectK8PSO),
+            ranked: ranked != nil,
+            logits: logits, perExpertScale: perExpertScale, perExpertScaleOffset: 0,
+            outIndices: outIndices, outWeights: outWeights, numExperts: numExperts)
+        encoder.endEncoding()
+    }
+
+    /// One comparison per set of compiled kernels, expert count and K. A
+    /// context compiles each kernel once and hands every `MoE` the same
+    /// pipeline objects, so a result is reused only for the pipelines it was
+    /// measured on; another context's library is compared again. The entries
+    /// keep their pipelines alive, so an identity cannot be reused.
+    private static let rankedSelectionResults = Mutex<[RankedSelectionEntry]>([])
+
+    private static let comparisonCacheLimit = 16
+
+    private struct RankedSelectionEntry: @unchecked Sendable {
+        let pipelines: [MTLComputePipelineState]
+        let numExperts: Int
+        let topK: Int
+        let matches: Bool
+
+        func covers(_ other: [MTLComputePipelineState], numExperts: Int, topK: Int) -> Bool {
+            self.numExperts == numExperts && self.topK == topK
+                && pipelines.count == other.count
+                && zip(pipelines, other).allSatisfy { $0 === $1 }
+        }
+    }
+
+    private static func rankedSelectionMatchesOnce(
+        pairs: [(serial: MTLComputePipelineState, ranked: MTLComputePipelineState)],
+        device: MTLDevice, numExperts: Int, topK: Int
+    ) -> Bool {
+        let pipelines = pairs.flatMap { [$0.serial, $0.ranked] }
+        if let known = rankedSelectionResults.withLock({ entries in
+            entries.first { $0.covers(pipelines, numExperts: numExperts, topK: topK) }?.matches
+        }) { return known }
+        let matches = autoreleasepool {
+            rankedSelectionMatches(pairs: pairs, device: device,
+                                   numExperts: numExperts, topK: topK)
+        }
+        rankedSelectionResults.withLock { entries in
+            // Another caller may have finished the same comparison meanwhile.
+            guard !entries.contains(where: {
+                $0.covers(pipelines, numExperts: numExperts, topK: topK)
+            }) else { return }
+            // A process normally has one context and a few models. Contexts
+            // made and dropped over and over would otherwise pin their
+            // pipelines here for good; the oldest result is simply measured
+            // again if it is ever wanted.
+            if entries.count >= comparisonCacheLimit { entries.removeFirst() }
+            entries.append(RankedSelectionEntry(pipelines: pipelines, numExperts: numExperts,
+                                                topK: topK, matches: matches))
+        }
+        return matches
+    }
+
+    /// Runs several sets of router logits through the scan and the ranked
+    /// kernel and compares the experts and weights they pick, byte for byte.
+    /// The selection is the same by construction; the weights come from the
+    /// same expressions compiled in another kernel, so a GPU or driver that
+    /// rounds them differently keeps the scan. The parity tests cover more
+    /// cases on the GPUs they run on.
+    private static func rankedSelectionMatches(
+        pairs: [(serial: MTLComputePipelineState, ranked: MTLComputePipelineState)],
+        device: MTLDevice, numExperts: Int, topK: Int
+    ) -> Bool {
+        guard numExperts > 0, topK > 0 else { return false }
+        var state: UInt64 = 0xD1B5_4A32_D192_ED03 &+ UInt64(numExperts * 31 + topK)
+        func unit() -> Float {
+            state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+            return Float((state >> 16) & 0xFFFF) / 65_536
+        }
+        // Distinct scores; many exact ties; scores the scan never takes
+        // (minus infinity, NaN) among ordinary ones; fewer real scores than
+        // slots; every score the same; zeros of both signs, which tie.
+        // Every case leaves finite weights. Inputs that make both kernels
+        // write NaN weights (no usable score, or plus infinity) are compared
+        // in the parity tests instead: a NaN that differed only in its
+        // payload there would say nothing about real router logits.
+        let cases: [[Float]] = [
+            (0..<numExperts).map { _ in (unit() - 0.5) * 8 },
+            (0..<numExperts).map { _ in (unit() * 6).rounded() * 0.25 },
+            (0..<numExperts).map { index in
+                index % 5 == 1 ? -.infinity : (index % 7 == 3 ? .nan : (unit() - 0.5) * 8)
+            },
+            (0..<numExperts).map { index in index % 37 == 2 ? unit() : -.infinity },
+            [Float](repeating: 0.5, count: numExperts),
+            (0..<numExperts).map { index in
+                index % 3 == 0 ? -0.0 : (index % 3 == 1 ? 0.0 : (unit() - 0.9) * 2)
+            },
+        ]
+        let scales = (0..<numExperts).map { _ -> UInt16 in
+            UInt16(truncatingIfNeeded: (0.6 + 0.8 * unit()).bitPattern >> 16)
+        }
+        let indexBytes = maxStreamedExperts * MemoryLayout<UInt32>.stride
+        let weightBytes = maxStreamedExperts * MemoryLayout<Float16>.stride
+        guard let scaleBuffer = device.makeBuffer(
+                  bytes: scales, length: scales.count * 2, options: .storageModeShared),
+              // Its own queue, so the probe leaves the model's queue untouched.
+              let queue = device.makeCommandQueue() else { return false }
+        for logits in cases {
+            for pair in pairs {
+                guard let input = device.makeBuffer(
+                          bytes: logits, length: logits.count * MemoryLayout<Float>.stride,
+                          options: .storageModeShared),
+                      let serialIndices = device.makeBuffer(length: indexBytes, options: .storageModeShared),
+                      let serialWeights = device.makeBuffer(length: weightBytes, options: .storageModeShared),
+                      let rankedIndices = device.makeBuffer(length: indexBytes, options: .storageModeShared),
+                      let rankedWeights = device.makeBuffer(length: weightBytes, options: .storageModeShared),
+                      let commandBuffer = queue.makeCommandBuffer(),
+                      let encoder = commandBuffer.makeComputeCommandEncoder()
+                else { return false }
+                // Different fills, so a kernel that writes nothing cannot pass.
+                memset(serialIndices.contents(), 0x00, indexBytes)
+                memset(serialWeights.contents(), 0x00, weightBytes)
+                memset(rankedIndices.contents(), 0xFF, indexBytes)
+                memset(rankedWeights.contents(), 0xFF, weightBytes)
+                encodeRouterSelect(encoder, pso: pair.serial, ranked: false, logits: input,
+                                   perExpertScale: scaleBuffer, perExpertScaleOffset: 0,
+                                   outIndices: serialIndices, outWeights: serialWeights,
+                                   numExperts: UInt32(numExperts))
+                encodeRouterSelect(encoder, pso: pair.ranked, ranked: true, logits: input,
+                                   perExpertScale: scaleBuffer, perExpertScaleOffset: 0,
+                                   outIndices: rankedIndices, outWeights: rankedWeights,
+                                   numExperts: UInt32(numExperts))
+                encoder.endEncoding()
+                commandBuffer.commit()
+                commandBuffer.waitUntilCompleted()
+                let usedIndexBytes = topK * MemoryLayout<UInt32>.stride
+                let usedWeightBytes = topK * MemoryLayout<Float16>.stride
+                guard commandBuffer.status == .completed,
+                      memcmp(serialIndices.contents(), rankedIndices.contents(), usedIndexBytes) == 0,
+                      memcmp(serialWeights.contents(), rankedWeights.contents(), usedWeightBytes) == 0
+                else { return false }
+                // Equal bytes only count if they are a selection: experts
+                // that exist, with finite weights.
+                let indices = rankedIndices.contents().bindMemory(to: UInt32.self, capacity: topK)
+                let weights = rankedWeights.contents().bindMemory(to: Float16.self, capacity: topK)
+                for slot in 0..<topK {
+                    guard Int(indices[slot]) < numExperts, weights[slot].isFinite else { return false }
+                }
+            }
+        }
+        return true
+    }
+
     func encodeRouterGemma4(commandBuffer: MTLCommandBuffer,
                                    weights: MTLBuffer, weightsOffset: Int = 0,
                                    scales: MTLBuffer, scalesOffset: Int = 0,
@@ -244,16 +474,15 @@ final class MoE {
         }
 
         if let encoder = commandBuffer.makeComputeCommandEncoder() {
-            encoder.setComputePipelineState(
-                useSpecialized ? routerSelectK8SpecializedPSO : routerSelectK8PSO)
-            encoder.setBuffer(routerLogits, offset: 0, index: 0)
-            encoder.setBuffer(perExpertScale, offset: perExpertScaleOffset, index: 1)
-            encoder.setBuffer(outIndices, offset: 0, index: 2)
-            encoder.setBuffer(outWeights, offset: 0, index: 3)
-            encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 4)
-            encoder.dispatchThreadgroups(
-                MTLSize(width: 1, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+            let ranked = useSpecialized ? routerSelectK8RankedSpecializedPSO
+                : routerSelectK8RankedPSO
+            Self.encodeRouterSelect(
+                encoder,
+                pso: ranked ?? (useSpecialized ? routerSelectK8SpecializedPSO : routerSelectK8PSO),
+                ranked: ranked != nil,
+                logits: routerLogits,
+                perExpertScale: perExpertScale, perExpertScaleOffset: perExpertScaleOffset,
+                outIndices: outIndices, outWeights: outWeights, numExperts: numExperts)
             encoder.endEncoding()
         }
     }

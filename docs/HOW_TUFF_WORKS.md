@@ -108,3 +108,4 @@ These aren't app settings; they exist so changes can be compared.
 | `TUFF_LOG_CACHE=1` | Log conversation reuse decisions; `TFF_LOG_CACHE` is also accepted. |
 | `TUFF_SAVED_CHATS=off` | Keep chat state in memory only, never on disk. |
 | `TUFF_SOFTMAX_SPLIT=off` | Run the sampler's softmax as one kernel, as before 11.3. |
+| `TUFF_ROUTER_SELECT=serial` | Pick each layer's experts with the single-thread scan, as before 11.4. |

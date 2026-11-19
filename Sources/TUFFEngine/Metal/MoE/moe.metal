@@ -371,6 +371,77 @@ kernel void router_topk_select_k8(
     }
 }
 
+// The same selection as router_topk_select_k8, found by rank instead of by
+// one thread scanning the experts. That scan runs for every layer of every
+// token, and again for the lookahead, on a single GPU thread, ahead of the
+// CPU readback that starts the expert reads.
+//
+// An expert's place in the serial result is the number of experts that beat
+// it: a higher score, or the same score and a lower index. The serial scan
+// never takes a score of minus infinity or NaN, and never counts one. Each
+// thread ranks its experts against all of them and the first K ranks fill the
+// slots; unfilled slots keep expert 0 at minus infinity, as the scan leaves
+// them. One thread then runs the scan's own softmax over the K scores in the
+// same order.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void router_topk_select_k8_ranked(
+    device const float* logits [[buffer(0)]],
+    device const bfloat* per_expert_scale [[buffer(1)]],
+    device uint* out_indices [[buffer(2)]],
+    device half* out_weights [[buffer(3)]],
+    constant uint& num_experts [[buffer(4)]],
+    uint tid [[thread_position_in_threadgroup]],
+    uint tsize [[threads_per_threadgroup]]
+) {
+    const uint NE = router_fc_num_experts(num_experts);
+    const uint K = streamed_expert_count();
+    threadgroup uint ranked_idx[kMaxStreamedExperts];
+    threadgroup float ranked_score[kMaxStreamedExperts];
+    if (tid < kMaxStreamedExperts) {
+        ranked_idx[tid] = 0u;
+        ranked_score[tid] = -INFINITY;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint e = tid; e < NE; e += tsize) {
+        const float s = logits[e];
+        if (!(s > -INFINITY)) continue;
+        uint rank = 0u;
+        for (uint j = 0; j < NE; ++j) {
+            const float other = logits[j];
+            rank += (other > s || (other == s && j < e)) ? 1u : 0u;
+        }
+        if (rank < K) {
+            ranked_idx[rank] = e;
+            ranked_score[rank] = s;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid != 0) return;
+
+    uint top_idx[kMaxStreamedExperts];
+    float top_score[kMaxStreamedExperts];
+    for (uint i = 0; i < K; ++i) {
+        top_idx[i] = ranked_idx[i];
+        top_score[i] = ranked_score[i];
+    }
+
+    const float max_s = top_score[0];
+    float sum_exp = 0.0f;
+    float exps[kMaxStreamedExperts];
+    for (uint i = 0; i < K; ++i) {
+        const float ex = fast::exp(top_score[i] - max_s);
+        exps[i] = ex;
+        sum_exp += ex;
+    }
+    for (uint i = 0; i < K; ++i) {
+        const uint expert_idx = top_idx[i];
+        const float weight = exps[i] / sum_exp;
+        out_indices[i] = expert_idx;
+        out_weights[i] = half(weight * float(per_expert_scale[expert_idx]));
+    }
+}
+
 // MiniMax M2.7 chooses experts by sigmoid(logit) plus a learned correction,
 // but combines the selected experts with the uncorrected sigmoid probabilities
 // renormalized over top-k.

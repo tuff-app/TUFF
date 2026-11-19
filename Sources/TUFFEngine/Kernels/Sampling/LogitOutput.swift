@@ -84,22 +84,35 @@ final class LogitSoftcapSoftmax {
     /// less a few so the 256 chains differ in length.
     private static let comparisonCount = 262_144 - 37
 
-    /// One comparison per GPU and cap for the life of the process: every
-    /// session on a loaded model builds its own sampler.
-    private static let comparisons = Mutex<[Comparison: Bool]>([:])
+    /// One comparison per set of compiled kernels and cap: every session on
+    /// a loaded model builds its own sampler, and a context hands each of
+    /// them the same pipeline objects. Another context's library is compared
+    /// again. The entries keep their pipelines alive, so an identity cannot
+    /// be reused.
+    private static let comparisons = Mutex<[Comparison]>([])
 
-    private struct Comparison: Hashable {
-        let device: UInt64
+    private static let comparisonCacheLimit = 16
+
+    private struct Comparison: @unchecked Sendable {
+        let pipelines: [MTLComputePipelineState]
         let softcap: UInt32
+        let matches: Bool
+
+        func covers(_ other: [MTLComputePipelineState], softcap: UInt32) -> Bool {
+            self.softcap == softcap && pipelines.count == other.count
+                && zip(pipelines, other).allSatisfy { $0 === $1 }
+        }
     }
 
     private static func splitMatchesOnce(_ split: Split, single: MTLComputePipelineState,
                                          device: MTLDevice, softcap: Float) -> Bool {
-        let key = Comparison(device: device.registryID, softcap: softcap.bitPattern)
-        if let known = comparisons.withLock({ $0[key] }) { return known }
+        let pipelines = [single, split.values, split.reduce, split.normalize]
+        if let known = comparisons.withLock({ entries in
+            entries.first { $0.covers(pipelines, softcap: softcap.bitPattern) }?.matches
+        }) { return known }
         let matches = autoreleasepool { () -> Bool in
-            // Its own scratch at a fixed size, so the answer cached for this
-            // GPU does not depend on which sampler happened to ask first.
+            // Its own scratch at a fixed size, so the answer does not depend
+            // on which sampler happened to ask first.
             guard let capped = device.makeBuffer(
                       length: comparisonCount * MemoryLayout<Float>.stride,
                       options: .storageModePrivate),
@@ -117,7 +130,18 @@ final class LogitSoftcapSoftmax {
                 splitMatches(probe, single: single, device: device, softcap: softcap, shape: $0)
             }
         }
-        comparisons.withLock { $0[key] = matches }
+        comparisons.withLock { entries in
+            // Another caller may have finished the same comparison meanwhile.
+            guard !entries.contains(where: {
+                $0.covers(pipelines, softcap: softcap.bitPattern)
+            }) else { return }
+            // A process normally has one context. Contexts made and dropped
+            // over and over would otherwise pin their pipelines here for
+            // good; the oldest result is simply measured again if wanted.
+            if entries.count >= comparisonCacheLimit { entries.removeFirst() }
+            entries.append(Comparison(pipelines: pipelines, softcap: softcap.bitPattern,
+                                      matches: matches))
+        }
         return matches
     }
 
