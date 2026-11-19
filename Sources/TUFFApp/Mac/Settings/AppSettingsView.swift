@@ -598,7 +598,7 @@ struct TUFFTabBar<Tab: Hashable>: View {
     /// Off where the bar sits inside another glass shape (the thinking
     /// control), which already is the track.
     var showsTrack = true
-    /// Each tab's frame, per layout (with and without labels), since the
+    /// Each tab's frame, per layout (see `Layout`), since the
     /// window can switch between them.
     @State private var frames: [FrameKey: CGRect] = [:]
     @State private var hovered: Tab?
@@ -615,10 +615,10 @@ struct TUFFTabBar<Tab: Hashable>: View {
     /// The glass's frame: the chosen option's, or while dragging, the
     /// width of the option under the pointer centred on the pointer,
     /// kept inside the bar.
-    private func pillFrame(labels: Bool) -> CGRect? {
-        guard let base = frames[FrameKey(labels: labels, tab: dragged ?? selection)] else { return nil }
+    private func pillFrame(layout: Layout) -> CGRect? {
+        guard let base = frames[FrameKey(layout: layout, tab: dragged ?? selection)] else { return nil }
         guard let x = dragX else { return base }
-        let all = tabs.compactMap { frames[FrameKey(labels: labels, tab: $0)] }
+        let all = tabs.compactMap { frames[FrameKey(layout: layout, tab: $0)] }
         let lower = all.map(\.minX).min() ?? base.minX
         let upper = (all.map(\.maxX).max() ?? base.maxX) - base.width
         var frame = base
@@ -627,46 +627,91 @@ struct TUFFTabBar<Tab: Hashable>: View {
     }
 
     private struct FrameKey: Hashable {
-        let labels: Bool
+        let layout: Layout
         let tab: Tab
+    }
+
+    /// How much of each tab is written out, widest first.
+    private enum Layout: Hashable {
+        /// Every tab with its title.
+        case titles
+        /// Icons, and the chosen tab's title.
+        case chosenTitle
+        /// The same with less padding around each tab. At the narrowest
+        /// window the longer titles (Generation, Benchmarks) made the bar
+        /// wider than the pane, which pushed the whole window's content
+        /// sideways and clipped both of its edges.
+        case chosenTitleTight
+        /// Icons only, so there is always something that fits.
+        case icons
+
+        var showsEveryTitle: Bool { self == .titles }
+        var showsChosenTitle: Bool { self != .icons }
+        var isTight: Bool { self == .chosenTitleTight || self == .icons }
     }
 
     var body: some View {
         if systemImage == nil {
-            bar(labels: true)
+            bar(.titles)
         } else {
             ViewThatFits(in: .horizontal) {
-                bar(labels: true)
-                bar(labels: false)
+                bar(.titles)
+                steadyBar(.chosenTitle)
+                steadyBar(.chosenTitleTight)
+                bar(.icons)
             }
         }
     }
 
-    private func bar(labels: Bool) -> some View {
+    /// The bar in a frame as wide as it gets with its longest title chosen.
+    /// Which layout fits then does not depend on the chosen tab, so the
+    /// icons keep their spacing when the tab changes.
+    private func steadyBar(_ layout: Layout) -> some View {
+        ZStack(alignment: .leading) {
+            ForEach(tabs, id: \.self) { chosen in
+                HStack(spacing: 2) {
+                    ForEach(tabs, id: \.self) { tab in
+                        tabLabel(tab, isSelected: tab == chosen, layout: layout)
+                    }
+                }
+                .padding(compact ? 3 : 4)
+                .hidden()
+                .accessibilityHidden(true)
+            }
+            bar(layout)
+        }
+    }
+
+    /// One tab's icon and title at the size it takes in the bar.
+    private func tabLabel(_ tab: Tab, isSelected: Bool, layout: Layout) -> some View {
+        Group {
+            if let systemImage {
+                if layout.showsEveryTitle || (isSelected && layout.showsChosenTitle) {
+                    Label(title(tab), systemImage: systemImage(tab))
+                } else {
+                    Image(systemName: systemImage(tab))
+                }
+            } else {
+                Text(title(tab))
+            }
+        }
+        .appFont(.callout.weight(isSelected ? .semibold : .medium))
+        .lineLimit(1)
+        .fixedSize()
+        .padding(.horizontal, layout.isTight ? 9 : (compact ? 12 : 14))
+        .frame(minHeight: compact ? 26 : 30)
+    }
+
+    private func bar(_ layout: Layout) -> some View {
         HStack(spacing: 2) {
             ForEach(tabs, id: \.self) { tab in
                 let isSelected = tab == selection
                 Button {
                     selection = tab
                 } label: {
-                    Group {
-                        if let systemImage {
-                            if labels || isSelected {
-                                Label(title(tab), systemImage: systemImage(tab))
-                            } else {
-                                Image(systemName: systemImage(tab))
-                            }
-                        } else {
-                            Text(title(tab))
-                        }
-                    }
-                    .appFont(.callout.weight(isSelected ? .semibold : .medium))
+                    tabLabel(tab, isSelected: isSelected, layout: layout)
                     .foregroundStyle((dragged ?? selection) == tab ? AnyShapeStyle(.primary)
                                                 : AnyShapeStyle(TUFFDesign.secondaryTextColor))
-                    .lineLimit(1)
-                    .fixedSize()
-                    .padding(.horizontal, compact ? 12 : 14)
-                    .frame(minHeight: compact ? 26 : 30)
                     .background {
                         if isSelected && dragX == nil && !settling {
                             // Laid out with the tab itself, so the glass moves
@@ -674,7 +719,7 @@ struct TUFFTabBar<Tab: Hashable>: View {
                             // moves with the sidebar, say), and slides to the
                             // next tab as one matched shape.
                             TUFFGlassPill(isHovered: hovered == tab)
-                                .matchedGeometryEffect(id: labels, in: pillSpace)
+                                .matchedGeometryEffect(id: layout, in: pillSpace)
                         } else if !isSelected && hovered == tab {
                             Capsule().fill(Color.primary.opacity(0.06))
                         }
@@ -689,7 +734,7 @@ struct TUFFTabBar<Tab: Hashable>: View {
                 .accessibilityLabel(title(tab))
                 .accessibilityAddTraits(isSelected ? .isSelected : [])
                 .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(TabSpace.name)) } action: {
-                    frames[FrameKey(labels: labels, tab: tab)] = $0
+                    frames[FrameKey(layout: layout, tab: tab)] = $0
                 }
             }
         }
@@ -697,7 +742,7 @@ struct TUFFTabBar<Tab: Hashable>: View {
         // While dragging, the glass follows the pointer, placed from the
         // measured tab frames.
         .background(alignment: .topLeading) {
-            if dragX != nil || settling, let frame = pillFrame(labels: labels) {
+            if dragX != nil || settling, let frame = pillFrame(layout: layout) {
                 TUFFGlassPill(isHovered: true)
                     .frame(width: frame.width, height: frame.height)
                     .offset(x: frame.minX, y: frame.minY)
@@ -714,7 +759,7 @@ struct TUFFTabBar<Tab: Hashable>: View {
                     withTransaction(follow) {
                         dragX = x
                         if let tab = tabs.first(where: { tab in
-                            guard let frame = frames[FrameKey(labels: labels, tab: tab)] else { return false }
+                            guard let frame = frames[FrameKey(layout: layout, tab: tab)] else { return false }
                             return x >= frame.minX - 1 && x <= frame.maxX + 1
                         }) {
                             dragged = tab
@@ -752,10 +797,24 @@ struct GlassChoiceRow<Value: Hashable>: View {
     let label: (Value) -> String
 
     var body: some View {
-        LabeledContent(title) {
-            TUFFTabBar(tabs: options, selection: $selection, title: label, compact: true)
-                .fixedSize()
+        // At the narrowest window a five-way choice (Zoom) leaves less room
+        // beside it than its title needs, and the title wrapped one letter
+        // per line. There the title goes above the control instead.
+        ViewThatFits(in: .horizontal) {
+            LabeledContent(title) { choices }
+            VStack(alignment: .leading, spacing: TUFFDesign.Space.sm) {
+                // The row no longer pairs the title with the control for
+                // VoiceOver, so the control carries it.
+                Text(title).accessibilityHidden(true)
+                choices.accessibilityLabel(title)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
         }
+    }
+
+    private var choices: some View {
+        TUFFTabBar(tabs: options, selection: $selection, title: label, compact: true)
+            .fixedSize()
     }
 }
 

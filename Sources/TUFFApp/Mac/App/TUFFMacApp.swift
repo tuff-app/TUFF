@@ -215,7 +215,7 @@ struct TUFFMacApp: App {
                         Text(behavior.settingsLabel).tag(behavior)
                     }
                 }
-                Picker("Load Model At Launch",
+                Picker("Load Model at Launch",
                        selection: Bindable(model).loadModelOnLaunch) {
                     Text("Off").tag(false)
                     Text("On").tag(true)

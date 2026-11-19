@@ -24,7 +24,7 @@ struct ModelCatalogView: View {
             DisclosureGroup(isExpanded: $isAppleExpanded) {
                 VStack(alignment: .leading, spacing: 12) {
                     if model.availableAppleModels.isEmpty {
-                        Text("No Apple Models Found On This Mac").appFont(.body.weight(.medium))
+                        Text("No Apple models found on this Mac").appFont(.body.weight(.medium))
                         Text(model.appleAvailability.label)
                             .appFont(.caption).foregroundStyle(TUFFDesign.secondaryTextColor)
                         if model.appleAvailability.action == .openSystemSettings {
