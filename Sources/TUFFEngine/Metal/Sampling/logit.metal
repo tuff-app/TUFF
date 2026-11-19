@@ -180,6 +180,92 @@ void logit_softcap_softmax(
 }
 
 // ----------------------------------------------------------------------------
+// K8a-c: logit_softcap_softmax as three dispatches
+//
+// The kernel above walks the whole vocabulary on 256 threads, twice. Only the
+// running (m, d) sum has to: its result depends on the order the logits are
+// added in, so those 256 chains and their merge stay exactly as they are.
+// Capping a logit and scaling it into a probability are one independent
+// expression per element, so those two passes run one thread per element.
+// Every value is produced by the same expression as above, and the Swift
+// wrapper keeps this path only on a GPU where its bytes match K8's.
+// ----------------------------------------------------------------------------
+
+[[kernel]]
+void logit_softcap_values(
+    device const half*  logits   [[buffer(0)]],   // [V] FP16
+    device       float* capped   [[buffer(1)]],   // [V]
+    constant     uint&  V        [[buffer(2)]],
+    constant     float& softcap  [[buffer(3)]],
+    uint  i                [[thread_position_in_grid]]
+) {
+    if (i >= V) return;
+    capped[i] = softcap_value(float(logits[i]), softcap);
+}
+
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void logit_softmax_reduce(
+    device const float* capped   [[buffer(0)]],   // [V]
+    device       float* stats    [[buffer(1)]],   // [2] max, 1 / sum
+    constant     uint&  V        [[buffer(2)]],
+    uint  lid              [[thread_position_in_threadgroup]],
+    uint  lsize            [[threads_per_threadgroup]],
+    uint  simd_lane_id     [[thread_index_in_simdgroup]],
+    uint  simd_group_id    [[simdgroup_index_in_threadgroup]],
+    uint  simdgroups       [[simdgroups_per_threadgroup]]
+) {
+    threadgroup float partial_m[kLogitMaxSimdGroups];
+    threadgroup float partial_d[kLogitMaxSimdGroups];
+
+    float m = -INFINITY;
+    float d = 0.0f;
+
+    for (uint i = lid; i < V; i += lsize) {
+        float z  = capped[i];
+        float mn = max(m, z);
+        float scale = (m == -INFINITY) ? 0.0f : logit_softmax_exp(m - mn);
+        d = d * scale + logit_softmax_exp(z - mn);
+        m = mn;
+    }
+
+    float m_simd = simd_max(m);
+    float d_simd = simd_sum((m == -INFINITY) ? 0.0f : d * logit_softmax_exp(m - m_simd));
+
+    if (simd_lane_id == 0) {
+        partial_m[simd_group_id] = m_simd;
+        partial_d[simd_group_id] = d_simd;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (simd_group_id == 0) {
+        float mp = (simd_lane_id < simdgroups) ? partial_m[simd_lane_id] : -INFINITY;
+        float dp = (simd_lane_id < simdgroups) ? partial_d[simd_lane_id] : 0.0f;
+
+        float m_all = simd_max(mp);
+        float d_all = simd_sum((mp == -INFINITY) ? 0.0f : dp * logit_softmax_exp(mp - m_all));
+
+        if (simd_lane_id == 0) {
+            stats[0] = m_all;
+            stats[1] = 1.0f / d_all;
+        }
+    }
+}
+
+[[kernel]]
+void logit_softmax_normalize(
+    device const float* capped   [[buffer(0)]],   // [V]
+    device const float* stats    [[buffer(1)]],   // [2] max, 1 / sum
+    device       half*  probs    [[buffer(2)]],   // [V] FP16
+    constant     uint&  V        [[buffer(3)]],
+    uint  i                [[thread_position_in_grid]]
+) {
+    if (i >= V) return;
+    const float m_final     = stats[0];
+    const float inv_d_final = stats[1];
+    probs[i] = half(logit_softmax_exp(capped[i] - m_final) * inv_d_final);
+}
+
+// ----------------------------------------------------------------------------
 // K9: sample
 //
 // Reads softmaxed probabilities and writes one token id. Behaviour:

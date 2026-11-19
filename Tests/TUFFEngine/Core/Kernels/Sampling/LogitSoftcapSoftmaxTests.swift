@@ -31,6 +31,101 @@ import TUFFValidationSupport
         return Fp16Buffer.read(outBuf, count: v)
     }
 
+    /// The three-dispatch path runs the two per-element passes one thread
+    /// per logit and keeps the sum on the single kernel's 256 chains. Its
+    /// probabilities must be the single kernel's, byte for byte, for every
+    /// vocabulary size the models use and the awkward ones around a chain.
+    @Test func splitPathMatchesTheSingleKernelBitForBit() throws {
+        let ctx = try MetalContext()
+        let sizes = [1, 7, 255, 256, 257, 1_000, 2_048, 4_133, 65_537, 151_936, 200_064, 262_144]
+        var rng = SeedTree(0x5F7).key("softmax-split-parity")
+        var compared = 0
+        for softcap in [Float(30.0), 0.0] {
+            for v in sizes {
+                let single = try LogitSoftcapSoftmax(context: ctx, vocab: v, softcap: softcap,
+                                                     path: .single)
+                let split = try LogitSoftcapSoftmax(context: ctx, vocab: v, softcap: softcap,
+                                                    path: .split)
+                #expect(!single.usesSplitPath && split.usesSplitPath)
+                for shape in 0..<3 {
+                    var logits = (0..<v).map { index -> Float16 in
+                        switch shape {
+                        case 0: return Float16(rng.uniform(-12.0, 12.0))
+                        // Raw Gemma logits reach the hundreds, deep in the cap.
+                        case 1: return Float16(rng.uniform(-600.0, 600.0))
+                        // One confident token over a flat tail.
+                        default: return index == v / 3 ? 40 : Float16(rng.uniform(-3.0, 0.0))
+                        }
+                    }
+                    // With a cap, minus infinity is an ordinary capped value.
+                    // Without one it can turn a chain's sum into NaN in
+                    // either path, and equal NaN would prove nothing.
+                    if softcap > 0, v > 4 { logits[v - 3] = -.infinity }
+                    let bytes = v * MemoryLayout<Float16>.stride
+                    guard let input = Fp16Buffer.make(ctx.device, halves: logits),
+                          let fromSingle = Fp16Buffer.make(ctx.device, count: v),
+                          let fromSplit = Fp16Buffer.make(ctx.device, count: v),
+                          let command = ctx.queue.makeCommandBuffer() else {
+                        Issue.record("Failed to allocate Metal resources")
+                        return
+                    }
+                    memset(fromSingle.contents(), 0x00, bytes)
+                    memset(fromSplit.contents(), 0xFF, bytes)
+                    single.encode(commandBuffer: command, logits: input, probs: fromSingle,
+                                  v: UInt32(v), softcap: softcap)
+                    split.encode(commandBuffer: command, logits: input, probs: fromSplit,
+                                 v: UInt32(v), softcap: softcap)
+                    command.commit()
+                    command.waitUntilCompleted()
+                    #expect(command.status == .completed)
+                    #expect(memcmp(fromSingle.contents(), fromSplit.contents(), bytes) == 0,
+                            "softcap \(softcap), V \(v), shape \(shape)")
+                    let probabilities = Fp16Buffer.read(fromSplit, count: v)
+                    #expect(probabilities.allSatisfy { $0.isFinite && $0 >= 0 },
+                            "softcap \(softcap), V \(v), shape \(shape)")
+                    #expect(abs(probabilities.reduce(0, +) - 1) < 0.02,
+                            "softcap \(softcap), V \(v), shape \(shape)")
+                    compared += 1
+                }
+            }
+        }
+        #expect(compared == 2 * sizes.count * 3)
+    }
+
+    /// Whichever path the sampler ends up with (the split where the
+    /// load-time comparison passes, the single kernel where it does not or
+    /// with `TUFF_SOFTMAX_SPLIT=off`), the probabilities are the single
+    /// kernel's, including for a vocabulary larger than the scratch it was
+    /// built for.
+    @Test func automaticPathGivesTheSingleKernelsProbabilities() throws {
+        let ctx = try MetalContext()
+        let automatic = try LogitSoftcapSoftmax(context: ctx, vocab: 2_048, softcap: Self.softcap)
+        if ProcessInfo.processInfo.environment["TUFF_SOFTMAX_SPLIT"] == "off" {
+            #expect(!automatic.usesSplitPath)
+        }
+        #expect(try !LogitSoftcapSoftmax(context: ctx).usesSplitPath)
+        #expect(try !LogitSoftcapSoftmax(context: ctx, vocab: 2_048, path: .single).usesSplitPath)
+
+        var rng = SeedTree(0x5F8).key("softmax-split-capacity")
+        // Inside the scratch, beyond it, and with a cap other than the one
+        // the path was checked with: the last two use the single kernel.
+        for (v, softcap) in [(2_000, Self.softcap), (4_096, Self.softcap), (2_000, Float(0))] {
+            let logits = (0..<v).map { _ in Float16(rng.uniform(-20.0, 20.0)) }
+            let reference = try Self.runKernel(logitsFp16: logits, v: v, softcap: softcap)
+            guard let input = Fp16Buffer.make(ctx.device, halves: logits),
+                  let output = Fp16Buffer.make(ctx.device, count: v),
+                  let command = ctx.queue.makeCommandBuffer() else {
+                Issue.record("Failed to allocate Metal resources")
+                return
+            }
+            automatic.encode(commandBuffer: command, logits: input, probs: output,
+                             v: UInt32(v), softcap: softcap)
+            command.commit()
+            command.waitUntilCompleted()
+            #expect(Fp16Buffer.read(output, count: v) == reference, "V \(v), softcap \(softcap)")
+        }
+    }
+
     @Test func randomLogits_matchesReference() throws {
         let v = 2048
         var rng = SeedTree(0x131).key("softcap-softmax-random")

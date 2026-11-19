@@ -1,5 +1,6 @@
 import Foundation
 import Metal
+import Synchronization
 
 /// Swift wrapper for `logit_softcap_softmax`.
 ///
@@ -12,9 +13,112 @@ import Metal
 /// (and tests) can disable it by passing a very large number.
 final class LogitSoftcapSoftmax {
     private let pso: MTLComputePipelineState
+    /// The same result from three dispatches, two of them one thread per
+    /// logit; nil where it is unavailable or did not match on this GPU.
+    private let split: Split?
 
-    init(context: MetalContext) throws {
-        self.pso = try context.pipeline("logit_softcap_softmax")
+    /// Whether `encode` uses the three-dispatch path for a vocabulary that fits.
+    var usesSplitPath: Bool { split != nil }
+
+    private struct Split {
+        let values: MTLComputePipelineState
+        let reduce: MTLComputePipelineState
+        let normalize: MTLComputePipelineState
+        /// The capped logits as FP32, written by `values` and read by the
+        /// other two.
+        let capped: MTLBuffer
+        /// The maximum and the reciprocal of the sum.
+        let stats: MTLBuffer
+        let capacity: Int
+        /// The cap the comparison ran with; another cap uses the single kernel.
+        let softcap: Float
+    }
+
+    enum Path {
+        /// The split path where it is available and matches on this GPU.
+        /// `TUFF_SOFTMAX_SPLIT=off` keeps the single kernel, for comparisons.
+        case automatic
+        case single
+        /// The split path without the comparison; the parity tests use it.
+        case split
+    }
+
+    /// `vocab` sizes the split path's scratch (4 bytes per logit). Without
+    /// it only the single kernel is used.
+    init(context: MetalContext, vocab: Int? = nil, softcap: Float = 30.0,
+         path: Path = .automatic) throws {
+        let single = try context.pipeline("logit_softcap_softmax")
+        self.pso = single
+        let wanted: Bool
+        switch path {
+        case .single: wanted = false
+        case .split: wanted = true
+        case .automatic:
+            wanted = ProcessInfo.processInfo.environment["TUFF_SOFTMAX_SPLIT"] != "off"
+        }
+        guard wanted, let vocab, vocab > 0,
+              let values = try? context.pipeline("logit_softcap_values"),
+              let reduce = try? context.pipeline("logit_softmax_reduce"),
+              let normalize = try? context.pipeline("logit_softmax_normalize"),
+              let capped = context.device.makeBuffer(
+                  length: vocab * MemoryLayout<Float>.stride, options: .storageModePrivate),
+              let stats = context.device.makeBuffer(
+                  length: 2 * MemoryLayout<Float>.stride, options: .storageModePrivate)
+        else {
+            self.split = nil
+            return
+        }
+        capped.label = "softmax capped logits"
+        stats.label = "softmax max and 1/sum"
+        let split = Split(values: values, reduce: reduce, normalize: normalize,
+                          capped: capped, stats: stats, capacity: vocab, softcap: softcap)
+        if path == .split || Self.splitMatchesOnce(split, single: single,
+                                                   device: context.device, softcap: softcap) {
+            self.split = split
+        } else {
+            self.split = nil
+        }
+    }
+
+    /// Logits in each comparison: the largest vocabulary the sampler takes,
+    /// less a few so the 256 chains differ in length.
+    private static let comparisonCount = 262_144 - 37
+
+    /// One comparison per GPU and cap for the life of the process: every
+    /// session on a loaded model builds its own sampler.
+    private static let comparisons = Mutex<[Comparison: Bool]>([:])
+
+    private struct Comparison: Hashable {
+        let device: UInt64
+        let softcap: UInt32
+    }
+
+    private static func splitMatchesOnce(_ split: Split, single: MTLComputePipelineState,
+                                         device: MTLDevice, softcap: Float) -> Bool {
+        let key = Comparison(device: device.registryID, softcap: softcap.bitPattern)
+        if let known = comparisons.withLock({ $0[key] }) { return known }
+        let matches = autoreleasepool { () -> Bool in
+            // Its own scratch at a fixed size, so the answer cached for this
+            // GPU does not depend on which sampler happened to ask first.
+            guard let capped = device.makeBuffer(
+                      length: comparisonCount * MemoryLayout<Float>.stride,
+                      options: .storageModePrivate),
+                  let stats = device.makeBuffer(
+                      length: 2 * MemoryLayout<Float>.stride, options: .storageModePrivate)
+            else { return false }
+            let probe = Split(values: split.values, reduce: split.reduce,
+                              normalize: split.normalize, capped: capped, stats: stats,
+                              capacity: comparisonCount, softcap: softcap)
+            // Each shape exercises a different part: `mixed` has logits far
+            // out in both tails; `ordinary` keeps thousands of probabilities
+            // above FP16's smallest values; `flat` has every term matter to
+            // the sum; `peaked` is one confident token.
+            return ComparisonShape.allCases.allSatisfy {
+                splitMatches(probe, single: single, device: device, softcap: softcap, shape: $0)
+            }
+        }
+        comparisons.withLock { $0[key] = matches }
+        return matches
     }
 
     /// Encodes the kernel onto `commandBuffer`. `logits` and `probs` are FP16
@@ -25,6 +129,18 @@ final class LogitSoftcapSoftmax {
                        v: UInt32,
                        softcap: Float = 30.0) {
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        if let split, Int(v) <= split.capacity, softcap.bitPattern == split.softcap.bitPattern {
+            Self.encodeSplit(enc, split, logits: logits, probs: probs, v: v, softcap: softcap)
+        } else {
+            Self.encodeSingle(enc, pso, logits: logits, probs: probs, v: v, softcap: softcap)
+        }
+        enc.endEncoding()
+    }
+
+    private static func encodeSingle(_ enc: MTLComputeCommandEncoder,
+                                     _ pso: MTLComputePipelineState,
+                                     logits: MTLBuffer, probs: MTLBuffer,
+                                     v: UInt32, softcap: Float) {
         enc.setComputePipelineState(pso)
         enc.setBuffer(logits, offset: 0, index: 0)
         enc.setBuffer(probs,  offset: 0, index: 1)
@@ -37,7 +153,109 @@ final class LogitSoftcapSoftmax {
         let gridSize = MTLSize(width: threadsPerGroup, height: 1, depth: 1)
         let tgSize   = MTLSize(width: threadsPerGroup, height: 1, depth: 1)
         enc.dispatchThreads(gridSize, threadsPerThreadgroup: tgSize)
-        enc.endEncoding()
+    }
+
+    private static func encodeSplit(_ enc: MTLComputeCommandEncoder, _ split: Split,
+                                    logits: MTLBuffer, probs: MTLBuffer,
+                                    v: UInt32, softcap: Float) {
+        var vVar       = v
+        var softcapVar = softcap
+        func perElement(_ pso: MTLComputePipelineState) {
+            let width = min(pso.maxTotalThreadsPerThreadgroup, 256)
+            enc.dispatchThreads(MTLSize(width: Int(v), height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
+        }
+
+        enc.setComputePipelineState(split.values)
+        enc.setBuffer(logits, offset: 0, index: 0)
+        enc.setBuffer(split.capped, offset: 0, index: 1)
+        enc.setBytes(&vVar,       length: MemoryLayout<UInt32>.size, index: 2)
+        enc.setBytes(&softcapVar, length: MemoryLayout<Float>.size,  index: 3)
+        perElement(split.values)
+
+        // The one group of 256 threads the single kernel sums on, so every
+        // chain and merge adds the same logits in the same order.
+        enc.setComputePipelineState(split.reduce)
+        enc.setBuffer(split.capped, offset: 0, index: 0)
+        enc.setBuffer(split.stats, offset: 0, index: 1)
+        enc.setBytes(&vVar, length: MemoryLayout<UInt32>.size, index: 2)
+        let threadsPerGroup = min(Int(split.reduce.maxTotalThreadsPerThreadgroup), 256)
+        let group = MTLSize(width: threadsPerGroup, height: 1, depth: 1)
+        enc.dispatchThreads(group, threadsPerThreadgroup: group)
+
+        enc.setComputePipelineState(split.normalize)
+        enc.setBuffer(split.capped, offset: 0, index: 0)
+        enc.setBuffer(split.stats, offset: 0, index: 1)
+        enc.setBuffer(probs, offset: 0, index: 2)
+        enc.setBytes(&vVar, length: MemoryLayout<UInt32>.size, index: 3)
+        perElement(split.normalize)
+    }
+
+    /// Runs one set of logits through both paths and compares the bytes.
+    /// Each value comes from the same expression in either path, but the two
+    /// are compiled separately, so a GPU or driver that rounds one of them
+    /// differently keeps the single kernel. One input cannot prove every
+    /// case; the parity tests cover more on the GPUs they run on.
+    private enum ComparisonShape: CaseIterable {
+        case mixed, ordinary, flat, peaked
+    }
+
+    private static func splitMatches(_ split: Split, single: MTLComputePipelineState,
+                                     device: MTLDevice, softcap: Float,
+                                     shape: ComparisonShape) -> Bool {
+        let count = split.capacity
+        var state: UInt64 = 0x9E37_79B9_7F4A_7C15
+        func unit() -> Float {
+            state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+            return Float((state >> 16) & 0xFFFF) / 65_536
+        }
+        // Every logit finite: an infinite one can turn both paths' sums into
+        // NaN, and two buffers of NaN would compare equal while proving
+        // nothing.
+        let logits = (0..<count).map { index -> Float16 in
+            switch shape {
+            case .mixed:
+                // Deep in the cap where there is one.
+                return Float16((unit() - 0.5) * (index % 97 == 0 ? 400 : 24))
+            case .ordinary:
+                return Float16((unit() - 0.5) * 12)
+            case .flat:
+                return Float16((unit() - 0.5) * 0.02)
+            case .peaked:
+                return index == count / 3 ? 24 : Float16((unit() - 1) * 6)
+            }
+        }
+        let bytes = count * MemoryLayout<Float16>.stride
+        guard let input = device.makeBuffer(bytes: logits, length: bytes, options: .storageModeShared),
+              let fromSingle = device.makeBuffer(length: bytes, options: .storageModeShared),
+              let fromSplit = device.makeBuffer(length: bytes, options: .storageModeShared),
+              // Its own queue, so the probe leaves the model's queue untouched.
+              let queue = device.makeCommandQueue(),
+              let commandBuffer = queue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder()
+        else { return false }
+        // Different fills, so a path that writes nothing cannot pass.
+        memset(fromSingle.contents(), 0x00, bytes)
+        memset(fromSplit.contents(), 0xFF, bytes)
+        encodeSingle(encoder, single, logits: input, probs: fromSingle,
+                     v: UInt32(count), softcap: softcap)
+        encodeSplit(encoder, split, logits: input, probs: fromSplit,
+                    v: UInt32(count), softcap: softcap)
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        guard commandBuffer.status == .completed,
+              memcmp(fromSingle.contents(), fromSplit.contents(), bytes) == 0 else { return false }
+        // Equal bytes only count if they are probabilities: all finite, none
+        // negative, adding up to one within FP16 rounding of this many terms.
+        let probabilities = UnsafeBufferPointer(
+            start: fromSplit.contents().bindMemory(to: Float16.self, capacity: count), count: count)
+        var sum: Double = 0
+        for probability in probabilities {
+            guard probability.isFinite, probability >= 0 else { return false }
+            sum += Double(probability)
+        }
+        return abs(sum - 1) < 0.01
     }
 }
 
