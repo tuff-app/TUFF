@@ -105,6 +105,10 @@ Unknown fields return `unknown_parameter`, and unsupported values return
 behavior. `chat_template_kwargs` accepts only `enable_thinking` and
 `preserve_thinking`.
 
+`seed: -1` and `max_tokens: -1` mean the same as leaving the field out: a
+random seed and the default limit of 4,096 tokens. Other clients for local
+servers send them that way.
+
 ### Messages and Responses
 
 These are smaller subsets, enough for clients that speak those formats.

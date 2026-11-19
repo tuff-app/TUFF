@@ -232,8 +232,14 @@ enum InferenceAPI: String, Sendable {
         }
         // Checked under the Responses names: once mapped, a bad value was
         // reported against max_completion_tokens, which the client never sent.
-        if let limit = root["max_output_tokens"] as? NSNumber, limit.intValue < 1 {
-            throw Self.invalid("max_output_tokens must be at least 1", "max_output_tokens")
+        if let limit = root["max_output_tokens"], !(limit is NSNull) {
+            guard let number = limit as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  number.doubleValue.rounded() == number.doubleValue else {
+                throw Self.invalid("max_output_tokens must be a whole number", "max_output_tokens")
+            }
+            guard number.doubleValue >= 1 else {
+                throw Self.invalid("max_output_tokens must be at least 1", "max_output_tokens")
+            }
         }
         if let input = root["input"] {
             let empty = (input as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty

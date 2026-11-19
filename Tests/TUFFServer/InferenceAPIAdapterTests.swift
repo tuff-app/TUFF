@@ -163,6 +163,34 @@ struct InferenceAPIAdapterTests {
         _ = try OpenAIRequestValidator.validate(request, modelID: "fixture", dialect: .gemma)
     }
 
+    /// Each route's output limit is refused under the name the client sent,
+    /// and -1 means "no limit" only on Chat Completions.
+    @Test func outputLimitsAreCheckedUnderTheirOwnNames() throws {
+        func refusal(_ api: InferenceAPI, _ body: [String: Any]) throws -> (message: String, param: String?) {
+            do {
+                _ = try api.request(data(body))
+            } catch ServerRequestError.invalid(let message, let param, _) {
+                return (message, param)
+            }
+            Issue.record("expected a refusal")
+            return ("", nil)
+        }
+        for value: Any in [1.5, -1, 0, "32", true] {
+            var body = responses(); body["max_output_tokens"] = value
+            #expect(try refusal(.responses, body).param == "max_output_tokens", "\(value)")
+            var message = messages(); message["max_tokens"] = value
+            #expect(try refusal(.messages, message).param == "max_tokens", "\(value)")
+        }
+        var fraction = responses(); fraction["max_output_tokens"] = 1.5
+        #expect(try refusal(.responses, fraction).message == "max_output_tokens must be a whole number")
+        var whole = responses(); whole["max_output_tokens"] = 64.0
+        #expect(try InferenceAPI.responses.request(data(whole)).maxCompletionTokens == 64)
+        var absent = responses(); absent["max_output_tokens"] = NSNull()
+        #expect(try InferenceAPI.responses.request(data(absent)).maxCompletionTokens == nil)
+        var topK = messages(); topK["top_k"] = 2.5
+        #expect(try refusal(.messages, topK).param == "top_k")
+    }
+
     @Test func numericFlagsDoNotBecomeBooleans() throws {
         for key in ["store", "background", "parallel_tool_calls"] {
             var body = responses(); body[key] = 0

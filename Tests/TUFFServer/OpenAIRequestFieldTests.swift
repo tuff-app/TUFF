@@ -86,6 +86,76 @@ struct OpenAIRequestFieldTests {
         #expect(functions.message == "legacy functions are not supported; use tools")
     }
 
+    /// llama.cpp and LM Studio clients send -1 for "no seed" and "no limit".
+    /// Both were refused, the seed as "malformed JSON request".
+    @Test func minusOneSeedAndLimitMeanTheSameAsLeavingThemOut() throws {
+        let request = try Self.decode(#""seed":-1,"max_tokens":-1"#)
+        #expect(request.seed == nil)
+        let validated = try OpenAIRequestValidator.validate(request, modelID: "m")
+        #expect(validated.generationConfig.seed == nil)
+        #expect(validated.maximumCompletionTokens == 4096)
+        #expect(validated.generationConfig.maxNewTokens == 4096)
+        let completion = try OpenAIRequestValidator.validate(
+            try Self.decode(#""max_completion_tokens":-1"#), modelID: "m")
+        #expect(completion.maximumCompletionTokens == 4096)
+
+        // Every other limit below one is still refused.
+        for limit in ["0", "-2"] {
+            #expect(throws: ServerRequestError.self) {
+                try OpenAIRequestValidator.validate(
+                    try Self.decode(#""max_tokens":\#(limit)"#), modelID: "m")
+            }
+        }
+    }
+
+    /// OpenAI seeds are signed 64-bit integers, so a negative seed other than
+    /// -1 is a fixed seed and the whole unsigned range still decodes.
+    @Test func negativeAndLargeSeedsStayFixedSeeds() throws {
+        #expect(try Self.decode(#""seed":-7"#).seed == UInt64(bitPattern: -7))
+        #expect(try Self.decode(#""seed":-9223372036854775808"#).seed == UInt64(1) << 63)
+        #expect(try Self.decode(#""seed":0"#).seed == 0)
+        #expect(try Self.decode(#""seed":18446744073709551615"#).seed == .max)
+        #expect(try Self.decode(#""seed":null"#).seed == nil)
+
+        // A request the server re-encodes keeps the same seed.
+        let request = try Self.decode(#""seed":-7"#)
+        let again = try JSONDecoder().decode(
+            OpenAIChatRequest.self, from: JSONEncoder().encode(request))
+        #expect(again.seed == request.seed)
+    }
+
+    /// The Apple model takes no seed. -1 asks for none, so it is accepted
+    /// there; a fixed seed, negative or not, is still refused.
+    @Test func appleAcceptsMinusOneSeedAndRefusesFixedSeeds() throws {
+        func validate(_ extra: String) throws -> ValidatedChatRequest {
+            try OpenAIRequestValidator.validate(
+                try Self.decode(extra), modelID: "m", dialect: .chatml,
+                preStagedImages: [:], attachmentLease: nil, appleModel: true)
+        }
+        #expect(try validate(#""seed":-1"#).generationConfig.seed == nil)
+        for seed in ["-7", "7"] {
+            #expect(throws: ServerRequestError.self) { try validate(#""seed":\#(seed)"#) }
+        }
+    }
+
+    /// Foundation reports these as corrupt data with no coding path, which the
+    /// server answered with "malformed JSON request".
+    @Test func aFractionOrOverflowInAWholeNumberFieldNamesTheField() throws {
+        let cases = [
+            ("max_tokens", "100.5"), ("max_completion_tokens", "1e30"),
+            ("top_k", "2.5"), ("n", "1.5"),
+            ("seed", "1.5"), ("seed", "-1.5"), ("seed", "1e40"), ("seed", "-1e40"),
+        ]
+        for (field, value) in cases {
+            let refused = try Self.rejection(#""\#(field)":\#(value)"#)
+            #expect(refused.param == field, "\(field)=\(value)")
+            #expect(refused.code == "invalid_value")
+            #expect(refused.message == "\(field) must be a whole number")
+        }
+        // A whole number written with a fraction part is still that number.
+        #expect(try Self.decode(#""max_tokens":64.0,"seed":42.0"#).maxTokens == 64)
+    }
+
     /// The sweep wins over a type error elsewhere, so the answer names the
     /// real problem whatever order the decoder would have met them in.
     @Test func theSweepRunsBeforeTypedDecoding() throws {

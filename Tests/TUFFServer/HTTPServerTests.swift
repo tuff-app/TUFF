@@ -708,6 +708,8 @@ struct HTTPServerTests {
         #expect(envelope(#"{"model":"m","messages":[],"max_tokens":"ten"}"#).error.param
             == "max_tokens")
         #expect(envelope(#"[1]"#).error.message == "the request body must be a JSON object")
+        #expect(envelope(#"{"model":"m","messages":[],"seed":"x"}"#).error.param == "seed")
+        #expect(envelope(#"{"model":"m","messages":[],"seed":-1}"#).error.code == "none")
         #expect(envelope(#"{"model":"#).error.code == "invalid_json")
     }
 

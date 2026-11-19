@@ -282,6 +282,25 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
         }
 
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        // A whole-number field that holds a fraction, or a number outside the
+        // field's range, fails inside Foundation with an error of its own
+        // that JSONDecoder turns into corrupt data with no coding path. That
+        // reached the caller as "malformed JSON request" although the JSON
+        // was well formed, so name the field here instead. A value of the
+        // wrong type keeps its own error, which already names the field.
+        func wholeNumber<T: FixedWidthInteger & Decodable>(
+            _ type: T.Type, _ key: CodingKeys
+        ) throws -> T? {
+            do {
+                return try container.decodeIfPresent(T.self, forKey: key)
+            } catch DecodingError.typeMismatch(let type, let context) {
+                throw DecodingError.typeMismatch(type, context)
+            } catch {
+                throw ServerRequestError.invalid(
+                    message: "\(key.stringValue) must be a whole number",
+                    param: key.stringValue, code: "invalid_value")
+            }
+        }
         model = try container.decode(String.self, forKey: .model)
         messages = try container.decode([OpenAIChatMessage].self, forKey: .messages)
         stream = try container.decodeIfPresent(Bool.self, forKey: .stream)
@@ -289,19 +308,25 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
             OpenAIStreamOptions.self, forKey: .streamOptions)
         temperature = try container.decodeIfPresent(Float.self, forKey: .temperature)
         topP = try container.decodeIfPresent(Float.self, forKey: .topP)
-        maxTokens = try container.decodeIfPresent(Int.self, forKey: .maxTokens)
-        maxCompletionTokens = try container.decodeIfPresent(
-            Int.self, forKey: .maxCompletionTokens)
+        maxTokens = try wholeNumber(Int.self, .maxTokens)
+        maxCompletionTokens = try wholeNumber(Int.self, .maxCompletionTokens)
         stop = try container.decodeIfPresent(OpenAIStop.self, forKey: .stop)
-        seed = try container.decodeIfPresent(UInt64.self, forKey: .seed)
+        // OpenAI seeds are signed. llama.cpp-style clients send -1 for "pick
+        // one for me", which is what an absent seed already means here; any
+        // other negative seed stays a fixed seed.
+        if let signed = try? container.decodeIfPresent(Int64.self, forKey: .seed), signed < 0 {
+            seed = signed == -1 ? nil : UInt64(bitPattern: signed)
+        } else {
+            seed = try wholeNumber(UInt64.self, .seed)
+        }
         tools = try container.decodeIfPresent([OpenAITool].self, forKey: .tools)
         toolChoice = try container.decodeIfPresent(JSONValue.self, forKey: .toolChoice)
         parallelToolCalls = try container.decodeIfPresent(
             Bool.self, forKey: .parallelToolCalls)
-        topK = try container.decodeIfPresent(Int.self, forKey: .topK)
+        topK = try wholeNumber(Int.self, .topK)
         repetitionPenalty = try container.decodeIfPresent(
             Float.self, forKey: .repetitionPenalty)
-        n = try container.decodeIfPresent(Int.self, forKey: .n)
+        n = try wholeNumber(Int.self, .n)
         logprobs = try container.decodeIfPresent(Bool.self, forKey: .logprobs)
         presencePenalty = try container.decodeIfPresent(
             Float.self, forKey: .presencePenalty)
@@ -768,7 +793,10 @@ public enum OpenAIRequestValidator {
             throw invalid("repetition_penalty must be positive",
                           "repetition_penalty", "invalid_value")
         }
-        let maximum = request.maxCompletionTokens ?? request.maxTokens ?? 4096
+        // -1 is how llama.cpp and LM Studio clients ask for no limit of their
+        // own, which is what leaving the field out already means.
+        let requestedMaximum = request.maxCompletionTokens ?? request.maxTokens
+        let maximum = requestedMaximum == -1 ? 4096 : requestedMaximum ?? 4096
         guard maximum > 0 else {
             throw invalid("maximum completion tokens must be positive",
                           request.maxCompletionTokens != nil ? "max_completion_tokens" : "max_tokens",
