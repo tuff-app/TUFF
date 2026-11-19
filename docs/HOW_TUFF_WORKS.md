@@ -63,7 +63,9 @@ Family inference helpers and shaders are authenticated external packages,
 installed with their first dependent model and shared by compatible models.
 The host, CLI and HTTP server contain no family engine. The installed
 `TUFFInferenceEngine` handles chat sockets, CLI requests and API RPC. Required
-model bindings and live helper leases protect engines during cleanup.
+model bindings and live helper leases protect engines during cleanup. At
+launch the app removes engine versions that an update replaced, once no model
+is bound to them.
 
 Chat talks to the decode service over a Unix socket, so a GPU problem can't
 take your chats down with it.

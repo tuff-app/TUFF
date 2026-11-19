@@ -2,6 +2,7 @@ import Foundation
 import TUFFInferenceTypes
 import CryptoKit
 import Darwin
+import Synchronization
 
 public enum InferenceEngineStoreError: Error, Equatable {
     case unsafeFile(String)
@@ -29,6 +30,9 @@ public actor InferenceEngineStore {
     private let publisherKeys: [String: Data]
     private var leases: [UUID: String] = [:]
     private var leaseDescriptors: [UUID: Int32] = [:]
+    /// How many times this store found the bindings lock busy and waited.
+    /// Readable while the store is waiting, which is when a test needs it.
+    nonisolated let bindingsLockWaits = Atomic<Int>(0)
 
     public init(root: URL, trustedPublisherKeys: [String: Data]) {
         self.root = root.standardizedFileURL
@@ -169,20 +173,82 @@ public actor InferenceEngineStore {
     public func remove(packageID: String, version: InferenceEngineVersion,
                        requiredByInstalledModel: Bool) throws -> Bool {
         try ensureStore()
-        let bindingsLock = try modelBindingsLock(exclusive: false)
-        defer { close(bindingsLock) }
-        let bindings = try readModelBindings()
-        let referenced = bindings.models.values.joined().contains {
-            $0.packageID == packageID && $0.version == version
-        }
         let directory = try versionDirectory(packageID: packageID, version: version)
-        guard !referenced, !requiredByInstalledModel, !leases.values.contains(directory.path) else { return false }
+        // A bound version is left without touching its lock: holding it, even
+        // for an instant, would refuse another process leasing it just then.
+        guard !requiredByInstalledModel, !leases.values.contains(directory.path),
+              try !boundVersions(packageID: packageID).contains(version) else { return false }
         let lock: Int32
         do { lock = try packageLock(packageID: packageID, version: version, exclusive: true) }
         catch InferenceEngineStoreError.packageBusy { return false }
         defer { close(lock) }
+        // Read again under the exclusive lock. Binding a model holds the
+        // version's shared lock, so the answer cannot change from here on,
+        // and the bindings are not held while the files are deleted.
+        guard try !boundVersions(packageID: packageID).contains(version) else { return false }
         try FileManager.default.removeItem(at: directory)
         return true
+    }
+
+    /// Removes the versions of one package that an update replaced, for a
+    /// cleanup nobody asked for: older than `current`, not bound to a model,
+    /// not held by a process, and untouched since before `installedBefore`.
+    ///
+    /// Other TUFF builds share this folder, older ones included. One of them
+    /// may have installed, repaired or recovered a version a moment ago and
+    /// not leased it yet. So every candidate is locked exclusively before
+    /// anything is examined: installing, repairing and recovering a version
+    /// need that lock, and leasing or binding needs its shared form. Then the
+    /// package folder itself must be unchanged since `installedBefore`. Any
+    /// installation or recovery renames a directory into it, which shows
+    /// there even when the version restored keeps its old dates, as an older
+    /// build's recovery does. A package that changed recently waits for a
+    /// later launch.
+    public func removeSuperseded(packageID: String, olderThan current: InferenceEngineVersion,
+                                 installedBefore: Date) throws -> Int {
+        try ensureStore()
+        let candidates = try versions(packageID: packageID).filter { $0 < current }
+        guard !candidates.isEmpty else { return 0 }
+        let package = root.appendingPathComponent(packageID, isDirectory: true)
+        let bound = try boundVersions(packageID: packageID)
+        var held: [(version: InferenceEngineVersion, directory: URL, lock: Int32)] = []
+        defer { for entry in held { close(entry.lock) } }
+        for version in candidates where !bound.contains(version) {
+            guard let directory = try? versionDirectory(packageID: packageID, version: version),
+                  !leases.values.contains(directory.path),
+                  let lock = try? packageLock(packageID: packageID, version: version, exclusive: true)
+            else { continue }
+            held.append((version, directory, lock))
+        }
+        guard !held.isEmpty, let changed = Self.modificationDate(of: package),
+              changed < installedBefore else { return 0 }
+        // Read again now that the candidates are locked; see `remove`.
+        let stillBound = try boundVersions(packageID: packageID)
+        var removed = 0
+        for entry in held where !stillBound.contains(entry.version) {
+            let backup = package.appendingPathComponent(".repair-backup-\(entry.version.directoryName)")
+            guard let placed = Self.modificationDate(of: entry.directory), placed < installedBefore,
+                  !FileManager.default.fileExists(atPath: backup.path) else { continue }
+            try FileManager.default.removeItem(at: entry.directory)
+            removed += 1
+        }
+        return removed
+    }
+
+    /// The versions of `packageID` that any model is bound to, read under a
+    /// briefly held bindings lock.
+    private func boundVersions(packageID: String) throws -> [InferenceEngineVersion] {
+        let lock = try modelBindingsLock(exclusive: false)
+        defer { close(lock) }
+        return try readModelBindings().models.values.joined()
+            .filter { $0.packageID == packageID }.map(\.version)
+    }
+
+    private static func modificationDate(of directory: URL) -> Date? {
+        var info = stat()
+        guard lstat(directory.path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR else { return nil }
+        return Date(timeIntervalSince1970: TimeInterval(info.st_mtimespec.tv_sec)
+            + TimeInterval(info.st_mtimespec.tv_nsec) / 1e9)
     }
 
     /// Pins every engine version an installed model needs, including an old
@@ -193,8 +259,11 @@ public actor InferenceEngineStore {
         guard !modelID.isEmpty, modelID.utf8.count <= 256, references.count <= 8,
               !references.isEmpty else { throw InferenceEngineStoreError.unsafeFile("model binding") }
         try ensureStore()
-        let lock = try modelBindingsLock(exclusive: true)
-        defer { close(lock) }
+        // The versions are locked and verified before the bindings are
+        // locked. Hashing a payload takes tens of milliseconds, and every
+        // process that loads a model waits on the bindings lock. The shared
+        // version locks keep these files from being removed until the record
+        // is written.
         var versionLocks: [Int32] = []
         defer { for fd in versionLocks { close(fd) } }
         for reference in references {
@@ -207,6 +276,8 @@ public actor InferenceEngineStore {
             }
             try verifyPayload(at: directory, manifest: manifest, hasReceipt: true)
         }
+        let lock = try modelBindingsLock(exclusive: true)
+        defer { close(lock) }
         var bindings = try readModelBindings()
         bindings.models[modelID] = references
         if let good = bindings.knownGood?[modelID], !references.contains(good) {
@@ -233,11 +304,15 @@ public actor InferenceEngineStore {
     public func status(packageID: String, version: InferenceEngineVersion) throws -> InferenceEnginePackageStatus {
         try ensureStore()
         let directory = try versionDirectory(packageID: packageID, version: version)
-        let bindingLock = try modelBindingsLock(exclusive: false)
-        defer { close(bindingLock) }
-        let bindings = try readModelBindings()
         let reference = InferenceEnginePackageReference(packageID: packageID, version: version)
-        let required = bindings.models.values.filter { $0.contains(reference) }.count
+        // Only the count needs the bindings. The payload is hashed below, and
+        // holding the lock through that made other processes' model loads wait.
+        let required: Int
+        do {
+            let bindingLock = try modelBindingsLock(exclusive: false)
+            defer { close(bindingLock) }
+            required = try readModelBindings().models.values.filter { $0.contains(reference) }.count
+        }
         var inUse = leases.values.contains(directory.path)
         do { let fd = try packageLock(packageID: packageID, version: version, exclusive: true); close(fd) }
         catch InferenceEngineStoreError.packageBusy { inUse = true }
@@ -316,9 +391,28 @@ public actor InferenceEngineStore {
 
     private func modelBindingsLock(exclusive: Bool) throws -> Int32 {
         // Reserved package name; independent of all published engine locks.
-        try packageLock(packageID: "model-bindings", version: .init(major: 0, minor: 0, patch: 0),
-                        exclusive: exclusive)
+        // Every holder reads or rewrites one small file and lets go, so a
+        // busy lock is about to be free. The app, the CLI and the server
+        // share it: failing at once made one process's model load fail with
+        // `packageBusy` because another happened to be reading the bindings
+        // at that instant. Wait for it, up to about two seconds, instead.
+        var attempts = 0
+        while true {
+            do {
+                return try packageLock(packageID: "model-bindings",
+                                       version: .init(major: 0, minor: 0, patch: 0),
+                                       exclusive: exclusive)
+            } catch InferenceEngineStoreError.packageBusy where attempts < Self.bindingsLockAttempts {
+                attempts += 1
+                bindingsLockWaits.add(1, ordering: .relaxed)
+                usleep(Self.bindingsLockRetryMicroseconds)
+            }
+        }
     }
+
+    /// About two seconds in all, far longer than any holder keeps the lock.
+    private static let bindingsLockAttempts = 400
+    private static let bindingsLockRetryMicroseconds: UInt32 = 5_000
 
     private func readModelBindings() throws -> InferenceEngineModelBindings {
         let url = root.appendingPathComponent(".model-bindings.json")
@@ -386,6 +480,12 @@ public actor InferenceEngineStore {
                (try? verifyPayload(at: backup, manifest: previous, hasReceipt: true)) != nil {
                 try FileManager.default.removeItem(at: target)
                 try FileManager.default.moveItem(at: backup, to: target)
+                // The restored directory keeps its old date. Whoever is
+                // recovering it is about to lease it, so mark it as newly
+                // placed for the automatic cleanup, which also sees the
+                // rename in the package folder.
+                try? FileManager.default.setAttributes(
+                    [.modificationDate: Date()], ofItemAtPath: target.path)
                 return
             }
             // Both managed copies are corrupt. Keep the active bytes for the
@@ -395,6 +495,8 @@ public actor InferenceEngineStore {
             // Preserve the previous bytes. A subsequent authenticated repair can
             // replace them; acquisition never treats the backup as verified.
             try FileManager.default.moveItem(at: backup, to: target)
+            try? FileManager.default.setAttributes(
+                [.modificationDate: Date()], ofItemAtPath: target.path)
         }
     }
 

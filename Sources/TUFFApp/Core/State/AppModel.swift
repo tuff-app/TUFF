@@ -1914,7 +1914,8 @@ public final class AppModel {
         loadModel()
     }
 
-    /// Downloads the engine each installed model needs, in the background.
+    /// Downloads the engine each installed model needs, in the background,
+    /// then removes the engine versions nothing can load any more.
     /// An update that ships new engines otherwise made the first load of each
     /// model family wait for its download under "Preparing inference
     /// engine". A load started meanwhile joins the same download, and an
@@ -1933,6 +1934,9 @@ public final class AppModel {
                 else { continue }
                 await engine.release()
             }
+            // After the current engines are in place: versions that an update
+            // replaced, that no model is bound to and nothing is running.
+            await (try? InferenceEngineEnvironment.controller())?.removeSupersededPackages()
         }
     }
 

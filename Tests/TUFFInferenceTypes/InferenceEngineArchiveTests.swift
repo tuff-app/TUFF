@@ -1,8 +1,9 @@
 import Foundation
 import CryptoKit
+import Synchronization
 import Testing
 import TUFFInferenceTypes
-import TUFFRuntimeManagement
+@testable import TUFFRuntimeManagement
 
 @Suite struct InferenceEngineArchiveTests {
     private let helper = Data("engine".utf8)
@@ -96,6 +97,278 @@ import TUFFRuntimeManagement
         #expect(try await restarted.removeUnused(.init(packageID: request.packageID, version: request.version)) == false)
         try await restarted.unbindModel("model-a")
         #expect(try await restarted.removeUnused(.init(packageID: request.packageID, version: request.version)))
+    }
+
+    /// One catalog per engine release, as an app update ships it. Every
+    /// version is signed by the same publisher key and served by one transport.
+    private struct ReleaseSeries {
+        let keys: [String: Data]
+        let transport: MockEngineDownloadTransport
+        let releases: [InferenceEngineRelease]
+
+        func controller(root: URL, current: Int) throws -> InferenceEngineDistributionController {
+            try InferenceEngineDistributionController(root: root.appendingPathComponent("engines"),
+                catalog: InferenceEngineCatalog(publisherKeys: keys, releases: [releases[current]]),
+                transport: transport)
+        }
+    }
+
+    private func series(root: URL, versions: [InferenceEngineVersion]) throws -> ReleaseSeries {
+        let key = Curve25519.Signing.PrivateKey()
+        func hash(_ bytes: Data) -> String {
+            SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        }
+        var contents: [URL: Data] = [:]
+        var releases: [InferenceEngineRelease] = []
+        for version in versions {
+            // A different payload per version, as real releases have.
+            let helper = Data("engine \(version.directoryName)".utf8)
+            let archive = tar([("bin/helper", helper, 48)])
+            let manifest = InferenceEngineManifest(packageID: "gemma",
+                version: version, minimumMacOSMajorVersion: 15,
+                minimumProtocolVersion: 3, maximumProtocolVersion: 3,
+                architectureIDs: ["gemma4-e4b"], modelFormatVersions: [1],
+                quantizationLayouts: ["affine"], residencyModes: [.resident, .streamed],
+                executablePath: "bin/helper", archiveBytes: UInt64(archive.count),
+                archiveSHA256: hash(archive), files: [
+                    .init(path: "bin/helper", bytes: UInt64(helper.count), sha256: hash(helper), executable: true),
+                ])
+            let payload = try JSONEncoder().encode(manifest)
+            let signed = SignedInferenceEngineManifest(publisherKeyID: "test", payload: payload,
+                signature: try key.signature(for: SignedInferenceEngineManifest.signatureMessage(for: payload)))
+            let base = "https://github.com/tuff-app/TUFF/releases/download/v\(version.directoryName)/gemma"
+            let manifestURL = URL(string: base + ".json")!, archiveURL = URL(string: base + ".tar")!
+            contents[manifestURL] = try JSONEncoder().encode(signed)
+            contents[archiveURL] = archive
+            releases.append(InferenceEngineRelease(packageID: "gemma", version: version,
+                architectureIDs: ["gemma4-e4b"], minimumMacOSMajorVersion: 15,
+                manifestURL: manifestURL, archiveURL: archiveURL,
+                archiveBytes: UInt64(archive.count), installedBytes: UInt64(helper.count)))
+        }
+        return ReleaseSeries(keys: ["test": key.publicKey.rawRepresentation],
+            transport: MockEngineDownloadTransport(root: root, contents: contents), releases: releases)
+    }
+
+    private func installedVersions(_ root: URL) throws -> [String] {
+        try FileManager.default.contentsOfDirectory(
+            atPath: root.appendingPathComponent("engines/gemma").path)
+            .filter { !$0.hasPrefix(".") }.sorted()
+    }
+
+    private func acquire(_ controller: InferenceEngineDistributionController) async throws -> InferenceEngineLease {
+        try await controller.acquire(architectureID: "gemma4-e4b",
+            quantizationLayout: "affine", protocolVersion: 3, macOSMajorVersion: 15)
+    }
+
+    /// What an app update leaves behind: the engine the previous release
+    /// used. It goes once no model is bound to it; the current one stays even
+    /// before any model has used it. `minimumAge: 0` here; the waiting period
+    /// has its own test.
+    @Test func supersededEnginesAreRemovedOnceNoModelIsBoundToThem() async throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let series = try series(root: root, versions: [
+            .init(major: 9, minor: 0, patch: 0), .init(major: 9, minor: 1, patch: 0),
+        ])
+
+        // The previous app release: one model loaded on 9.0.0 and proven good.
+        let before = try series.controller(root: root, current: 0)
+        let old = try await acquire(before)
+        try await before.bindModel("model-a", engine: old)
+        try await before.markKnownGood("model-a", engine: old)
+        try await before.release(old)
+        // Nothing is superseded yet: the only version is the current one.
+        #expect(await before.removeSupersededPackages(minimumAge: 0) == 0)
+
+        // The update. 9.1.0 is fetched at launch, before any model uses it.
+        let after = try series.controller(root: root, current: 1)
+        let new = try await acquire(after)
+        try await after.release(new)
+        #expect(await after.removeSupersededPackages(minimumAge: 0) == 0)
+        #expect(try installedVersions(root) == ["9.0.0", "9.1.0"])
+
+        // The model's first load on 9.1.0 keeps 9.0.0 bound for rollback.
+        let first = try await acquire(after)
+        try await after.bindModel("model-a", engine: first)
+        #expect(await after.removeSupersededPackages(minimumAge: 0) == 0)
+        #expect(try installedVersions(root) == ["9.0.0", "9.1.0"])
+
+        // Proven good on 9.1.0 and bound again, as the next load does: now
+        // nothing can load 9.0.0. A live lease on 9.1.0 does not matter.
+        try await after.markKnownGood("model-a", engine: first)
+        try await after.bindModel("model-a", engine: first)
+        #expect(await after.removeSupersededPackages(minimumAge: 0) == 1)
+        #expect(try installedVersions(root) == ["9.1.0"])
+        try await after.release(first)
+
+        // The current version stays although no model is bound to it; the
+        // Settings button is what removes an engine nothing uses at all.
+        try await after.unbindModel("model-a")
+        #expect(await after.removeSupersededPackages(minimumAge: 0) == 0)
+        #expect(try installedVersions(root) == ["9.1.0"])
+        #expect(try await after.removeUnusedPackages() == 1)
+    }
+
+    /// A superseded engine a process is still running is left for a later launch.
+    @Test func aSupersededEngineInUseIsKept() async throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let series = try series(root: root, versions: [
+            .init(major: 9, minor: 0, patch: 0), .init(major: 9, minor: 1, patch: 0),
+        ])
+        let before = try series.controller(root: root, current: 0)
+        let running = try await acquire(before)
+
+        let after = try series.controller(root: root, current: 1)
+        try await after.release(try await acquire(after))
+        #expect(await after.removeSupersededPackages(minimumAge: 0) == 0)
+        #expect(try installedVersions(root) == ["9.0.0", "9.1.0"])
+
+        try await before.release(running)
+        #expect(await after.removeSupersededPackages(minimumAge: 0) == 1)
+        #expect(try installedVersions(root) == ["9.1.0"])
+    }
+
+    /// A version put in place a moment ago may be one another build is still
+    /// installing, between its installation and its lease, so it waits a day.
+    @Test func aSupersededEngineInstalledRecentlyIsKept() async throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let series = try series(root: root, versions: [
+            .init(major: 9, minor: 0, patch: 0), .init(major: 9, minor: 1, patch: 0),
+        ])
+        let before = try series.controller(root: root, current: 0)
+        try await before.release(try await acquire(before))
+        let after = try series.controller(root: root, current: 1)
+        try await after.release(try await acquire(after))
+
+        #expect(await after.removeSupersededPackages() == 0)
+        #expect(await after.removeSupersededPackages(now: Date().addingTimeInterval(86_000)) == 0)
+        #expect(try installedVersions(root) == ["9.0.0", "9.1.0"])
+        #expect(await after.removeSupersededPackages(now: Date().addingTimeInterval(86_500)) == 1)
+        #expect(try installedVersions(root) == ["9.1.0"])
+    }
+
+    /// Two builds can share the folder. The older one must not take the
+    /// newer one's engine, bound or not, however long it has been there.
+    @Test func anOlderBuildNeverRemovesANewerBuildsEngine() async throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let series = try series(root: root, versions: [
+            .init(major: 9, minor: 0, patch: 0), .init(major: 9, minor: 1, patch: 0),
+            .init(major: 10, minor: 0, patch: 0),
+        ])
+        for index in 0..<3 {
+            let build = try series.controller(root: root, current: index)
+            try await build.release(try await acquire(build))
+        }
+        let middle = try series.controller(root: root, current: 1)
+        #expect(await middle.removeSupersededPackages(minimumAge: 0) == 1)
+        #expect(try installedVersions(root) == ["10.0.0", "9.1.0"])
+        let oldest = try series.controller(root: root, current: 0)
+        #expect(await oldest.removeSupersededPackages(minimumAge: 0) == 0)
+        #expect(try installedVersions(root) == ["10.0.0", "9.1.0"])
+    }
+
+    /// A model on a drive that is not plugged in keeps its engine. Only the
+    /// Settings button drops the bindings of folders that are gone.
+    @Test func theEngineOfAModelWhoseFolderIsMissingIsKept() async throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let series = try series(root: root, versions: [
+            .init(major: 9, minor: 0, patch: 0), .init(major: 9, minor: 1, patch: 0),
+        ])
+        let before = try series.controller(root: root, current: 0)
+        let old = try await acquire(before)
+        try await before.bindModel("model-away", engine: old,
+            directory: root.appendingPathComponent("unplugged/model.gturbo"))
+        try await before.release(old)
+
+        let after = try series.controller(root: root, current: 1)
+        try await after.release(try await acquire(after))
+        #expect(await after.removeSupersededPackages(minimumAge: 0) == 0)
+        #expect(try installedVersions(root) == ["9.0.0", "9.1.0"])
+        #expect(try await after.removeUnusedPackages() == 2)
+    }
+
+    /// The app, the CLI and the server share the bindings file. A process
+    /// that found another one reading it used to fail its model load with
+    /// `packageBusy`; it now waits for the short time the other needs.
+    @Test func bindingWaitsForAnotherProcessReadingTheBindings() async throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let series = try series(root: root, versions: [.init(major: 9, minor: 0, patch: 0)])
+        let controller = try series.controller(root: root, current: 0)
+        let lease = try await acquire(controller)
+        try await controller.bindModel("model-a", engine: lease)
+
+        // Another process's shared hold, as a status or cleanup pass takes
+        // it. It is released only after the store has been seen to find the
+        // lock busy, so the bind below can only succeed by waiting.
+        let lock = root.appendingPathComponent("engines/.locks/model-bindings-0.0.0.lock")
+        let fd = open(lock.path, O_RDWR)
+        try #require(fd >= 0)
+        try #require(flock(fd, LOCK_SH | LOCK_NB) == 0)
+        let waitsBefore = controller.bindingsLockWaits
+        let bind = Task { try await controller.bindModel("model-b", engine: lease) }
+        while controller.bindingsLockWaits == waitsBefore {
+            try await Task.sleep(for: .milliseconds(2))
+        }
+        flock(fd, LOCK_UN)
+        close(fd)
+        try await bind.value
+        try await controller.release(lease)
+    }
+
+    /// A version whose interrupted repair is still waiting is left for the
+    /// build that started it, and so is one that build has just recovered,
+    /// however old its files are.
+    @Test func aHalfRepairedOrJustRecoveredSupersededEngineIsKept() async throws {
+        let root = try root()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let series = try series(root: root, versions: [
+            .init(major: 9, minor: 0, patch: 0), .init(major: 9, minor: 1, patch: 0),
+        ])
+        let before = try series.controller(root: root, current: 0)
+        try await before.release(try await acquire(before))
+        let after = try series.controller(root: root, current: 1)
+        try await after.release(try await acquire(after))
+        let package = root.appendingPathComponent("engines/gemma")
+        let old = package.appendingPathComponent("9.0.0")
+        let backup = package.appendingPathComponent(".repair-backup-9.0.0")
+        let longAgo = Date().addingTimeInterval(-30 * 86_400)
+        let later = Date().addingTimeInterval(86_500)
+        func age(_ url: URL) throws {
+            try FileManager.default.setAttributes([.modificationDate: longAgo], ofItemAtPath: url.path)
+        }
+
+        // An interrupted repair left its backup beside the version. Nothing
+        // here is recent, and the version still stays.
+        try FileManager.default.createDirectory(at: backup, withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700])
+        try age(old); try age(package)
+        #expect(await after.removeSupersededPackages() == 0)
+        #expect(try installedVersions(root) == ["9.0.0", "9.1.0"])
+
+        // The older build comes back and recovers: the version is missing
+        // and the backup holds its month-old files.
+        try FileManager.default.removeItem(at: backup)
+        try FileManager.default.moveItem(at: old, to: backup)
+        try age(backup); try age(package)
+        try await before.release(try await acquire(before))
+        #expect(!FileManager.default.fileExists(atPath: backup.path))
+        #expect(await after.removeSupersededPackages() == 0)
+
+        // A build from before this change recovers without marking the
+        // version as newly placed. The rename still shows in the package
+        // folder, and that alone keeps the version.
+        try age(old)
+        #expect(await after.removeSupersededPackages() == 0)
+        #expect(try installedVersions(root) == ["9.0.0", "9.1.0"])
+
+        // A day later, with nobody bound to it or running it, it goes.
+        #expect(await after.removeSupersededPackages(now: later) == 1)
+        #expect(try installedVersions(root) == ["9.1.0"])
     }
 
     @Test func verifiedArchiveInstallsThroughThePackageStore() async throws {

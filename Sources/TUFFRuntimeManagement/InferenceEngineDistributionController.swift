@@ -51,6 +51,9 @@ public actor InferenceEngineDistributionController {
 
     public func release(_ lease: InferenceEngineLease) async throws { try await store.release(lease) }
 
+    /// See `InferenceEngineStore.bindingsLockWaits`.
+    nonisolated var bindingsLockWaits: Int { store.bindingsLockWaits.load(ordering: .relaxed) }
+
     public func bindModel(_ modelID: String, engine: InferenceEngineLease,
                           rollback: [InferenceEnginePackageReference] = [], directory: URL? = nil) async throws {
         let current = InferenceEnginePackageReference(packageID: engine.manifest.packageID, version: engine.manifest.version)
@@ -102,6 +105,40 @@ public actor InferenceEngineDistributionController {
         var removed = 0
         for status in try await statuses() where status.requiredModelCount == 0 && !status.inUse {
             if try await removeUnused(status.reference) { removed += 1 }
+        }
+        return removed
+    }
+
+    /// Removes engine versions an update replaced: older than every version
+    /// this catalog installs for the same family, with no model bound to them
+    /// (a version kept for rollback is bound to its model), no process
+    /// running them, and nothing in the family's folder changed for at least
+    /// `minimumAge`. Each engine release otherwise left its predecessor on
+    /// disk until someone pressed Remove Unused Engines in Settings.
+    ///
+    /// Narrower than `removeUnusedPackages` on purpose, because this runs
+    /// without anyone asking and other TUFF builds share the folder:
+    /// - A current engine no model has used yet stays, so it is not
+    ///   downloaded again.
+    /// - A version newer than this catalog belongs to a newer build and is
+    ///   never touched.
+    /// - A family in which something was installed, repaired or recovered
+    ///   recently is left for a later launch; see `removeSuperseded`.
+    /// - The bindings of a model whose folder is missing are left alone,
+    ///   since it may be on a drive that is not plugged in.
+    @discardableResult
+    public func removeSupersededPackages(minimumAge: TimeInterval = 86_400,
+                                         now: Date = Date()) async -> Int {
+        var oldestCurrent: [String: InferenceEngineVersion] = [:]
+        for release in catalog.releases {
+            oldestCurrent[release.packageID] = min(release.version,
+                                                   oldestCurrent[release.packageID] ?? release.version)
+        }
+        var removed = 0
+        for (package, current) in oldestCurrent.sorted(by: { $0.key < $1.key }) {
+            removed += (try? await store.removeSuperseded(
+                packageID: package, olderThan: current,
+                installedBefore: now.addingTimeInterval(-minimumAge))) ?? 0
         }
         return removed
     }
