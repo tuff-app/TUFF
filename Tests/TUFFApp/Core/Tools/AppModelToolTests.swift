@@ -56,7 +56,7 @@ import TUFFEngine
         let requests = client.requests
         #expect(requests.count == 2)
         #expect(requests[0].tools.map(\.name) == ["web_search", "read_webpage"])
-        #expect(requests[0].systemPrompt.contains("Cite retrieved web or file-search sources"))
+        #expect(requests[0].systemPrompt.contains("cite them by number, like [1]"))
         #expect(requests[0].conversationKey != nil)
         #expect(requests[1].conversationKey == requests[0].conversationKey)
         #expect(requests[1].currentRounds.count == 1)

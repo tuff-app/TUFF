@@ -62,6 +62,10 @@ public struct AppAnswerRunner: Sendable {
     public let toolbox: AppToolbox
     public let limits: AppToolLimits
 
+    /// Attempts to start a follow-up generation that finds the previous one
+    /// still releasing the model.
+    static let maximumInFlightRetries = 3
+
     public init(client: any AppInferenceClient, toolbox: AppToolbox,
                 limits: AppToolLimits = .standard) {
         self.client = client
@@ -84,6 +88,7 @@ public struct AppAnswerRunner: Sendable {
                                             || request.history.contains(where: Self.turnContainsLocalContext))
         var current = request
         var malformedRetries = 0
+        var inFlightRetries = 0
         var generations = 0
         var toolSeconds = 0.0
         let maximumGenerations = limits.maximumToolRounds + 2 + limits.maximumMalformedRetries
@@ -182,6 +187,19 @@ public struct AppAnswerRunner: Sendable {
                 // feedback, without echoing untrusted decoder text.
                 current.systemPrompt += "\nYour previous response contained an invalid tool call. Use the declared tool format, tool names and required argument types, and finish every argument. If you cannot make a valid call, answer directly without calling tools."
                 await sink(.retryingMalformedToolCall(detail))
+            case .failed(.generationInFlight, _)?
+                where generations > 1 && inFlightRetries < Self.maximumInFlightRetries
+                    && !cancellation.isCancelled:
+                // This answer's own previous generation has ended its stream
+                // but may still be handing the model back: a client finishes
+                // the stream first and releases its slot a moment later. With
+                // an instant tool or a retry, the next request can arrive in
+                // that gap. Wait briefly rather than fail an answer whose
+                // tools already ran. A generation that really belongs to
+                // someone else is still reported after the last attempt.
+                inFlightRetries += 1
+                generations -= 1
+                try? await Task.sleep(for: .milliseconds(20 * inFlightRetries))
             case .failed(let error, let partial)?:
                 await sink(.failed(error, partial: finalize(partial)))
                 return
