@@ -127,7 +127,8 @@ do {
         ("qwen-hybrid-affine", ["qwen36-35b-a3b", "qwen3.8-flash-next", "ornith-1.5-9b", "ornith-1.5-35b-a3b", "ornith-1.5-122b", "ornith-1.5-397b", "qwen3.8-27b", "ternary-bonsai-2-2b", "ternary-bonsai-2-27b"], ["affine", "prism-q2"]),
         ("gpt-oss-mxfp4", ["gpt-oss-20b", "gpt-oss-120b"], ["mxfp4"]),
         ("minimax-affine", ["minimax-m2.7"], ["affine"]),
-        ("flint-affine", ["flint-40b-a2.5b"], ["affine"])
+        ("flint-affine", ["flint-40b-a2.5b"], ["affine"]),
+        ("inkling-nvfp4", ["inkling-2-mini"], ["nvfp4"])
     ]
     let selectedFamilies = ProcessInfo.processInfo.environment["TUFF_ENGINE_FAMILIES"]
         .map { Set($0.split(whereSeparator: { $0.isWhitespace }).map(String.init)) }

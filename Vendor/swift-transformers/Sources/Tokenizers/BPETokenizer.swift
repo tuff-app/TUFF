@@ -128,6 +128,10 @@ class BPETokenizer: PreTrainedTokenizerModel, @unchecked Sendable {
     /// Whether consecutive unknown tokens should be fused together.
     let fuseUnknownTokens: Bool
 
+    /// `model.ignore_merges` in `tokenizer.json`: a pre-token that is itself in
+    /// the vocabulary is that one token, and the merge table is not consulted.
+    let ignoreMerges: Bool
+
     static func mergesFromConfig(_ config: Config?) -> [[String]]? {
         guard let config else { return nil }
 
@@ -192,6 +196,7 @@ class BPETokenizer: PreTrainedTokenizerModel, @unchecked Sendable {
         bosTokenId = bosToken == nil ? nil : tokensToIds[bosToken! as NSString]
 
         fuseUnknownTokens = tokenizerConfig.fuseUnk.boolean(or: false)
+        ignoreMerges = tokenizerData.model.ignoreMerges.boolean(or: false)
     }
 
     /// Converts a token string to its corresponding numeric ID.
@@ -329,6 +334,7 @@ class BPETokenizer: PreTrainedTokenizerModel, @unchecked Sendable {
     /// - Parameter text: The input text to tokenize
     /// - Returns: An array of BPE token strings
     func tokenize(text: String) -> [String] {
+        if ignoreMerges, tokensToIds[text as NSString] != nil { return [text] }
         var tokens: [String] = []
         let bpeTokens = bpe(token: text)
         for token in bpeTokens {

@@ -87,6 +87,7 @@ TUFF updates itself. If an update stops it from opening, see
 | Recursive Flint 40B A2.5B OptiQ | 25.6 GB | 16 GB | No |
 | Bonsai 2 2B Q2 | 1.2 GB | 8 GB | No |
 | Bonsai 2 27B Q2 | 8.6 GB | 16 GB | No |
+| Inkling 2 Mini Q4 | 16.7 GB | 16 GB | No |
 
 Models are grouped under **MoE**, **Dense** and **Legacy**. Each section can be
 collapsed. MiniMax and both GPT-OSS models stay available under Legacy.

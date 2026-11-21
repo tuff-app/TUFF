@@ -1930,7 +1930,7 @@ public final class AppModel {
                       prepared.insert(architecture.variant.rawValue).inserted,
                       let engine = try? await InferenceEngineEnvironment.acquire(
                         architectureID: architecture.variant.rawValue,
-                        quantizationLayout: architecture.family == .gptOss ? "mxfp4" : "affine")
+                        quantizationLayout: architecture.family.engineQuantizationLayout)
                 else { continue }
                 await engine.release()
             }

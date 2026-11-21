@@ -1234,6 +1234,145 @@
       },
       "sourceIndexSHA256": "0e085b977c4c9942f85938828e8c989ed7d5cdabf852e4da6a67c116cd502cd1"
     },
+    "inkling-2-mini": {
+      "layout": {
+        "architectureID": "inkling-2-mini",
+        "layout": {
+          "denseGroupBytes": [],
+          "expertLayers": [
+            {
+              "bytesPerExpert": 8224768,
+              "expertCount": 128,
+              "minimumSlots": 8
+            },
+            {
+              "bytesPerExpert": 8224768,
+              "expertCount": 128,
+              "minimumSlots": 8
+            },
+            {
+              "bytesPerExpert": 8224768,
+              "expertCount": 128,
+              "minimumSlots": 8
+            },
+            {
+              "bytesPerExpert": 8224768,
+              "expertCount": 128,
+              "minimumSlots": 8
+            },
+            {
+              "bytesPerExpert": 8224768,
+              "expertCount": 128,
+              "minimumSlots": 8
+            },
+            {
+              "bytesPerExpert": 8224768,
+              "expertCount": 128,
+              "minimumSlots": 8
+            },
+            {
+              "bytesPerExpert": 8224768,
+              "expertCount": 128,
+              "minimumSlots": 8
+            },
+            {
+              "bytesPerExpert": 8224768,
+              "expertCount": 128,
+              "minimumSlots": 8
+            },
+            {
+              "bytesPerExpert": 8224768,
+              "expertCount": 128,
+              "minimumSlots": 8
+            },
+            {
+              "bytesPerExpert": 8224768,
+              "expertCount": 128,
+              "minimumSlots": 8
+            },
+            {
+              "bytesPerExpert": 8224768,
+              "expertCount": 128,
+              "minimumSlots": 8
+            },
+            {
+              "bytesPerExpert": 8224768,
+              "expertCount": 128,
+              "minimumSlots": 8
+            },
+            {
+              "bytesPerExpert": 8224768,
+              "expertCount": 128,
+              "minimumSlots": 8
+            },
+            {
+              "bytesPerExpert": 8224768,
+              "expertCount": 128,
+              "minimumSlots": 8
+            },
+            {
+              "bytesPerExpert": 8224768,
+              "expertCount": 128,
+              "minimumSlots": 8
+            },
+            {
+              "bytesPerExpert": 8224768,
+              "expertCount": 128,
+              "minimumSlots": 8
+            },
+            {
+              "bytesPerExpert": 8224768,
+              "expertCount": 128,
+              "minimumSlots": 8
+            },
+            {
+              "bytesPerExpert": 8224768,
+              "expertCount": 128,
+              "minimumSlots": 8
+            },
+            {
+              "bytesPerExpert": 8224768,
+              "expertCount": 128,
+              "minimumSlots": 8
+            },
+            {
+              "bytesPerExpert": 8224768,
+              "expertCount": 128,
+              "minimumSlots": 8
+            },
+            {
+              "bytesPerExpert": 8224768,
+              "expertCount": 128,
+              "minimumSlots": 8
+            },
+            {
+              "bytesPerExpert": 8224768,
+              "expertCount": 128,
+              "minimumSlots": 8
+            },
+            {
+              "bytesPerExpert": 8224768,
+              "expertCount": 128,
+              "minimumSlots": 8
+            },
+            {
+              "bytesPerExpert": 8224768,
+              "expertCount": 128,
+              "minimumSlots": 8
+            }
+          ],
+          "fixedResidentBytes": 1012285440,
+          "rowAccessTables": []
+        },
+        "manifestSHA256": "1266a92c74bc437190f6dbf6732892c7b5e58bdad450eeb94265c5f8ff921af9",
+        "minimumDenseStagingBytes": 0,
+        "modelID": "mlx-community/Inkling-2-Mini-4bit",
+        "packedResidentPayloadBytes": 1001166848,
+        "schemaVersion": 1,
+        "weightsSHA256": "2e40bd47fa811ee82870aa01080dc0c9ec91fb4c1d2e92815ae4f682c6f75b36"
+      },
+      "sourceIndexSHA256": "6e2d0fbb83f4ec2488f22f521e57855375ea93b473a704da10871398f952d9f5"
+    },
     "minimax-m2.7": {
       "layout": {
         "architectureID": "minimax-m2.7",

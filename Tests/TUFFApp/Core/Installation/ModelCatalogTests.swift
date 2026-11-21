@@ -112,6 +112,7 @@ import TUFFRepackCore
             case .gemma4: #expect(descriptor.chatDialect == .gemma)
             case .qwen36, .qwen4Exp: #expect(descriptor.chatDialect == .chatml)
             case .flint: #expect(descriptor.chatDialect == .flint)
+            case .inkling2: #expect(descriptor.chatDialect == .inkling)
             case .gptOss: #expect(descriptor.chatDialect == .harmony)
             case .minimaxM2: #expect(descriptor.chatDialect == .minimax)
             }
@@ -177,6 +178,7 @@ import TUFFRepackCore
             "flint-40b-a2.5b",
             "ternary-bonsai-2-2b",
             "ternary-bonsai-2-27b",
+            "inkling-2-mini",
         ])
         #expect(AppModelInstallDescriptor.catalog.map(\.installDirectoryName) == [
             "gemma4-e2b.gturbo",
@@ -197,6 +199,7 @@ import TUFFRepackCore
             "flint-40b.gturbo",
             "bonsai-2-2b.gturbo",
             "bonsai-2-27b.gturbo",
+            "inkling-2-mini.gturbo",
         ])
         #expect(AppModelInstallDescriptor.gemma4E4B.supportsImageInput)
         #expect(MacModelSettings.defaults(

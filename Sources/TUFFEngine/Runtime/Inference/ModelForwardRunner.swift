@@ -16,6 +16,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case gptOss(GPTOSSForwardRunner)
         #endif
+        case inkling(InklingForwardRunner)
     }
 
     private let backend: Backend
@@ -34,10 +35,18 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         backend = .gptOss(try GPTOSSForwardRunner(model: model, context: context,
             maxContext: maxContext, runtimeConfiguration: runtimeConfiguration))
         #elseif TUFF_ENGINE_AFFINE_ONLY
-        backend = .affine(try RealForwardRunner(model: model, context: context,
-            maxContext: maxContext, runtimeConfiguration: runtimeConfiguration))
+        if model.config.family == .inkling2 {
+            backend = .inkling(try InklingForwardRunner(model: model, context: context,
+                maxContext: maxContext, runtimeConfiguration: runtimeConfiguration))
+        } else {
+            backend = .affine(try RealForwardRunner(model: model, context: context,
+                maxContext: maxContext, runtimeConfiguration: runtimeConfiguration))
+        }
         #else
-        if model.config.family == .gptOss {
+        if model.config.family == .inkling2 {
+            backend = .inkling(try InklingForwardRunner(model: model, context: context,
+                maxContext: maxContext, runtimeConfiguration: runtimeConfiguration))
+        } else if model.config.family == .gptOss {
             backend = .gptOss(try GPTOSSForwardRunner(
                 model: model,
                 context: context,
@@ -61,6 +70,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss(let runner): runner.reset()
         #endif
+        case .inkling(let runner): runner.reset()
         }
     }
 
@@ -77,6 +87,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
             return (runner.lookaheadPrecision, runner.lookaheadReadsIssued,
                     runner.lookaheadEnabled)
         #endif
+        case .inkling: return nil
         }
     }
 
@@ -88,6 +99,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss(let runner): return runner.exposedPrefetchWaitNanos
         #endif
+        case .inkling: return 0
         }
     }
 
@@ -99,6 +111,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss(let runner): return runner.expertReadMetrics
         #endif
+        case .inkling(let runner): return runner.expertReadMetrics
         }
     }
 
@@ -113,6 +126,8 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         case .gptOss(let runner):
             try await runner.produce(token: token, position: position, into: logits)
         #endif
+        case .inkling(let runner):
+            try await runner.produce(token: token, position: position, into: logits)
         }
     }
 
@@ -124,6 +139,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss: false
         #endif
+        case .inkling: false
         }
     }
 
@@ -137,6 +153,8 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         case .gptOss:
             preconditionFailure("GPT-OSS does not support this prefill path")
         #endif
+        case .inkling:
+            preconditionFailure("Inkling does not support this prefill path")
         }
     }
 
@@ -148,6 +166,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss(let runner): return runner.supportsSpeculativeVerification
         #endif
+        case .inkling: return false
         }
     }
 
@@ -166,6 +185,8 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
             return try await runner.verifySpeculativeBlock(
                 tokens: tokens, startPosition: startPosition, into: logits)
         #endif
+        case .inkling:
+            throw PrefillError.chunkedUnsupported("Inkling does not verify speculative blocks")
         }
     }
 
@@ -177,6 +198,8 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss(let runner): try runner.commitSpeculativePrefix(count)
         #endif
+        case .inkling:
+            throw PrefillError.chunkedUnsupported("Inkling does not verify speculative blocks")
         }
     }
 
@@ -190,6 +213,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         case .gptOss(let runner):
             return try await runner.speculativeBoundaryToken()
         #endif
+        case .inkling: return nil
         }
     }
 
@@ -208,6 +232,9 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
             try await runner.produce(token: token, position: position, into: logits)
             return false
         #endif
+        case .inkling(let runner):
+            try await runner.produce(token: token, position: position, into: logits)
+            return false
         }
     }
 
@@ -221,6 +248,8 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         case .gptOss(let runner):
             try runner.prepareForContinuation(expectedPosition: expectedPosition)
         #endif
+        case .inkling(let runner):
+            try runner.prepareForContinuation(expectedPosition: expectedPosition)
         }
     }
 
@@ -232,6 +261,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss(let runner): return runner.continuationPosition
         #endif
+        case .inkling(let runner): return runner.continuationPosition
         }
     }
 
@@ -243,6 +273,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss(let runner): return runner.maxContext
         #endif
+        case .inkling(let runner): return runner.maxContext
         }
     }
 
@@ -254,6 +285,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss: true
         #endif
+        case .inkling: true
         }
     }
 
@@ -284,6 +316,14 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
                 into: logits,
                 onProgress: onProgress)
         #endif
+        case .inkling(let runner):
+            return try await runner.prefillChunked(
+                tokens: tokens,
+                startPosition: startPosition,
+                outputMode: outputMode,
+                config: config,
+                into: logits,
+                onProgress: onProgress)
         }
     }
 
@@ -322,6 +362,9 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
             throw PrefillError.chunkedUnsupported(
                 "GPT-OSS v2 does not support image input")
         #endif
+        case .inkling:
+            throw PrefillError.chunkedUnsupported(
+                "Inkling image input is not supported yet")
         }
     }
 
@@ -333,6 +376,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss: return false
         #endif
+        case .inkling: return false
         }
     }
 
@@ -344,6 +388,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss: return 0
         #endif
+        case .inkling: return 0
         }
     }
 
@@ -368,6 +413,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss(let runner): return runner.totalIoNanos
         #endif
+        case .inkling(let runner): return runner.totalIoNanos
         }
     }
     public var totalCb1Nanos: UInt64 {
@@ -378,6 +424,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss(let runner): return runner.totalCb1Nanos
         #endif
+        case .inkling(let runner): return runner.totalCb1Nanos
         }
     }
     public var totalCb2Nanos: UInt64 {
@@ -388,6 +435,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss(let runner): return runner.totalCb2Nanos
         #endif
+        case .inkling(let runner): return runner.totalCb2Nanos
         }
     }
     public var totalHeadNanos: UInt64 {
@@ -398,6 +446,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss(let runner): return runner.totalHeadNanos
         #endif
+        case .inkling(let runner): return runner.totalHeadNanos
         }
     }
     public var totalRoutedExpertReads: UInt64 {
@@ -408,6 +457,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss(let runner): return runner.totalRoutedExpertReads
         #endif
+        case .inkling(let runner): return runner.totalRoutedExpertReads
         }
     }
     public var totalRoutedExpertBytes: UInt64 {
@@ -418,6 +468,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss(let runner): return runner.totalRoutedExpertBytes
         #endif
+        case .inkling(let runner): return runner.totalRoutedExpertBytes
         }
     }
     public var totalRoutedExpertCacheHits: UInt64 {
@@ -428,6 +479,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss(let runner): return runner.totalRoutedExpertCacheHits
         #endif
+        case .inkling(let runner): return runner.totalRoutedExpertCacheHits
         }
     }
     public var totalRoutedExpertCacheMisses: UInt64 {
@@ -438,6 +490,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss(let runner): return runner.totalRoutedExpertCacheMisses
         #endif
+        case .inkling(let runner): return runner.totalRoutedExpertCacheMisses
         }
     }
 
@@ -449,6 +502,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss(let runner): return runner.prefillExpertGroupCount
         #endif
+        case .inkling: return 0
         }
     }
     var batchedPrefillProjections: Int {
@@ -459,6 +513,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss(let runner): return runner.batchedPrefillProjections
         #endif
+        case .inkling: return 0
         }
     }
     /// Diagnostic kernel timing report; see `RealForwardRunner.benchmarkDecodeKernels`.
@@ -470,6 +525,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss: return "kernel benchmark is not available for GPT-OSS\n"
         #endif
+        case .inkling: return "kernel benchmark is not available for Inkling\n"
         }
     }
     public var totalGPULayerNanos: UInt64 {
@@ -480,6 +536,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss: return 0
         #endif
+        case .inkling: return 0
         }
     }
     public var totalGPUHeadNanos: UInt64 {
@@ -490,6 +547,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss: return 0
         #endif
+        case .inkling: return 0
         }
     }
     public var totalGPURoutedNanos: UInt64 {
@@ -500,6 +558,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss: return 0
         #endif
+        case .inkling: return 0
         }
     }
     public var totalGPUSharedNanos: UInt64 {
@@ -510,6 +569,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss: return 0
         #endif
+        case .inkling: return 0
         }
     }
     public var totalGPULayerCommandBuffers: UInt64 {
@@ -520,6 +580,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss: return 0
         #endif
+        case .inkling: return 0
         }
     }
     public var totalHeadFusedNanos: UInt64 {
@@ -530,6 +591,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss: return 0
         #endif
+        case .inkling: return 0
         }
     }
     public var totalRDAdviseNanos: UInt64 {
@@ -540,6 +602,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss: return 0
         #endif
+        case .inkling: return 0
         }
     }
     public var totalRDAdviseCalls: UInt64 {
@@ -550,6 +613,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss: return 0
         #endif
+        case .inkling: return 0
         }
     }
     public var totalRDAdviseBytes: UInt64 {
@@ -560,6 +624,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss: return 0
         #endif
+        case .inkling: return 0
         }
     }
     public var totalRDAdviseFailures: UInt64 {
@@ -570,6 +635,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss: return 0
         #endif
+        case .inkling: return 0
         }
     }
     public var totalRDAdviseSkipped: UInt64 {
@@ -580,6 +646,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss: return 0
         #endif
+        case .inkling: return 0
         }
     }
 }
@@ -593,6 +660,7 @@ extension ModelForwardRunner: StateSnapshottingRunner {
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss(let runner): return ObjectIdentifier(runner)
         #endif
+        case .inkling(let runner): return ObjectIdentifier(runner)
         }
     }
 
@@ -604,6 +672,7 @@ extension ModelForwardRunner: StateSnapshottingRunner {
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss(let runner): return runner.stateSnapshotByteEstimate
         #endif
+        case .inkling(let runner): return runner.stateSnapshotByteEstimate
         }
     }
 
@@ -615,6 +684,7 @@ extension ModelForwardRunner: StateSnapshottingRunner {
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss(let runner): return try runner.captureState()
         #endif
+        case .inkling(let runner): return try runner.captureState()
         }
     }
 
@@ -626,6 +696,7 @@ extension ModelForwardRunner: StateSnapshottingRunner {
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss(let runner): try runner.restoreState(snapshot)
         #endif
+        case .inkling(let runner): try runner.restoreState(snapshot)
         }
     }
 }
@@ -639,6 +710,7 @@ extension ModelForwardRunner: PrefixCheckpointingRunner {
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss: return true
         #endif
+        case .inkling: return true
         }
     }
 
@@ -650,6 +722,7 @@ extension ModelForwardRunner: PrefixCheckpointingRunner {
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss(let runner): return runner.prefixCheckpointByteEstimate
         #endif
+        case .inkling(let runner): return runner.prefixCheckpointByteEstimate
         }
     }
 
@@ -661,6 +734,7 @@ extension ModelForwardRunner: PrefixCheckpointingRunner {
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss(let runner): return try runner.capturePrefixCheckpoint()
         #endif
+        case .inkling(let runner): return try runner.capturePrefixCheckpoint()
         }
     }
 
@@ -672,6 +746,7 @@ extension ModelForwardRunner: PrefixCheckpointingRunner {
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss(let runner): try runner.rewind(to: checkpoint)
         #endif
+        case .inkling(let runner): try runner.rewind(to: checkpoint)
         }
     }
 }
@@ -685,6 +760,7 @@ extension ModelForwardRunner: PrefillPhaseReporting {
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss(let runner): return runner.prefillPhaseTimes
         #endif
+        case .inkling(let runner): return runner.prefillPhaseTimes
         }
     }
 }

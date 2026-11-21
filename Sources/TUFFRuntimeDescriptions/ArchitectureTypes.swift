@@ -11,6 +11,17 @@ public enum ModelFamily: String, Sendable, Equatable {
     case minimaxM2 = "minimax-m2"
     case qwen4Exp = "qwen4-exp"
     case flint = "flint"
+    case inkling2 = "inkling2"
+
+    /// The weight layout an inference engine package must list to run this
+    /// family's models.
+    public var engineQuantizationLayout: String {
+        switch self {
+        case .gptOss: "mxfp4"
+        case .inkling2: "nvfp4"
+        case .gemma4, .qwen36, .minimaxM2, .qwen4Exp, .flint: "affine"
+        }
+    }
 
     /// Whether this family's image input runs Qwen's vision tower: 27 blocks
     /// at hidden 1152, patch 16, spatial merge 2, and the `<|vision_start|>`
@@ -21,7 +32,7 @@ public enum ModelFamily: String, Sendable, Equatable {
     public var usesQwenVisionTower: Bool {
         switch self {
         case .qwen36, .qwen4Exp: true
-        case .gemma4, .gptOss, .minimaxM2, .flint: false
+        case .gemma4, .gptOss, .minimaxM2, .flint, .inkling2: false
         }
     }
 
@@ -29,7 +40,8 @@ public enum ModelFamily: String, Sendable, Equatable {
     public var acceptsImageInput: Bool {
         switch self {
         case .gemma4, .qwen36, .qwen4Exp: true
-        case .gptOss, .minimaxM2, .flint: false
+        // Inkling 2 ships a vision tower; TUFF runs its text path only so far.
+        case .gptOss, .minimaxM2, .flint, .inkling2: false
         }
     }
 }
@@ -52,6 +64,7 @@ public enum ModelVariant: String, Sendable, Equatable {
     case bonsai2_2B = "ternary-bonsai-2-2b"
     case bonsai2_27B = "ternary-bonsai-2-27b"
     case flint40B = "flint-40b-a2.5b"
+    case inkling2Mini = "inkling-2-mini"
 
     package static func legacyDefault(for family: ModelFamily) -> ModelVariant {
         switch family {
@@ -61,6 +74,7 @@ public enum ModelVariant: String, Sendable, Equatable {
         case .minimaxM2: return .minimaxM27
         case .qwen4Exp: return .qwen38FlashNext
         case .flint: return .flint40B
+        case .inkling2: return .inkling2Mini
         }
     }
 }
@@ -242,6 +256,91 @@ public struct AttentionIndexerConfig: Sendable, Equatable {
     public var projectionRows: Int { (numHeads + numKVHeads) * headDim }
 }
 
+/// Inkling 2's looped decoder. The layers in `loopLayers` run `passes` times
+/// with the same weights; every pass after the first restarts from the state
+/// before the loop and reads messages from the pass before it. Zeroed for
+/// architectures without a loop.
+///
+/// The other things only this family has are described here too, because
+/// none of them maps onto a field another architecture uses: attention reads
+/// a learned relative position bias instead of RoPE, keys and values pass
+/// through a short causal convolution, and each block of `blockLayers` layers
+/// starts a fresh residual that later layers attend to by depth.
+public struct InklingLoopConfig: Sendable, Equatable {
+    public let loopStart: Int
+    public let loopEnd: Int
+    public let passes: Int
+    /// Rank of the gates that mix a message into a looped layer's inputs.
+    public let gateRank: Int
+    /// Layers per depth-attention block. A block's first layer stores its
+    /// input for the layers after it.
+    public let blockLayers: Int
+    /// Width of the per-head state a relative position bias is mixed from.
+    public let relativeDim: Int
+    /// Distances a full-attention layer has a relative bias for; a sliding
+    /// layer has one for its whole window.
+    public let relativeExtent: Int
+    public let convKernelSize: Int
+    public let queryKeyClip: Double
+    public let relativeClip: Double
+    /// Full-attention queries grow by 1 + alpha * ln(max((position + 1) / floor, 1)).
+    public let logScalingFloor: Int
+    public let logScalingAlpha: Double
+    public let routeScale: Double
+    public let gateSoftcap: Double
+    public let upSoftcap: Double
+    /// Rows of the vocabulary matrices, which are padded past `vocabSize`.
+    public let paddedVocabSize: Int
+
+    /// Prompt rows one forward pass reads. A block of any size touches
+    /// nearly every expert of every layer, so a larger block spreads one read
+    /// of the model over more tokens. Scratch and every sliding visit's ring
+    /// grow with it.
+    public static let maximumBlockRows = 512
+
+    public init(loopStart: Int, loopEnd: Int, passes: Int, gateRank: Int, blockLayers: Int,
+                relativeDim: Int, relativeExtent: Int, convKernelSize: Int,
+                queryKeyClip: Double, relativeClip: Double, logScalingFloor: Int,
+                logScalingAlpha: Double, routeScale: Double, gateSoftcap: Double,
+                upSoftcap: Double, paddedVocabSize: Int) {
+        self.loopStart = loopStart
+        self.loopEnd = loopEnd
+        self.passes = passes
+        self.gateRank = gateRank
+        self.blockLayers = blockLayers
+        self.relativeDim = relativeDim
+        self.relativeExtent = relativeExtent
+        self.convKernelSize = convKernelSize
+        self.queryKeyClip = queryKeyClip
+        self.relativeClip = relativeClip
+        self.logScalingFloor = logScalingFloor
+        self.logScalingAlpha = logScalingAlpha
+        self.routeScale = routeScale
+        self.gateSoftcap = gateSoftcap
+        self.upSoftcap = upSoftcap
+        self.paddedVocabSize = paddedVocabSize
+    }
+
+    public static let none = InklingLoopConfig(
+        loopStart: 0, loopEnd: 0, passes: 0, gateRank: 0, blockLayers: 0, relativeDim: 0,
+        relativeExtent: 0, convKernelSize: 0, queryKeyClip: 0, relativeClip: 0,
+        logScalingFloor: 0, logScalingAlpha: 0, routeScale: 0, gateSoftcap: 0, upSoftcap: 0,
+        paddedVocabSize: 0)
+
+    public var isEnabled: Bool { passes > 0 }
+    public var loopLayers: Range<Int> { loopStart..<loopEnd }
+    /// Layer applications per token: every layer once, the looped ones
+    /// `passes` times. Each has its own keys, values and convolution state.
+    public func visits(numLayers: Int) -> Int {
+        numLayers + max(0, passes - 1) * loopLayers.count
+    }
+    /// The layer a visit runs. Visits below `numLayers` are the first pass in
+    /// layer order; the rest are the later passes over the loop.
+    public func layer(ofVisit visit: Int, numLayers: Int) -> Int {
+        visit < numLayers ? visit : loopStart + (visit - numLayers) % loopLayers.count
+    }
+}
+
 /// Compile-time architecture baseline. `manifest.json -> arch` must match this
 /// field-by-field at load time; mismatches throw `ModelError.archMismatch`.
 ///
@@ -331,6 +430,8 @@ public struct ArchConfig: Sendable, Equatable {
     /// 160 values wide. INT8 tensors — the router and the shared-expert gate —
     /// stay at 64 in every architecture, so this describes the INT4 path only.
     public let int4GroupSize: Int
+    /// Inkling 2's loop and attention geometry. `.none` for everything else.
+    public let inklingLoop: InklingLoopConfig
 
     public init(
         hiddenSize: Int,
@@ -375,7 +476,8 @@ public struct ArchConfig: Sendable, Equatable {
         hyperConnection: HyperConnectionConfig = .none,
         ngramEmbedding: NgramEmbeddingConfig = .none,
         attentionIndexer: AttentionIndexerConfig = .none,
-        int4GroupSize: Int = AffineQuantizationDefaults.groupSize
+        int4GroupSize: Int = AffineQuantizationDefaults.groupSize,
+        inklingLoop: InklingLoopConfig = .none
     ) {
         self.hiddenSize = hiddenSize
         self.intermediateSize = intermediateSize
@@ -420,6 +522,7 @@ public struct ArchConfig: Sendable, Equatable {
         self.ngramEmbedding = ngramEmbedding
         self.attentionIndexer = attentionIndexer
         self.int4GroupSize = int4GroupSize
+        self.inklingLoop = inklingLoop
     }
 
     /// Canonical Gemma 4 26B-A4B baseline, checked against the installed
@@ -881,6 +984,35 @@ public struct ArchConfig: Sendable, Equatable {
         embeddingScaledBySqrtHidden: false, routerScaled: false, ffnSandwichNorms: false,
         sharedExpertGated: false, ropeNeoxSubdim: true, attentionSinks: true)
 
+    /// Inkling 2 Mini, from the pinned checkpoint's `config.json`. 24 layers,
+    /// of which layers 6 to 17 run three times, so a token passes through 48
+    /// layer applications. Layers 5, 11, 17 and 23 attend to the whole
+    /// context; the rest see a 1,024-token window. Every layer routes to 8 of
+    /// 128 experts. `vocabSize` is the 200,058 tokens the head may produce;
+    /// the embedding and head matrices have 201,024 rows.
+    ///
+    /// The RoPE fields are unused: positions enter through the relative bias.
+    /// The manifest format requires positive bases, so they are 1.
+    public static let inkling2Mini = ArchConfig(
+        hiddenSize: 2304, intermediateSize: 1152, moeIntermediateSize: 1152,
+        numHeads: 24, numKVHeads: 8, numFullKVHeads: 8, headDim: 128, fullHeadDim: 128,
+        vocabSize: 200_058, slidingWindow: 1024, finalLogitSoftcap: 30,
+        ropeTheta: 1, fullRopeTheta: 1, partialRotaryFactor: 0,
+        numLayers: 24, numExperts: 128, topKExperts: 8, tieWordEmbeddings: false,
+        attentionKEqV: false,
+        fullAttentionLayerMask: (0..<24).map { $0 % 6 == 5 ? 1 : 0 },
+        hiddenActivation: "silu", family: .inkling2, variant: .inkling2Mini,
+        feedForwardKind: .mixtureOfExperts, attnOutputGate: true,
+        attentionScale: 1 / Double(128).squareRoot(),
+        embeddingScaledBySqrtHidden: false, routerScaled: false, ffnSandwichNorms: false,
+        sharedExpertGated: false, attentionSinks: true,
+        inklingLoop: InklingLoopConfig(
+            loopStart: 6, loopEnd: 18, passes: 3, gateRank: 64, blockLayers: 6,
+            relativeDim: 16, relativeExtent: 1024, convKernelSize: 4,
+            queryKeyClip: 22.627416997969522, relativeClip: 8,
+            logScalingFloor: 8192, logScalingAlpha: 0.1, routeScale: 8,
+            gateSoftcap: 4, upSoftcap: 25, paddedVocabSize: 201_024))
+
     /// Variant registry used by both v1.1 manifests and the legacy-family
     /// resolver. Family alone is intentionally not a registry key because
     /// multiple checkpoints can share prompt behavior without sharing shapes.
@@ -903,6 +1035,7 @@ public struct ArchConfig: Sendable, Equatable {
         .gptOss_120B: .gptOss_120B,
         .minimaxM27: .minimaxM27,
         .qwen38FlashNext: .qwen38FlashNext,
+        .inkling2Mini: .inkling2Mini,
     ]
 #if TUFF_ENGINE_GEMMA
         return all.filter { $0.value.family == .gemma4 }
@@ -914,6 +1047,8 @@ public struct ArchConfig: Sendable, Equatable {
         return all.filter { $0.value.family == .minimaxM2 }
 #elseif TUFF_ENGINE_FLINT
         return all.filter { $0.value.family == .flint }
+#elseif TUFF_ENGINE_INKLING
+        return all.filter { $0.value.family == .inkling2 }
 #else
         return all
 #endif
@@ -923,7 +1058,8 @@ public struct ArchConfig: Sendable, Equatable {
     /// pipeline specialization. Constant-folding the loop bounds measurably
     /// raises achieved bandwidth on the narrower projections.
     public var decodeInt4GEMVShapes: [(m: Int, n: Int)] {
-        if family == .gptOss { return [] }
+        // GPT-OSS and Inkling 2 run their own kernels.
+        if family == .gptOss || family == .inkling2 { return [] }
         var shapes: [(m: Int, n: Int)] = []
         if attnOutputGate {
             shapes.append((m: 2 * numHeads * fullHeadDim, n: hiddenSize))
@@ -979,6 +1115,7 @@ public struct ArchConfig: Sendable, Equatable {
     /// architecture has one, the shared-expert scalar gate).
     public var decodeInt8GEMVShapes: [(m: Int, n: Int)] {
         var shapes: [(m: Int, n: Int)] = []
+        if family == .inkling2 { return shapes }
         if feedForwardKind == .mixtureOfExperts {
             shapes.append((m: numExperts, n: hiddenSize))
         }

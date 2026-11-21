@@ -264,7 +264,7 @@ public struct Model {
         switch config.family {
         case .gemma4:
             return try resident(name: "language_model.model.layers.\(L).router.proj.weight")
-        case .qwen36, .qwen4Exp, .flint:
+        case .qwen36, .qwen4Exp, .flint, .inkling2:
             return try resident(name: "language_model.model.layers.\(L).mlp.gate.weight")
         case .gptOss:
             return try resident(name: "language_model.model.layers.\(L).mlp.router.weight")
@@ -294,7 +294,8 @@ public struct Model {
         switch config.family {
         case .gemma4:
             return "language_model.model.layers.\(L).mlp.\(proj).weight"
-        case .qwen36, .qwen4Exp, .flint:
+        // Inkling 2 has no shared expert; the name is never resolved.
+        case .qwen36, .qwen4Exp, .flint, .inkling2:
             return "language_model.model.layers.\(L).mlp.shared_expert.\(proj).weight"
         case .gptOss:
             return "language_model.model.layers.\(L).mlp.\(proj).weight"
@@ -936,7 +937,9 @@ extension Model {
             index: residentIndex,
             device: device,
             fileDescriptor: weightsFD,
-            denseResidency: expecting.family == .gptOss ? .resident : denseResidency,
+            // These runners bind every layer's tensors when they are built.
+            denseResidency: expecting.family == .gptOss || expecting.family == .inkling2
+                ? .resident : denseResidency,
             numLayers: expecting.numLayers)
 
         return Model(

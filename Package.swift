@@ -5,7 +5,7 @@ import Foundation
 let engineFamily = ProcessInfo.processInfo.environment["TUFF_ENGINE_FAMILY"]
 let familyDefine: String? = ["gemma-affine": "TUFF_ENGINE_GEMMA", "qwen-hybrid-affine": "TUFF_ENGINE_QWEN",
     "gpt-oss-mxfp4": "TUFF_ENGINE_GPT_OSS", "minimax-affine": "TUFF_ENGINE_MINIMAX",
-    "flint-affine": "TUFF_ENGINE_FLINT"][engineFamily ?? ""]
+    "flint-affine": "TUFF_ENGINE_FLINT", "inkling-nvfp4": "TUFF_ENGINE_INKLING"][engineFamily ?? ""]
 let familySettings: [SwiftSetting] = familyDefine.map { [.define($0)] } ?? []
 let engineSettings = familySettings + ((engineFamily != nil && engineFamily != "gpt-oss-mxfp4")
     ? [.define("TUFF_ENGINE_AFFINE_ONLY")] : [])

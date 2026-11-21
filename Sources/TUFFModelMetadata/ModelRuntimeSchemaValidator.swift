@@ -24,6 +24,10 @@ public enum ModelRuntimeSchemaValidator {
             throw ModelError.indexCorrupt(
                 detail: "manifest.quant is required by the executable runtime schema")
         }
+        if config.family == .inkling2 {
+            try validateInklingSchema(residentIndex: residentIndex, layout: layout, config: config)
+            return
+        }
         let isPrism = config.variant == .bonsai2_2B || config.variant == .bonsai2_27B
 
         func checkedMultiply(_ lhs: UInt64, _ rhs: UInt64, field: String) throws -> UInt64 {

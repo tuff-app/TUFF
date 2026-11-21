@@ -4,4 +4,5 @@ public enum ChatDialect: String, Sendable {
     case harmony
     case minimax
     case flint
+    case inkling
 }

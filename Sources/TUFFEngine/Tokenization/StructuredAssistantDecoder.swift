@@ -18,6 +18,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
     private let parameterSchemas: [String: JSONValue]
     private let idGenerator: @Sendable () -> String
     private let harmonyDecoder: HarmonyAssistantDecoder?
+    private let inklingDecoder: InklingAssistantDecoder?
     private var channel: Channel = .visible
     private var label = ""
     private var toolTokens: [Int32]?
@@ -55,6 +56,10 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
                 allowedTools: allowedTools,
                 idGenerator: idGenerator)
         }
+        self.inklingDecoder = tokenizer.inklingTokenIDs.map {
+            InklingAssistantDecoder(tokenizer: tokenizer, ids: $0, allowedTools: allowedTools,
+                                    idGenerator: idGenerator)
+        }
         if promptOpensThinking,
            tokenizer.dialect == .chatml || tokenizer.dialect == .minimax {
             channel = .thought
@@ -82,7 +87,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
             reasoning == .on
         case .minimax:
             true
-        case .gemma, .harmony, .flint:
+        case .gemma, .harmony, .flint, .inkling:
             false
         }
     }
@@ -95,6 +100,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
     /// Whether text arriving now belongs to reasoning.
     public var isInReasoning: Bool {
         if let harmonyDecoder { return harmonyDecoder.isInAnalysis }
+        if let inklingDecoder { return inklingDecoder.isInReasoning }
         return channel == .thought
     }
 
@@ -112,6 +118,8 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         guard !failed else { throw ToolCallParserError.malformed }
         if let harmonyDecoder {
             return try harmonyDecoder.consume(tokenID: tokenID, delta: delta)
+        } else if let inklingDecoder {
+            return try inklingDecoder.consume(tokenID: tokenID, delta: delta)
         } else if tokenizer.dialect == .chatml || tokenizer.dialect == .minimax || tokenizer.dialect == .flint {
             return try consumeTaggedDialect(tokenID: tokenID, delta: delta)
         }
@@ -194,6 +202,9 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         guard !failed else { throw GemmaToolCallParserError.malformed }
         if let harmonyDecoder {
             return try harmonyDecoder.consumeTail(text)
+        }
+        if let inklingDecoder {
+            return try inklingDecoder.consumeTail(text)
         }
         guard toolTokens == nil, !text.isEmpty else { return [] }
         return routeText(text)
@@ -283,12 +294,17 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
             try harmonyDecoder.finish()
             return
         }
+        if let inklingDecoder {
+            guard !failed else { throw ToolCallParserError.malformed }
+            try inklingDecoder.finish()
+            return
+        }
         guard !failed, toolTokens == nil else {
             throw ToolCallParserError.malformed
         }
     }
 
     public var hasToolCalls: Bool {
-        harmonyDecoder?.hasToolCalls ?? (emittedCalls > 0)
+        harmonyDecoder?.hasToolCalls ?? inklingDecoder?.hasToolCalls ?? (emittedCalls > 0)
     }
 }

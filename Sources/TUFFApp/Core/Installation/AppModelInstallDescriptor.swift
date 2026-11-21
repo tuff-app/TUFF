@@ -233,6 +233,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         case .gemma4: .gemma
         case .qwen36, .qwen4Exp: .chatml
         case .flint: .flint
+        case .inkling2: .inkling
         case .gptOss: .harmony
         case .minimaxM2: .minimax
         }
@@ -429,7 +430,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         case .gemma4: return .visionCompanion
         case .qwen36: return .qwen36VisionCompanion
         case .gptOss: return nil
-        case .minimaxM2, .flint: return nil
+        case .minimaxM2, .flint, .inkling2: return nil
         // Flash Next's tower is Qwen3.6's, but its merger projects into a
         // wider residual, so the two packs are not interchangeable and each
         // family routes to its own.

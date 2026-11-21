@@ -144,6 +144,16 @@ enum GTurboJSON {
                     biasType: "none",
                     groupSize: 1)
             }
+            if arch.family == .inkling2, name == "routedExpert" {
+                // The first format a layer file can hold; layers 20 to 23
+                // carry 8-bit MXFP8 codes, which the layout records per tensor.
+                return GTurboManifestQuantSlotV1(weightBits: 4, scheme: "nvfp4",
+                    scaleType: "E4M3", biasType: "none", groupSize: 16)
+            }
+            if arch.family == .inkling2, name == "router" {
+                return GTurboManifestQuantSlotV1(weightBits: 32, scheme: "fp32",
+                    scaleType: "none", biasType: "none", groupSize: 1)
+            }
             if arch.family == .flint, name == "router", weightBits == 16 {
                 return GTurboManifestQuantSlotV1(weightBits: 16, scheme: "bf16",
                     scaleType: "none", biasType: "none", groupSize: 1)

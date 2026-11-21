@@ -29,7 +29,10 @@ public struct InferenceMemoryPlan: Sendable, Equatable {
         kvCacheBytes = kv.totalBytes
         let baselineKV = descriptor.memory.kvCache.estimatedBytes(contextTokens: context)
         additionalRingBytes = kv.totalBytes > baselineKV ? kv.totalBytes - baselineKV : 0
-        if config.family == .gptOss {
+        if config.family == .inkling2 {
+            prefillScratchBytes = Self.inklingScratchBytes(config: config, contextTokens: context,
+                                                           chunkTokens: chunk)
+        } else if config.family == .gptOss {
             let expert = GPTOSSExpertScratchLayout(hiddenSize: config.hiddenSize,
                 intermediateSize: config.moeIntermediateSize, topK: config.topKExperts,
                 queryCapacity: chunk)
@@ -53,12 +56,25 @@ public struct InferenceMemoryPlan: Sendable, Equatable {
             expertCacheSlots: min(max(0, expertCacheSlots), max(1, config.numExperts)))
         // Flash Next's full KV grows geometrically; the old buffers can coexist
         // with their replacements. Reserve a full additional KV allocation.
-        let growth = config.family == .qwen4Exp ? kv.totalBytes : 0
+        // Inkling's full caches double too, all of them in one step: the old
+        // buffers, at most half the size of their replacements, coexist with them.
+        let growth = config.family == .qwen4Exp ? kv.totalBytes
+            : config.family == .inkling2 ? kv.growthOverlapBytes / 2 : 0
         for bytes in [prefillScratchBytes, additionalRingBytes, growth, cacheTrackingMetadataReserveBytes] {
             let sum = estimate.addingReportingOverflow(bytes)
             estimate = sum.overflow ? .max : sum.partialValue
         }
         estimatedWorkingSetBytes = estimate
+    }
+
+    /// Inkling's forward scratch: about 0.8 MB a prompt row, and one attention
+    /// score per head and key for as many rows as fit beside the longest cache.
+    private static func inklingScratchBytes(config: ArchConfig, contextTokens: Int,
+                                            chunkTokens: Int) -> UInt64 {
+        let rows = UInt64(min(max(1, chunkTokens), InklingLoopConfig.maximumBlockRows))
+        let ring = UInt64(config.slidingWindow) + rows
+        let scores = max(UInt64(config.numHeads) * max(UInt64(contextTokens), ring) * 4, 32 << 20)
+        return rows * (1 << 20) + scores + (16 << 20)
     }
 
     private static func trackingMetadataReserve(config: ArchConfig, slots: Int) -> UInt64 {

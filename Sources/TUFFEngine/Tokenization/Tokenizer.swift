@@ -98,6 +98,7 @@ public struct GFTokenizer: @unchecked Sendable {
     public let thinkStartID: Int32?
     public let thinkEndID: Int32?
     public let harmonyTokenIDs: HarmonySpecialTokenIDs?
+    public let inklingTokenIDs: InklingSpecialTokenIDs?
     public let stopTokenIDs: Set<Int32>
     public let vocabSize: Int
     /// The channel/tool markers that structure assistant output. Streaming
@@ -111,6 +112,9 @@ public struct GFTokenizer: @unchecked Sendable {
         ]
         if let harmonyTokenIDs {
             ids.formUnion(harmonyTokenIDs.structuralMarkerIDs)
+        }
+        if let inklingTokenIDs {
+            ids.formUnion(inklingTokenIDs.structuralMarkerIDs)
         }
         return ids
     }
@@ -281,7 +285,11 @@ public struct GFTokenizer: @unchecked Sendable {
 
         let dialect: ChatDialect
         let resolved: ResolvedSpecialTokens
-        if Self.specialTokenID(tokenizer, "<|begin_of_text|>") != nil,
+        if Self.specialTokenID(tokenizer, InklingPrompt.modelMark) != nil,
+           Self.specialTokenID(tokenizer, InklingPrompt.endTurnMark) != nil {
+            dialect = .inkling
+            resolved = try Self.resolveInklingTokens(tokenizer)
+        } else if Self.specialTokenID(tokenizer, "<|begin_of_text|>") != nil,
            Self.specialTokenID(tokenizer, "<|observation|>") != nil {
             dialect = .flint
             resolved = try Self.resolveFlintTokens(tokenizer)
@@ -314,6 +322,7 @@ public struct GFTokenizer: @unchecked Sendable {
         self.thinkStartID = resolved.thinkStartID
         self.thinkEndID = resolved.thinkEndID
         self.harmonyTokenIDs = resolved.harmonyTokenIDs
+        self.inklingTokenIDs = resolved.inklingTokenIDs
         self.stopTokenIDs = resolved.stopTokenIDs
         self.vocabSize = resolved.vocabSize
     }
@@ -335,6 +344,36 @@ public struct GFTokenizer: @unchecked Sendable {
         let harmonyTokenIDs: HarmonySpecialTokenIDs?
         let stopTokenIDs: Set<Int32>
         let vocabSize: Int
+        var inklingTokenIDs: InklingSpecialTokenIDs? = nil
+    }
+
+    /// Inkling 2 has no turn or channel tokens of the kind the other dialects
+    /// use: a turn is a run of typed messages that all close with
+    /// `<|end_message|>`, and `InklingAssistantDecoder` reads them. The
+    /// generic slots are filled with the nearest equivalents so they are
+    /// treated as structure when streaming. Only the end-of-turn token and
+    /// the padding token stop a generation.
+    private static func resolveInklingTokens(_ tokenizer: any Tokenizer) throws -> ResolvedSpecialTokens {
+        func id(_ value: String) throws -> Int32 { try requireTokenID(tokenizer, value) }
+        let endTurn = try id(InklingPrompt.endTurnMark)
+        let endMessage = try id(InklingPrompt.endMessageMark)
+        let endOfText = try id("<|endoftext|>")
+        let thinking = try id(InklingPrompt.thinkingMark)
+        _ = try id(InklingPrompt.userMark); _ = try id(InklingPrompt.systemMark)
+        _ = try id(InklingPrompt.modelMark); _ = try id(InklingPrompt.textMark)
+        let toolCall = try id(InklingPrompt.toolCallMark)
+        let other = try ["<|content_invoke_tool_text|>", "<|content_tool_error|>", "<|content_xml|>"].map(id)
+        return ResolvedSpecialTokens(bosID: endOfText, bosPrefixID: nil, eosID: endTurn, padID: endOfText,
+            endOfTurnID: endTurn, toolCallStartID: toolCall,
+            toolCallEndID: endMessage, toolResponseID: try id(InklingPrompt.toolMark),
+            toolResponseEndID: endMessage, channelStartID: thinking, channelEndID: endMessage,
+            thinkStartID: nil, thinkEndID: nil, harmonyTokenIDs: nil,
+            // The rows the head can produce. The matrices are padded to 201,024.
+            stopTokenIDs: [endTurn, endOfText], vocabSize: 200_058,
+            inklingTokenIDs: InklingSpecialTokenIDs(
+                model: try id(InklingPrompt.modelMark), text: try id(InklingPrompt.textMark),
+                thinking: thinking, toolCall: toolCall, endMessage: endMessage, endTurn: endTurn,
+                otherContent: Set(other)))
     }
 
     private static func resolveFlintTokens(_ tokenizer: any Tokenizer) throws -> ResolvedSpecialTokens {
@@ -638,6 +677,8 @@ public struct GFTokenizer: @unchecked Sendable {
         case .flint:
             return try FlintPrompt.render(messages: messages, tools: [],
                 preserveThinking: preserveThinking, addGenerationPrompt: true)
+        case .inkling:
+            return try InklingPrompt.render(messages: messages, tools: [], reasoning: reasoning)
         }
     }
 
@@ -842,6 +883,11 @@ public struct GFTokenizer: @unchecked Sendable {
                 preserveThinking: preserveThinking, addGenerationPrompt: addGenerationPrompt)
             return encode(prompt, addBOS: false)
         }
+        if dialect == .inkling {
+            // The template has no generation prompt to add or leave out.
+            return encode(try InklingPrompt.render(messages: messages, tools: tools, reasoning: reasoning),
+                          addBOS: false)
+        }
         guard dialect != .harmony else {
             throw GFTokenizerError.unsupportedForDialect(
                 "binary reasoning control for Harmony tool chat")
@@ -933,6 +979,8 @@ public struct GFTokenizer: @unchecked Sendable {
                 addBOS: false)
         case .flint:
             return [endOfTurnID] + encode(FlintPrompt.safe(content) + "<|assistant|>", addBOS: false)
+        case .inkling:
+            return [endOfTurnID] + encode(InklingPrompt.userMessage(content), addBOS: false)
         case .harmony:
             return [eosID] + encode(
                 "\(Self.harmonyStartMark)user<|message|>\(content)<|end|>"
@@ -1079,7 +1127,9 @@ public struct GFTokenizer: @unchecked Sendable {
             // No assistant end marker is rendered before an observation;
             // rebuild rather than assume a potentially incorrect KV boundary.
             throw GFTokenizerError.unsupportedForDialect("Flint tool-result KV continuation")
-        case .chatml, .minimax:
+        // An Inkling assistant turn ends with its end-of-turn token whatever
+        // it contains, so the tagged path finds the boundary the same way.
+        case .chatml, .minimax, .inkling:
             return try encodeTaggedToolResultContinuation(
                 cachedMessages: cachedMessages, assistant: assistant,
                 incomingMessages: incomingMessages, tools: tools,

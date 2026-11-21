@@ -42,7 +42,7 @@ import Testing
         #expect(TUFFModelCatalog.all.map(\.selector) == [
             "gemma4-e2b", "gemma4-e4b", "gemma4-12b-qat", "gemma4", "qwen36",
             "gpt-oss-20b", "gpt-oss-120b", "minimax-m2.7", "qwen38-flash-next", "ornith-9b", "ornith-35b", "ornith-122b", "ornith-397b", "qwen38-27b", "gemma4-heretic",
-            "flint-40b", "bonsai-2-2b", "bonsai-2-27b",
+            "flint-40b", "bonsai-2-2b", "bonsai-2-27b", "inkling-2-mini",
         ])
         #expect(TUFFModelCatalog.model(selector: "e2b")?.id == .gemma4_E2B)
         #expect(TUFFModelCatalog.default.id == .gemma4_26B_A4B)
@@ -84,7 +84,7 @@ import Testing
             #expect(TUFFModelCatalog.model(selector: model.selector)?.id == model.id)
             #expect(model.architecture.weightLayout == .prismQ2)
         }
-        #expect(TUFFModelCatalog.all.count == 18)
+        #expect(TUFFModelCatalog.all.count == 19)
     }
 
     @Test func sourcesRemainPinnedAndUnique() {

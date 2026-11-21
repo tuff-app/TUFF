@@ -83,6 +83,7 @@ public struct AppBugReport: Sendable {
     private static func formName(_ model: TUFFModelDescriptor) -> String {
         switch model.id {
         case .flint40B: "Flint 40B"
+        case .inkling2Mini: "Inkling 2 Mini"
         case .bonsai2_2B: "Bonsai 2 2B"
         case .bonsai2_27B: "Bonsai 2 27B"
         case .gemma4_E2B: "Gemma 4 E2B"

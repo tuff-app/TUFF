@@ -17,6 +17,34 @@ import TUFFRuntimeDescriptions
             #expect(growing.growthOverlapBytes <= growing.totalBytes)
         }
     }
+    /// Inkling runs 12 of its 24 layers three times, each pass with its own
+    /// keys and values: 8 full-attention visits and 40 sliding ones, at 4,096
+    /// bytes a position. Its blocks stop at 512 rows whatever chunk is asked for.
+    @Test func inklingCachesAreCountedByVisit() {
+        let config = ArchConfig.inkling2Mini
+        for (chunk, rows) in [(128, 128), (512, 512), (2_048, 512)] {
+            let plan = KVCacheMemoryPlan(config: config, maxContext: 8_192, fp16RingEnabled: true,
+                                         maxPrefillChunkTokens: chunk)
+            #expect(plan.capacities.count == 48)
+            #expect(plan.totalBytes == UInt64(8 * 8_192 * 4_096 + 40 * (1_024 + rows) * 4_096))
+            #expect(plan.growthOverlapBytes == UInt64(8 * 8_192 * 4_096))
+        }
+        // A context shorter than the window never fills a ring.
+        let short = KVCacheMemoryPlan(config: config, maxContext: 600, fp16RingEnabled: true,
+                                      maxPrefillChunkTokens: 128)
+        #expect(short.totalBytes == UInt64(48 * 600 * 4_096))
+        let descriptor = TUFFModelCatalog.inkling2Mini
+        // The admission estimate never assumes a chunk below 256 tokens.
+        let small = InferenceMemoryPlan(descriptor: descriptor, config: config, contextTokens: 8_192,
+                                        expertCacheSlots: 16, prefillChunkTokens: 128)
+        let large = InferenceMemoryPlan(descriptor: descriptor, config: config, contextTokens: 8_192,
+                                        expertCacheSlots: 16, prefillChunkTokens: 512)
+        #expect(small.kvCacheBytes == UInt64(8 * 8_192 * 4_096 + 40 * 1_280 * 4_096))
+        // Scratch is about a megabyte a row.
+        #expect(large.prefillScratchBytes - small.prefillScratchBytes == UInt64(256 << 20))
+        #expect(large.estimatedWorkingSetBytes > small.estimatedWorkingSetBytes)
+    }
+
     @Test func newCacheTrackingArraysHaveAConservativeAllLayerReserve() throws {
         let page = UInt64(sysconf(_SC_PAGESIZE))
         for descriptor in TUFFModelCatalog.all {

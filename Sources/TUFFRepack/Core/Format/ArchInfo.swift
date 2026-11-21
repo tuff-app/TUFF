@@ -11,6 +11,7 @@ enum RepackModelFamily: String, Sendable, Equatable {
     case minimaxM2 = "minimax-m2"
     case qwen4Exp = "qwen4-exp"
     case flint = "flint"
+    case inkling2 = "inkling2"
 }
 
 enum RepackModelVariant: String, Sendable, Equatable {
@@ -31,6 +32,7 @@ enum RepackModelVariant: String, Sendable, Equatable {
     case bonsai2_2B = "ternary-bonsai-2-2b"
     case bonsai2_27B = "ternary-bonsai-2-27b"
     case flint40B = "flint-40b-a2.5b"
+    case inkling2Mini = "inkling-2-mini"
 }
 
 /// Which dense Gemma a checkpoint is, from its own shape.
@@ -157,6 +159,9 @@ struct ArchInfo: Sendable, Equatable {
         }
         if (root["model_type"] as? String) == "gpt_oss" {
             return try loadGPTOSS(configPath: configPath, config: root)
+        }
+        if (root["model_type"] as? String) == "inkling2_loop" {
+            return try loadValidatedInkling(configPath: configPath)
         }
         if (root["model_type"] as? String) == "minimax_m2" {
             return try loadMiniMaxM27(configPath: configPath, config: root)

@@ -30,7 +30,15 @@ by `Character`, which segments it into grapheme clusters, while parsing
 **`nsString` builds the NSString directly** from the UTF-16 code units, with
 no Swift `String` in between.
 
+A fourth change is for correctness. **`ignore_merges` is honored.**
+`BPETokenizer` reads `model.ignore_merges` from `tokenizer.json`, and when it
+is set, a pre-tokenized word that is already in the vocabulary becomes that
+token without running the merges, as Hugging Face's `tokenizers` does.
+Upstream ignored the setting. Inkling 2's tokenizer sets it; with it ignored,
+about one word in a hundred encoded differently from the reference. No other
+tokenizer TUFF installs sets it, so they encode as before.
+
 To update, copy the new release's `Sources/Hub`, `Sources/Tokenizers` and
 `Package@swift-6.1.swift` over this directory, trim the manifest the same way,
-then reapply the three changes. Check them by encoding every vocabulary entry
+then reapply the four changes. Check them by encoding every vocabulary entry
 of each installed tokenizer with both versions and comparing.

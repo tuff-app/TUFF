@@ -13,10 +13,10 @@ inputs="${TUFF_ENGINE_INPUT_DIR:-dist/engine-build-inputs}"
 mkdir -p "$output" "$inputs"
 output="$(cd "$output" && pwd)"
 input="$(cd "$inputs" && pwd)"
-families="${TUFF_ENGINE_FAMILIES:-gemma-affine qwen-hybrid-affine gpt-oss-mxfp4 minimax-affine flint-affine}"
+families="${TUFF_ENGINE_FAMILIES:-gemma-affine qwen-hybrid-affine gpt-oss-mxfp4 minimax-affine flint-affine inkling-nvfp4}"
 for family in $families; do
   case "$family" in
-    gemma-affine|qwen-hybrid-affine|gpt-oss-mxfp4|minimax-affine|flint-affine) ;;
+    gemma-affine|qwen-hybrid-affine|gpt-oss-mxfp4|minimax-affine|flint-affine|inkling-nvfp4) ;;
     *) echo "Unknown engine family: $family" >&2; exit 1 ;;
   esac
   TUFF_ENGINE_FAMILY="$family" swift build -c release ${scratch[@]+"${scratch[@]}"} --product TUFFInferenceEngine

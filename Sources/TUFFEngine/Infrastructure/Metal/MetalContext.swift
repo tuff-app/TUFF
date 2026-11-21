@@ -104,6 +104,7 @@ public enum MetalKernelGroup: String, CaseIterable, Sendable, Comparable {
     case residualStreams = "streams"
     case prismHadamard = "prism"
     case flint
+    case inkling
     case vision
 
     /// Modules whose kernels this group provides, in compile order.
@@ -122,6 +123,7 @@ public enum MetalKernelGroup: String, CaseIterable, Sendable, Comparable {
         case .residualStreams: ["hyper_connection", "ngram_ple"]
         case .prismHadamard: ["prism_hadamard", "prism_affine2_gemm"]
         case .flint: ["flint"]
+        case .inkling: ["inkling"]
         case .vision: ["vision"]
         }
     }
@@ -150,6 +152,11 @@ public enum MetalKernelGroup: String, CaseIterable, Sendable, Comparable {
         var groups: Set<MetalKernelGroup> = [.core]
         if config.family == .gptOss {
             groups.formUnion([.mixtureOfExperts, .mxfp4])
+            return groups
+        }
+        // Inkling 2 runs its own kernels and the shared sampler.
+        if config.family == .inkling2 {
+            groups.insert(.inkling)
             return groups
         }
         if config.numExperts > 0 { groups.insert(.mixtureOfExperts) }
@@ -426,6 +433,7 @@ public final class MetalContext: @unchecked Sendable {
         "prism_hadamard": "Metal/Primitives",
         "prism_affine2_gemm": "Metal/Primitives",
         "flint": "Metal/Flint",
+        "inkling": "Metal/Inkling",
         "rmsnorm": "Metal/Primitives",
         "rope": "Metal/Primitives",
         "tensorops": "Metal/TensorCore",

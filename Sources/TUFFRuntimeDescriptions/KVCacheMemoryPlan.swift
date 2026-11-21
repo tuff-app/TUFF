@@ -18,13 +18,25 @@ package struct KVCacheMemoryPlan: Sendable, Equatable {
         precondition(maxContext > 0 && maxPrefillChunkTokens > 0)
         let swaStride = config.numKVHeads * config.headDim * 2
         let fullStride = config.numFullKVHeads * config.fullHeadDim * 2
+        // An Inkling layer inside the loop keeps keys and values for each of
+        // its passes, so its caches are counted by visit, and its blocks have
+        // their own row limit.
+        let inkling = config.family == .inkling2
+        let loop = config.inklingLoop
+        let kinds = inkling
+            ? (0..<loop.visits(numLayers: config.numLayers)).map {
+                config.fullAttentionLayerMask[loop.layer(ofVisit: $0, numLayers: config.numLayers)]
+            }
+            : config.fullAttentionLayerMask
+        let chunkRows = inkling ? min(maxPrefillChunkTokens, InklingLoopConfig.maximumBlockRows)
+            : maxPrefillChunkTokens
         let swaCapacity = min(maxContext, max(1, fp16RingCapacityOverride
-            ?? ((slidingWindow ?? config.slidingWindow) + maxPrefillChunkTokens)))
+            ?? ((slidingWindow ?? config.slidingWindow) + chunkRows)))
         var resolvedCapacities: [Int] = []
         var resolvedStrides: [Int] = []
         var bytes: UInt64 = 0
         var growingBytes: UInt64 = 0
-        for kind in config.fullAttentionLayerMask {
+        for kind in kinds {
             if kind == 2 {
                 resolvedCapacities.append(0)
                 resolvedStrides.append(0)

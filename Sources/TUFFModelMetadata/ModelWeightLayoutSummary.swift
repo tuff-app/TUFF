@@ -48,7 +48,7 @@ public struct ModelWeightLayoutSummary: Codable, Sendable, Equatable {
         var fixed: UInt64 = 0
         var layerBytes = Array(repeating: UInt64(0), count: architecture.numLayers)
         var staging = Array(repeating: UInt64(0), count: architecture.numLayers)
-        let supportsProjectionStaging = architecture.family != .gptOss
+        let supportsProjectionStaging = architecture.family != .gptOss && architecture.family != .inkling2
         let payloadEnd = try add(index.header.indexSize, index.header.residentSize)
         guard payloadEnd == weights.size else { throw InferencePlanningError.invalidLayout }
         for entry in index.entries.values.sorted(by: { $0.fileOffset < $1.fileOffset }) {

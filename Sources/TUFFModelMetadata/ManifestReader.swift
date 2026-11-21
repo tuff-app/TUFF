@@ -291,6 +291,31 @@ public enum ManifestReader {
             }
             return
         }
+        if family == .inkling2 {
+            // 4-bit affine projections, an FP32 router and routed experts in
+            // the publisher's NVFP4 (layers that hold MXFP8 instead say so
+            // per tensor in the expert layout). There is no shared expert;
+            // its slot is the writer's unused placeholder.
+            for (name, slot) in [("embedding", quant.embedding), ("attention", quant.attention)] {
+                guard slot.weightBits == 4, slot.scheme.lowercased() == "affine",
+                      slot.scaleType.lowercased() == "bf16", slot.biasType.lowercased() == "bf16",
+                      slot.groupSize == 64 else {
+                    throw ModelError.indexCorrupt(detail: "unsupported quantization for \(name)")
+                }
+            }
+            let router = quant.router, routed = quant.routedExpert
+            guard router.weightBits == 32, router.scheme.lowercased() == "fp32",
+                  router.scaleType.lowercased() == "none", router.biasType.lowercased() == "none",
+                  router.groupSize == 1 else {
+                throw ModelError.indexCorrupt(detail: "unsupported quantization for router")
+            }
+            guard routed.weightBits == 4, routed.scheme.lowercased() == "nvfp4",
+                  routed.scaleType.lowercased() == "e4m3", routed.biasType.lowercased() == "none",
+                  routed.groupSize == 16 else {
+                throw ModelError.indexCorrupt(detail: "unsupported quantization for routedExpert")
+            }
+            return
+        }
         if family == .flint {
             let router = quant.router
             if router.weightBits == 16 {

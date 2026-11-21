@@ -168,6 +168,13 @@ extension Model {
         return RoutedExpertFetchPlan(layer: layer, cachePlan: cachePlan)
     }
 
+    /// Whether a layer's experts are bound straight from its mapped file, so
+    /// a read can cover any number of them. False means cache slots.
+    func routedExpertsAreMapped(layer: Int) throws -> Bool {
+        try ensureLayerOpened(layer)
+        return streamersQueue.sync { streamersBox.streamers[layer]!.mapsExperts }
+    }
+
     public func routedExpertCacheSlotCount(layer _: Int) -> Int? {
         // Match the allocation in `openLayerLocked`. Prefill uses this value
         // to size overlapping fetch plans, so reporting the requested value

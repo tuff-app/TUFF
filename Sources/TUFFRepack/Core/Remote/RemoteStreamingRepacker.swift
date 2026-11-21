@@ -198,6 +198,10 @@ public final class RemoteStreamingRepacker {
                                                 sourceIdentity: options.repoID,
                                                 declaredQuantization: options.repoID == OptiQRemoteInstaller.repoID
                                                     ? snapshot.metadata.bitsOverrides : nil)
+        } else if snapshot.arch.family == .inkling2 {
+            plan = try InklingRepackPlanner.plan(arch: snapshot.arch, headers: snapshot.shardHeaders,
+                                                  outputDir: paths.partialDirectory,
+                                                  sourceIdentity: options.repoID)
         } else {
             plan = try RepackPlanner.plan(meta: snapshot.metadata, arch: snapshot.arch,
                                           shardHeaders: snapshot.shardHeaders, outputDir: paths.partialDirectory)
@@ -600,6 +604,14 @@ public final class RemoteStreamingRepacker {
     static let pinnedSidecars: [String: [String: String]] = [
         OptiQRemoteInstaller.repoID: optiqSidecarHashes,
         FlintInt4RemoteInstaller.repoID: flintInt4SidecarHashes,
+        "mlx-community/Inkling-2-Mini-4bit": inklingMiniSidecarHashes,
+    ]
+    /// Inkling 2 Mini's chat template is rendered by TUFF's own code, which
+    /// was written against exactly this file and tokenizer.
+    static let inklingMiniSidecarHashes: [String: String] = [
+        "tokenizer.json": "7f332727f9a3f093dd452a39cc978e6757627e5dad1b0673aa4e75174f236dd6",
+        "tokenizer_config.json": "2090107583ef1cd15a08cb644e3218dafe62f29dbadf5c8026839d13b8b24dde",
+        "chat_template.jinja": "53a9035f3255945704b5857657cfb00c1165090c0641c4f782a0cbf268cc16dc",
     ]
     static let flintInt4SidecarHashes: [String: String] = [
         "tokenizer.json": "a263cce0b7e2b03f7ee07ce809783ef4b47f160c3f268a4ea1524f638da45b68",
@@ -639,7 +651,7 @@ public final class RemoteStreamingRepacker {
         var bits = GTurboJSON.QuantBitWidths(
             embedding: 4,
             attention: 4,
-            router: plan.arch.family == .flint ? 16 : 8,
+            router: plan.arch.family == .flint ? 16 : (plan.arch.family == .inkling2 ? 32 : 8),
             sharedExpert: 8,
             routedExpert: 4)
         for e in plan.resident.entries {

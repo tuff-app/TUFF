@@ -20,6 +20,7 @@ public enum TUFFModelID: String, Codable, CaseIterable, Sendable {
     case ornith15_397B = "ornith-1.5-397b"
     case qwen38_27B = "qwen3.8-27b"
     case gemma4_26B_Heretic = "gemma4-26b-heretic"
+    case inkling2Mini = "inkling-2-mini"
 }
 
 public enum TUFFModelFamily: String, Codable, Sendable {
@@ -29,6 +30,7 @@ public enum TUFFModelFamily: String, Codable, Sendable {
     case gptOss = "gpt-oss"
     case minimaxM2 = "minimax-m2"
     case qwen4Exp = "qwen4-exp"
+    case inkling2
 }
 
 public enum TUFFArchitectureID: String, Codable, Sendable {
@@ -49,6 +51,7 @@ public enum TUFFArchitectureID: String, Codable, Sendable {
     case ornith15_122B = "ornith-1.5-122b"
     case ornith15_397B = "ornith-1.5-397b"
     case qwen38_27B = "qwen3.8-27b"
+    case inkling2Mini = "inkling-2-mini"
 }
 
 public enum TUFFFeedForwardKind: String, Codable, Sendable {
@@ -60,6 +63,9 @@ public enum TUFFWeightLayout: String, Codable, Sendable {
     case prismQ2 = "prism-q2"
     case affine
     case mxfp4
+    /// 4-bit affine projections with routed experts kept in the publisher's
+    /// NVFP4 and MXFP8 float formats.
+    case nvfp4
 }
 
 public struct TUFFArchitectureProfile: Codable, Equatable, Sendable {
@@ -81,6 +87,7 @@ public struct TUFFArchitectureProfile: Codable, Equatable, Sendable {
 
 public extension TUFFArchitectureProfile {
     static let flint40B = TUFFArchitectureProfile(id: .flint40B, family: .flint, feedForwardKind: .mixtureOfExperts, weightLayout: .affine)
+    static let inkling2Mini = TUFFArchitectureProfile(id: .inkling2Mini, family: .inkling2, feedForwardKind: .mixtureOfExperts, weightLayout: .nvfp4)
     static let bonsai2_2B = TUFFArchitectureProfile(id: .bonsai2_2B, family: .qwen36, feedForwardKind: .dense, weightLayout: .prismQ2)
     static let bonsai2_27B = TUFFArchitectureProfile(id: .bonsai2_27B, family: .qwen36, feedForwardKind: .dense, weightLayout: .prismQ2)
     static let gemma4E2B = TUFFArchitectureProfile(
@@ -459,6 +466,8 @@ public struct TUFFModelDescriptor: Codable, Equatable, Sendable, Identifiable {
         case .minimaxM27: 204_800
         case .flint40B, .bonsai2_2B, .bonsai2_27B, .gemma4_12B_QAT, .gemma4_26B_A4B, .gemma4_26B_Heretic, .qwen36_35B_A3B, .qwen38FlashNext,
              .ornith15_9B, .ornith15_35B_A3B, .ornith15_122B, .ornith15_397B, .qwen38_27B: 262_144
+        // The checkpoint allows 1,048,576. TUFF has not run it past this.
+        case .inkling2Mini: 262_144
         }
     }
 
@@ -1426,6 +1435,33 @@ public enum TUFFModelCatalog {
         runtimeDefaults: TUFFModelRuntimeDefaults(expertCacheSlots: 16, temperature: 1.0, topK: 20, topP: 0.95),
         capabilities: [.textGeneration, .reasoning], reasoningControl: .toggle)
 
+    /// Inkling 2 Mini from the pinned MLX conversion: 4-bit affine projections
+    /// with the routed experts left in the publisher's NVFP4 and MXFP8. Text
+    /// only; the checkpoint's vision tower is not installed.
+    ///
+    /// A token runs 48 layer applications (12 of the 24 layers three times),
+    /// each with its own keys and values: 8 over the whole context and 40
+    /// over a 1,024-token window, at 4,096 bytes a token each.
+    public static let inkling2Mini = TUFFModelDescriptor(
+        id: .inkling2Mini, selector: "inkling-2-mini", aliases: ["inkling2-mini", "inkling-mini"],
+        apiModelID: "inkling-2-mini",
+        displayName: "Inkling 2 Mini Q4", shortName: "Inkling 2 Mini",
+        summary: "26B looped mixture-of-experts model, 3.4B active. Text only for now. Streams its experts.",
+        family: .inkling2, architecture: .inkling2Mini, installDirectoryName: "inkling-2-mini.gturbo",
+        source: .init(repoID: "mlx-community/Inkling-2-Mini-4bit",
+            revision: "9856dc53edead71405f8348930937c3638ff21a2",
+            sourceIndexSHA256: "6e2d0fbb83f4ec2488f22f521e57855375ea93b473a704da10871398f952d9f5",
+            manifestModelID: "mlx-community/Inkling-2-Mini-4bit",
+            approximateDownloadBytes: 16_700_000_000, installedBytes: 16_750_000_000, reserveBytes: oneGiB),
+        hardware: .init(minimumUnifiedMemoryBytes: 16 * oneGiB),
+        memory: .init(qualifiedDefaultWorkingSetBytes: 3_600_000_000,
+            expertCacheBytesPerSlot: 122_683_392,
+            kvCache: .init(fullAttentionBytesPerToken: 32_768, slidingAttentionBytesPerToken: 163_840,
+                           slidingWindowCapacityTokens: 1_152)),
+        qualification: .qualified,
+        runtimeDefaults: TUFFModelRuntimeDefaults(expertCacheSlots: 16, temperature: 1.0, topK: 64, topP: 0.95),
+        capabilities: [.textGeneration, .reasoning], reasoningControl: .toggle)
+
     public static let bonsai2_2B = TUFFModelDescriptor(
         id: .bonsai2_2B, selector: "bonsai-2-2b", apiModelID: "bonsai-2-2b",
         displayName: "Ternary Bonsai 2 2B", shortName: "Bonsai 2 2B",
@@ -1477,6 +1513,7 @@ public enum TUFFModelCatalog {
         flint40BOptiQ,
         bonsai2_2B,
         bonsai2_27B,
+        inkling2Mini,
     ]
     public static let `default` = gemma4_26B_A4B
 

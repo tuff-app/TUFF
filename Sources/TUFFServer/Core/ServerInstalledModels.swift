@@ -270,6 +270,7 @@ public struct ServerInstalledModels: Sendable {
         case .gemma4: .gemma
         case .qwen36, .qwen4Exp: .chatml
         case .flint: .flint
+        case .inkling2: .inkling
         case .gptOss: .harmony
         case .minimaxM2: .minimax
         }

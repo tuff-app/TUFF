@@ -179,7 +179,7 @@ public struct VisionConfig: Sendable, Equatable {
             attentionScale = 1 / sqrt(Float(headDimension))
             minimumPixels = 65_536
             maximumPixels = 16_777_216
-        case .gptOss, .minimaxM2, .flint:
+        case .gptOss, .minimaxM2, .flint, .inkling2:
             architecture = .gemma4Legacy
             hiddenSize = 0
             intermediateSize = 0

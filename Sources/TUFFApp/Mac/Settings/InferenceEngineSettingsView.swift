@@ -42,6 +42,7 @@ struct InferenceEngineSettingsView: View {
         case "gemma-affine": "Gemma"
         case "qwen-hybrid-affine": "Qwen / Ornith / Bonsai"
         case "flint-affine": "Flint"
+        case "inkling-nvfp4": "Inkling"
         case "gpt-oss-mxfp4": "GPT-OSS (Legacy)"
         case "minimax-affine": "MiniMax (Legacy)"
         default: id
@@ -82,7 +83,8 @@ struct InferenceEngineSettingsView: View {
                 .sorted(by: { $0.version > $1.version }).first,
                   let architecture = release.architectureIDs.sorted().first else { return }
             let lease = try await controller.acquire(architectureID: architecture,
-                quantizationLayout: package.reference.packageID == "gpt-oss-mxfp4" ? "mxfp4" : "affine",
+                quantizationLayout: package.reference.packageID == "gpt-oss-mxfp4" ? "mxfp4"
+                    : (package.reference.packageID == "inkling-nvfp4" ? "nvfp4" : "affine"),
                 protocolVersion: 1, macOSMajorVersion: ProcessInfo.processInfo.operatingSystemVersion.majorVersion)
             try await controller.release(lease)
             packages = try await controller.statuses()

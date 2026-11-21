@@ -107,7 +107,9 @@ package enum PackedExpertsLayoutReader {
                     manifestExpertsPerLayer: manifest.expertsPerLayer,
                     manifestExpertStride: manifest.expertStride,
                     manifestFileSizes: manifest.files.mapValues(\.size),
-                    layout: wire, densePrefixLayers: manifest.arch.family == "flint" ? 2 : 0)
+                    layout: wire, densePrefixLayers: manifest.arch.family == "flint" ? 2 : 0,
+                    layerStridesMayDiffer: GTurboV1StructuralValidator.layerStridesMayDiffer(
+                        family: manifest.arch.family))
             }
         } catch {
             throw ModelError.indexCorrupt(detail: "layout.json: \(error)")

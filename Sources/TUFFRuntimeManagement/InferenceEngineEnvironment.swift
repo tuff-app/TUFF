@@ -138,12 +138,12 @@ public enum InferenceEngineEnvironment {
         let installation: InferenceEngineInstallation
         do {
             installation = try await acquire(architectureID: arch.variant.rawValue,
-                quantizationLayout: arch.family == .gptOss ? "mxfp4" : "affine", protocolVersion: protocolVersion)
+                quantizationLayout: arch.family.engineQuantizationLayout, protocolVersion: protocolVersion)
         } catch {
             try Task.checkCancellation()
             let controller = try controller()
             guard let lease = try? await controller.acquireKnownGood(bindingID(for: directory),
-                architectureID: arch.variant.rawValue, quantizationLayout: arch.family == .gptOss ? "mxfp4" : "affine",
+                architectureID: arch.variant.rawValue, quantizationLayout: arch.family.engineQuantizationLayout,
                 protocolVersion: protocolVersion, macOSMajorVersion: ProcessInfo.processInfo.operatingSystemVersion.majorVersion) else { throw error }
             installation = InferenceEngineInstallation(lease: lease, controller: controller)
         }
@@ -164,7 +164,7 @@ public enum InferenceEngineEnvironment {
         let arch = try ManifestReader.resolveArchitecture(directoryURL: directory)
         let controller = try controller()
         guard let lease = try await controller.acquireKnownGood(bindingID(for: directory),
-            architectureID: arch.variant.rawValue, quantizationLayout: arch.family == .gptOss ? "mxfp4" : "affine",
+            architectureID: arch.variant.rawValue, quantizationLayout: arch.family.engineQuantizationLayout,
             protocolVersion: 1, macOSMajorVersion: ProcessInfo.processInfo.operatingSystemVersion.majorVersion) else { return nil }
         if lease.manifest.archiveSHA256 == identity {
             try await controller.release(lease)

@@ -189,7 +189,15 @@ package enum GTurboV1StructuralValidator {
             manifestExpertsPerLayer: manifest.expertsPerLayer,
             manifestExpertStride: manifest.expertStride,
             manifestFileSizes: manifest.files.mapValues(\.size),
-            layout: layout, densePrefixLayers: manifest.arch.family == "flint" ? 2 : 0)
+            layout: layout, densePrefixLayers: manifest.arch.family == "flint" ? 2 : 0,
+            layerStridesMayDiffer: layerStridesMayDiffer(family: manifest.arch.family))
+    }
+
+    /// Families whose layers hold experts of different sizes, so a layer's
+    /// stride can be below the manifest's, which is the largest. Flint mixes
+    /// 4-bit and 8-bit experts; Inkling 2 mixes NVFP4 and MXFP8.
+    package static func layerStridesMayDiffer(family: String?) -> Bool {
+        family == "flint" || family == "inkling2"
     }
 
     package static func crossValidate(
@@ -198,7 +206,8 @@ package enum GTurboV1StructuralValidator {
         manifestExpertStride: UInt64,
         manifestFileSizes: [String: UInt64],
         layout: GTurboPackedExpertsLayoutV1,
-        densePrefixLayers: Int = 0
+        densePrefixLayers: Int = 0,
+        layerStridesMayDiffer: Bool = false
     ) throws {
         guard manifestNumLayers == layout.numLayers,
               manifestExpertsPerLayer == layout.expertsPerLayer,
@@ -218,7 +227,7 @@ package enum GTurboV1StructuralValidator {
             let layerStride = layer.experts.first?.size ?? 0
             let expectedLayerSize = try gturboCheckedMultiply(UInt64(layout.expertsPerLayer),
                                                               layerStride, field: "layout.layerSize")
-            guard (densePrefixLayers == 2 || layerStride == layout.expertStride),
+            guard (densePrefixLayers == 2 || layerStridesMayDiffer || layerStride == layout.expertStride),
                   layer.experts.count == layout.expertsPerLayer,
                   manifestFileSizes[path] == expectedLayerSize else {
                 throw GTurboFormatError.invalid(field: "manifest.files.\(path)",
