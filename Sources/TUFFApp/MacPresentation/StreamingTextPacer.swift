@@ -4,35 +4,44 @@ import Foundation
 ///
 /// The engine sends text in batches about every 100 ms, and the window draws
 /// on its own clock, so an answer arrived as runs of several words with pauses
-/// between them: at 70 tokens a second it looked like chunks, not writing.
-/// This holds what has arrived and gives back a little more of it on every
-/// frame, at the rate text has recently been arriving.
+/// between them. This holds what has arrived and gives back a little more of
+/// it on every frame.
 ///
-/// It never falls far behind: when more is waiting than `maximumLag` seconds
-/// of it at the current rate, it speeds up to catch up. Text is revealed one
-/// character (grapheme) at a time, so an emoji or accented letter is never
+/// It works like a playout buffer. The reveal runs at the average rate text
+/// arrived over the last few seconds and stays about one typical gap between
+/// arrivals behind, so the next word is usually there before the current one
+/// is finished. A slow model (a few tokens a second, unevenly spaced) then
+/// writes at an even pace instead of rushing each word and waiting for the
+/// next. When the backlog grows past that delay the pace rises to catch up;
+/// when it shrinks the pace eases off instead of stopping. Text is revealed
+/// one character (grapheme) at a time, so an emoji or accented letter is never
 /// split. The caller shows everything at once when the answer ends, stops or
 /// fails.
 public struct StreamingTextPacer: Sendable {
-    /// How far behind the arrived text the display may run, in seconds.
+    /// The most the reveal may deliberately run behind, in seconds.
     public var maximumLag: TimeInterval
 
     public private(set) var target = ""
     public private(set) var displayed = ""
     private var targetCount = 0
     private var displayedCount = 0
-    /// Recent arrival rate, characters per second.
-    private var rate: Double = 0
-    private var lastArrival: TimeInterval?
+    /// Recent arrivals: time and total characters, oldest first.
+    private var arrivals: [(time: TimeInterval, count: Int)] = []
     private var lastFrame: TimeInterval?
     /// Fractional characters owed from earlier frames.
     private var carry: Double = 0
-    /// Set when text arrives: the pace that shows all of it within
-    /// `maximumLag`. A pace recomputed from the shrinking backlog on every
-    /// frame only approaches the end and never quite gets there.
-    private var catchUpRate: Double = 0
+    /// When each pending batch must be fully shown, oldest first. Kept apart
+    /// from the rate history, which drops old arrivals; an entry leaves only
+    /// once its text is on screen.
+    private var deadlines: [(time: TimeInterval, count: Int)] = []
 
-    public init(maximumLag: TimeInterval = 0.4) {
+    /// Arrivals older than this stop counting toward the rate.
+    static let window: TimeInterval = 3
+    static let minimumDelay: TimeInterval = 0.1
+    /// Nothing that has arrived stays hidden much longer than this.
+    var catchUpWindow: TimeInterval { maximumLag * 1.5 }
+
+    public init(maximumLag: TimeInterval = 1.0) {
         self.maximumLag = maximumLag
     }
 
@@ -58,21 +67,50 @@ public struct StreamingTextPacer: Sendable {
             let aligned = text.index(raw, offsetBy: 0)
             if aligned != raw { displayed = String(text[..<aligned]) }
         }
-        let previousCount = targetCount
+        let wasCaughtUp = displayedCount >= targetCount
         targetCount = text.count
         displayedCount = displayed.count
-        let added = max(0, targetCount - previousCount)
-        if let lastArrival {
-            let interval = min(1, max(0.03, time - lastArrival))
-            let instant = Double(added) / interval
-            rate = rate == 0 ? instant : rate * 0.7 + instant * 0.3
-        } else {
-            // The first batch has no rate yet; reveal it over about one batch.
-            rate = Double(added) / 0.1
-        }
-        lastArrival = time
         target = text
-        catchUpRate = Double(targetCount - displayedCount) / maximumLag
+        deadlines.removeAll { $0.count <= displayedCount }
+        let due = time + catchUpWindow
+        if let last = deadlines.last, due - last.time < 0.1 {
+            // Close together: hold the newer text to the earlier deadline.
+            deadlines[deadlines.count - 1].count = targetCount
+        } else if targetCount > displayedCount {
+            deadlines.append((due, targetCount))
+        }
+        // Frames that passed while nothing was waiting (or while the window
+        // was not drawing) cannot be spent on text that arrived after them.
+        if wasCaughtUp, let lastFrame, lastFrame < time { self.lastFrame = time }
+        arrivals.append((time, targetCount))
+        // After a pause longer than the window (a tool call, a long think)
+        // only the fresh arrival is left, so the old pace does not hold the
+        // resumed text back.
+        while arrivals.count > 1, let first = arrivals.first, time - first.time > Self.window {
+            arrivals.removeFirst()
+        }
+        if arrivals.count > 32 { arrivals.removeFirst(arrivals.count - 32) }
+    }
+
+    /// Characters per second over the recent arrivals, or nil before there
+    /// are two of them.
+    var arrivalRate: Double? {
+        guard let first = arrivals.first, let last = arrivals.last, arrivals.count >= 2 else { return nil }
+        let span = max(1.0 / 60, last.time - first.time)
+        return Double(last.count - first.count) / span
+    }
+
+    /// How far behind arrivals the reveal aims to run: a little more than
+    /// most gaps between them, so the display rarely runs dry.
+    var targetDelay: TimeInterval {
+        var gaps: [TimeInterval] = []
+        for index in arrivals.indices.dropFirst() {
+            gaps.append(arrivals[index].time - arrivals[index - 1].time)
+        }
+        guard !gaps.isEmpty else { return Self.minimumDelay }
+        gaps.sort()
+        let typical = gaps[min(gaps.count - 1, Int(Double(gaps.count) * 0.8))]
+        return min(max(Self.minimumDelay, maximumLag), max(Self.minimumDelay, typical * 1.1))
     }
 
     /// Moves the reveal to `time` and returns the text to show, or nil when
@@ -81,7 +119,27 @@ public struct StreamingTextPacer: Sendable {
         defer { lastFrame = time }
         guard let lastFrame, displayedCount < targetCount else { return nil }
         let elapsed = min(0.1, max(0, time - lastFrame))
-        let pace = max(rate, catchUpRate)
+        // Each arrival must be fully shown by `catchUpWindow` after it came:
+        // pace to the most urgent of those deadlines.
+        var catchUpRate = 0.0
+        for deadline in deadlines where deadline.count > displayedCount {
+            let left = max(1.0 / 60, deadline.time - time)
+            catchUpRate = max(catchUpRate, Double(deadline.count - displayedCount) / left)
+        }
+        let backlog = Double(targetCount - displayedCount)
+        let delay = targetDelay
+        let pace: Double
+        if let rate = arrivalRate, rate > 0 {
+            // Steer toward running `delay` behind: on target this is the
+            // arrival rate; ahead of it, slower; behind it, faster.
+            let behind = backlog / rate
+            // Never leave arrived text hidden much past `catchUpWindow`,
+            // whatever the recent rate says.
+            pace = max(rate * min(3, max(0.5, 1 + 0.5 * (behind - delay) / delay)), catchUpRate)
+        } else {
+            // One arrival so far: no rate yet, show it over the delay.
+            pace = max(backlog / delay, catchUpRate)
+        }
         carry += pace * elapsed
         let step = min(Int(carry), targetCount - displayedCount)
         guard step > 0 else { return nil }
@@ -92,6 +150,9 @@ public struct StreamingTextPacer: Sendable {
         let end = target.index(start, offsetBy: step, limitedBy: target.endIndex) ?? target.endIndex
         displayed += target[start..<end]
         displayedCount += step
+        deadlines.removeAll { $0.count <= displayedCount }
+        // Credit left over from catching up must not flash the next batch.
+        if displayedCount >= targetCount { carry = 0 }
         return displayed
     }
 
@@ -100,6 +161,7 @@ public struct StreamingTextPacer: Sendable {
         displayed = target
         displayedCount = targetCount
         carry = 0
+        deadlines.removeAll()
         return displayed
     }
 }

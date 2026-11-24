@@ -45,9 +45,143 @@ import Testing
         // 10 characters, a one-second gap, then 300 at once.
         let (steps, pacer) = run(batches: [(0, String(repeating: "a", count: 10)),
                                            (1.0, String(repeating: "b", count: 300))],
-                                 until: 1.6)
+                                 until: 3.0)
         #expect(pacer.isCaughtUp, "still \(pacer.target.count - pacer.displayed.count) behind")
         #expect(steps.count > 10, "the burst was spread over frames")
+    }
+
+    /// A slow, disk-bound model: one short word every 0.18 to 0.5 seconds,
+    /// unevenly. The reveal should keep moving between words instead of
+    /// finishing each one and waiting for the next.
+    @Test func aSlowUnevenModelWritesWithoutStopping() {
+        var seed: UInt64 = 42
+        func next() -> Double {
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            return Double(seed >> 11) / Double(1 << 53)
+        }
+        var batches: [(time: Double, text: String)] = []
+        var time = 0.0
+        for _ in 0..<60 {
+            batches.append((time, "word "))
+            time += 0.18 + 0.32 * next()
+        }
+        var pacer = StreamingTextPacer()
+        var arrived = ""
+        var remaining = batches[...]
+        var frame = 0.0
+        var idle = 0
+        var longestIdle = 0
+        var idleFrames = 0
+        var frames = 0
+        while frame <= time {
+            while let batch = remaining.first, batch.time <= frame {
+                arrived += batch.text
+                pacer.receive(arrived, at: batch.time)
+                remaining = remaining.dropFirst()
+            }
+            let moved = pacer.advance(to: frame) != nil
+            if frame > 3 {
+                frames += 1
+                if moved { idle = 0 } else { idle += 1; idleFrames += 1 }
+                longestIdle = max(longestIdle, idle)
+            }
+            frame += 1.0 / 60
+        }
+        // At about 12 characters a second a character is due every 5 frames.
+        // The earlier pacer finished each word early and then sat still for
+        // up to 15 frames waiting for the next one.
+        #expect(longestIdle <= 8, "longest pause \(longestIdle) frames")
+        #expect(frames > 0 && idleFrames < frames)
+        #expect(pacer.target.count - pacer.displayed.count < 20)
+    }
+
+    /// A long pause (a tool call, a long think) must not leave the next
+    /// words crawling out at the rate the pause implies.
+    @Test func textAfterALongPauseIsNotHeldBack() {
+        var pacer = StreamingTextPacer()
+        pacer.receive("start", at: 0)
+        var time = 0.0
+        while time < 1 { time += 1.0 / 60; _ = pacer.advance(to: time) }
+        #expect(pacer.isCaughtUp)
+        // 60 seconds later, a few characters, then nothing more for a while.
+        pacer.receive("start then", at: 60)
+        time = 60
+        while time < 61.5, !pacer.isCaughtUp { time += 1.0 / 60; _ = pacer.advance(to: time) }
+        #expect(pacer.isCaughtUp, "\(pacer.target.count - pacer.displayed.count) still hidden")
+        // Also when the pause is shorter than the window.
+        pacer.receive("start then more", at: 62.9)
+        time = 62.9
+        while time < 64.5, !pacer.isCaughtUp { time += 1.0 / 60; _ = pacer.advance(to: time) }
+        #expect(pacer.isCaughtUp, "\(pacer.target.count - pacer.displayed.count) still hidden")
+    }
+
+    /// A large batch followed by a slow trickle: the trickle's rate must not
+    /// slow the reveal of the batch that is already waiting.
+    @Test func aBigBatchIsShownWithinTheCatchUpWindow() {
+        var pacer = StreamingTextPacer()
+        let big = String(repeating: "a", count: 1_000)
+        pacer.receive(big, at: 0)
+        var time = 0.0
+        _ = pacer.advance(to: time)
+        var arrived = big
+        var nextArrival = 0.1
+        while time < 2.0 {
+            time += 1.0 / 60
+            if time >= nextArrival {
+                arrived += "b"
+                pacer.receive(arrived, at: time)
+                nextArrival += 0.1
+            }
+            _ = pacer.advance(to: time)
+        }
+        #expect(pacer.target.count - pacer.displayed.count < 15,
+                "\(pacer.target.count - pacer.displayed.count) still hidden")
+    }
+
+    /// Text that arrives after the window stopped drawing for a while is
+    /// revealed from its arrival, not all at once on the first frame.
+    @Test func textArrivingAfterIdleFramesIsNotFlashed() {
+        var pacer = StreamingTextPacer()
+        pacer.receive("ready", at: 0)
+        var time = 0.0
+        while time < 1 { time += 1.0 / 60; _ = pacer.advance(to: time) }
+        #expect(pacer.isCaughtUp)
+        // No frames for five seconds, then 200 characters arrive.
+        let more = "ready" + String(repeating: "x", count: 200)
+        pacer.receive(more, at: 6)
+        let first = pacer.advance(to: 6 + 1.0 / 60)
+        #expect((first?.count ?? 5) - 5 < 100, "first frame showed \((first?.count ?? 5) - 5)")
+    }
+
+    /// A big batch then one character on every frame: the trickle must not
+    /// push the big batch's deadline back.
+    @Test func aBatchKeepsItsDeadlineUnderAPerFrameTrickle() {
+        var pacer = StreamingTextPacer()
+        var arrived = String(repeating: "a", count: 1_000)
+        pacer.receive(arrived, at: 0)
+        var time = 0.0
+        _ = pacer.advance(to: time)
+        while time < 1.6 {
+            time += 1.0 / 60
+            arrived += "b"
+            pacer.receive(arrived, at: time)
+            _ = pacer.advance(to: time)
+        }
+        #expect(pacer.displayed.count >= 1_000, "only \(pacer.displayed.count) shown")
+    }
+
+    /// Catching up on an overdue batch must not leave credit that shows the
+    /// next batch all at once.
+    @Test func overdueCatchUpLeavesNoCredit() {
+        var pacer = StreamingTextPacer()
+        let first = String(repeating: "a", count: 1_000)
+        pacer.receive(first, at: 0)
+        _ = pacer.advance(to: 0)
+        _ = pacer.advance(to: 2)
+        #expect(pacer.isCaughtUp)
+        pacer.receive(first + String(repeating: "b", count: 200), at: 2)
+        let shown = pacer.advance(to: 2 + 1.0 / 60)
+        #expect((shown?.count ?? 1_000) - 1_000 < 100)
     }
 
     @Test func charactersAreNeverSplit() {
@@ -86,7 +220,7 @@ import Testing
         var time = 0.0
         func drain() -> [String] {
             var seen: [String] = []
-            for _ in 0..<60 {
+            for _ in 0..<150 {
                 time += 1.0 / 60
                 if let shown = pacer.advance(to: time) { seen.append(shown) }
             }
