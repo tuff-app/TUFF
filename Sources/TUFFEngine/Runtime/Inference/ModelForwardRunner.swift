@@ -290,6 +290,20 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         }
     }
 
+    /// The prompt rows one block of `prefillChunked` runs under `config`:
+    /// a caller that splits a prompt there runs the blocks one call would.
+    func prefillBlockTokens(_ config: PrefillRuntimeConfig) -> Int {
+        switch backend {
+        #if !TUFF_ENGINE_GPT_OSS
+        case .affine(let runner): return runner.prefillBlockTokens(config)
+        #endif
+        #if !TUFF_ENGINE_AFFINE_ONLY
+        case .gptOss(let runner): return runner.prefillBlockTokens(config)
+        #endif
+        case .inkling(let runner): return runner.prefillBlockTokens
+        }
+    }
+
     func prefillChunked(tokens: ArraySlice<Int32>,
                         startPosition: Int,
                         outputMode: PrefillOutputMode,

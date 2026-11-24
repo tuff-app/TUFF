@@ -436,6 +436,9 @@ final class InklingForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
     let rowKernels: Bool
     /// Token rows one forward pass can hold.
     private let rowCapacity: Int
+    /// The prompt rows one block of `prefillChunked` runs, whatever the
+    /// requested chunk size.
+    var prefillBlockTokens: Int { rowCapacity }
     /// Scores one attention dispatch may write, in floats.
     private let scoreCapacity: Int
 

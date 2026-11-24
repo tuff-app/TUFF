@@ -30,6 +30,11 @@ public final class HostRoutedModelProvider: ServerModelProvider {
         var id: UUID
         var model: String
         var lastUsed: Date
+        /// A request is running in it. The host admits one request per
+        /// session, so a concurrent request gets a private session instead.
+        var busy = false
+        /// The model's session for requests without a prompt-cache key.
+        var implicit = false
     }
 
     struct State {

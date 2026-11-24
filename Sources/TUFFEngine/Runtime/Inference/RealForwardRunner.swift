@@ -1178,6 +1178,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                emitHead: false, outputMode: .logits)
     }
 
+    /// The prompt rows one block of `prefillChunked` runs under `config`.
+    func prefillBlockTokens(_ config: PrefillRuntimeConfig) -> Int {
+        max(1, min(config.chunkTokens, prefillTextChunkCapacity, PrefillRuntimeConfig.maxChunkTokens))
+    }
+
     public func prefillChunked(tokens: ArraySlice<Int32>,
                                startPosition: Int,
                                outputMode: PrefillOutputMode,

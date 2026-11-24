@@ -143,42 +143,65 @@ extension HostRoutedModelProvider {
     // MARK: - Sessions
 
     /// The host session a request runs in. A request with a prompt-cache key
-    /// reuses that key's session so the host keeps its conversation state;
-    /// any other request gets a private one.
+    /// reuses that key's session so the host keeps its conversation state.
+    /// A request without one runs in the model's implicit session, so a
+    /// client that resends its conversation continues where the last request
+    /// left off, as the one-session server before 10.0 did. The implicit
+    /// session is only opened while the API holds no other session for the
+    /// model, and a new keyed session ends an idle one first, so it never
+    /// adds a session's memory beside the ones clients asked for. A request
+    /// that finds its session busy gets a private one, which is ended after.
     func openSession(model: String, cacheKey: String?) async -> (id: UUID, keyed: Bool) {
-        guard let cacheKey, !cacheKey.isEmpty else { return (UUID(), false) }
-        let composite = model + "\u{0}" + cacheKey
+        let keyed = cacheKey.map { !$0.isEmpty } ?? false
+        let composite = keyed ? model + "\u{0}" + cacheKey! : model + "\u{0}"
         var evicted: [UUID] = []
-        let id = state.withLock { current -> UUID in
+        let opened = state.withLock { current -> (id: UUID, keyed: Bool) in
             if var existing = current.keyed[composite] {
+                guard !existing.busy else { return (UUID(), false) }
+                existing.busy = true
                 existing.lastUsed = Date()
                 current.keyed[composite] = existing
-                return existing.id
+                return (existing.id, true)
+            }
+            if keyed {
+                // The implicit session holds the model's first slot in the
+                // host; a client that uses keys gets it back.
+                for (key, value) in current.keyed
+                    where value.implicit && value.model == model && !value.busy {
+                    evicted.append(value.id)
+                    current.keyed.removeValue(forKey: key)
+                }
+            } else if current.keyed.values.contains(where: { $0.model == model }) {
+                return (UUID(), false)
             }
             let id = UUID()
-            current.keyed[composite] = KeyedSession(id: id, model: model, lastUsed: Date())
+            current.keyed[composite] = KeyedSession(
+                id: id, model: model, lastUsed: Date(), busy: true, implicit: !keyed)
             while current.keyed.count > Self.maximumKeyedSessions,
-                  let oldest = current.keyed.min(by: { $0.value.lastUsed < $1.value.lastUsed }),
-                  oldest.key != composite {
+                  let oldest = current.keyed
+                    .filter({ !$0.value.busy })
+                    .min(by: { $0.value.lastUsed < $1.value.lastUsed }) {
                 evicted.append(oldest.value.id)
                 current.keyed.removeValue(forKey: oldest.key)
             }
-            return id
+            return (id, true)
         }
         for session in evicted { await endSession(session) }
-        return (id, true)
+        return opened
     }
 
-    /// A request's session after its generation is over. A keyed session
-    /// whose generation completed stays open for the next request with the
-    /// same key; every other session is ended.
+    /// A request's session after its generation is over. A kept session
+    /// whose generation completed stays open for the next request; every
+    /// other session is ended.
     func closeSession(_ id: UUID, keyed: Bool, reuse: Bool) async {
         if keyed {
             if reuse {
+                // A session no longer listed was ended by whoever removed it.
                 state.withLock { current in
                     for (key, value) in current.keyed where value.id == id {
                         var touched = value
                         touched.lastUsed = Date()
+                        touched.busy = false
                         current.keyed[key] = touched
                     }
                 }

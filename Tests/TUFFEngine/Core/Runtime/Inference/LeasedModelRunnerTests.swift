@@ -132,4 +132,83 @@ private actor TwoSessionBarrier {
         // Whole-call leasing would have let the prompt finish first.
         #expect(seenByCompetitor.withLock { $0 } < 100)
     }
+
+    /// API requests run behind the lease. Their text prompts must take the
+    /// chunked path with the bytes one unleased call gives, not a token at a
+    /// time, and another session must get the model between chunks.
+    @Test func textPrefillIsChunkedAndMatchesTheUnleasedRunner() async throws {
+        let config = ArchConfig.qwen4ExpToy()
+        let directory = try Qwen4ExpToySynthetic.write(config: config)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let context = try MetalContext()
+        let model = try Model.load(directoryURL: directory, device: context.device,
+            expecting: config, streamingMode: .pread(slotCount: 16))
+        let options = RuntimeConfiguration(forceLogitsHead: true)
+        let plain = try ModelForwardRunner(model: model, context: context, maxContext: 1024,
+                                           runtimeConfiguration: options)
+        let lease = FairForwardLease()
+        let leased = LeasedModelRunner(runner: try ModelForwardRunner(
+            model: model, context: context, maxContext: 1024, runtimeConfiguration: options),
+            lease: lease)
+        #expect((leased as LogitProducer as? any ChunkedPrefillRunner)?.supportsChunkedPrefill == true)
+        let tokens = (0..<600).map { Int32(($0 * 7 + 11) % 31) }
+        // More than the runner's blocks hold: the leased path must split at
+        // the runner's own blocks (256 rows here), not at the requested size.
+        let prefill = PrefillRuntimeConfig.production(chunkTokens: 512)
+        #expect(leased.prefillBlockTokens(prefill) == 256)
+        func logitsBuffer() throws -> MTLBuffer {
+            try #require(context.device.makeBuffer(
+                length: config.vocabSize * MemoryLayout<Float16>.stride, options: .storageModeShared))
+        }
+        let expected = try logitsBuffer(), actual = try logitsBuffer()
+        let plainResult = try await plain.prefillChunked(
+            tokens: tokens[...], startPosition: 0, outputMode: .logits, config: prefill,
+            into: expected, onProgress: { _ in })
+
+        let progress = Mutex<[Int]>([])
+        let leasedResult = try await leased.prefillChunked(
+            tokens: tokens[...], startPosition: 0, outputMode: .logits, config: prefill,
+            into: actual, onProgress: { value in progress.withLock { $0.append(value) } })
+        #expect(leasedResult == plainResult)
+        #expect(memcmp(expected.contents(), actual.contents(),
+                       config.vocabSize * MemoryLayout<Float16>.stride) == 0)
+        #expect(leased.continuationPosition == tokens.count)
+        #expect(progress.withLock { $0.last } == tokens.count)
+        #expect(progress.withLock { $0 == $0.sorted() })
+
+        // Another session queued behind a holder runs before the prompt ends.
+        leased.reset()
+        let holderOwnsLease = Mutex(false), releaseHolder = Mutex(false)
+        let completed = Mutex(0), seenByCompetitor = Mutex(-1)
+        func waitUntil(_ condition: () async -> Bool) async throws {
+            for _ in 0..<2_000 {
+                if await condition() { return }
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            Issue.record("condition was not reached")
+        }
+        let holder = Task {
+            try await lease.withLease {
+                holderOwnsLease.withLock { $0 = true }
+                while !releaseHolder.withLock({ $0 }) { try await Task.sleep(for: .milliseconds(1)) }
+            }
+        }
+        try await waitUntil { holderOwnsLease.withLock { $0 } }
+        let run = Task {
+            _ = try await leased.prefillChunked(
+                tokens: tokens[...], startPosition: 0, outputMode: .logits, config: prefill,
+                into: actual, onProgress: { value in completed.withLock { $0 = value } })
+        }
+        try await waitUntil { await lease.waitingCount == 1 }
+        let competitor = Task {
+            try await lease.withLease { seenByCompetitor.withLock { $0 = completed.withLock { $0 } } }
+        }
+        try await waitUntil { await lease.waitingCount == 2 }
+        releaseHolder.withLock { $0 = true }
+        try await holder.value
+        try await run.value
+        try await competitor.value
+        #expect(completed.withLock { $0 } == tokens.count)
+        #expect(seenByCompetitor.withLock { $0 } < tokens.count)
+    }
 }

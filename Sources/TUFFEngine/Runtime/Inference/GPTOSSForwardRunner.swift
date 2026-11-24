@@ -10,6 +10,10 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
     /// Rows every prefill buffer is sized for: the configured chunk, never
     /// below the size TUFF shipped with.
     private let prefillQueryCapacity: Int
+    /// The prompt rows one block of `prefillChunked` runs under `config`.
+    func prefillBlockTokens(_ config: PrefillRuntimeConfig) -> Int {
+        max(1, min(config.chunkTokens, prefillQueryCapacity, PrefillRuntimeConfig.maxChunkTokens))
+    }
     private struct LayerViews {
         let inputNorm: TensorView
         let postAttentionNorm: TensorView

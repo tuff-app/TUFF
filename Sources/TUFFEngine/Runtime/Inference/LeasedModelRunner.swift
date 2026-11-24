@@ -5,6 +5,11 @@ private struct SessionOutputBuffer: @unchecked Sendable {
     let buffer: MTLBuffer
 }
 
+/// Borrowed only until the awaited prefill chunk returns.
+private struct SessionProgress: @unchecked Sendable {
+    let body: (Int) -> Void
+}
+
 /// The chunk is borrowed only until the awaited gate returns.
 private struct SessionPrefillChunk: @unchecked Sendable {
     let body: () async throws -> Void
@@ -14,9 +19,12 @@ private struct SessionPrefillChunk: @unchecked Sendable {
 /// using the same model's mutable staging and expert caches. Each instance
 /// must own a distinct underlying runner and scratch/KV state.
 ///
-/// This initial path deliberately uses token-by-token text prefill, so a
-/// long prompt cannot hold the shared lease for an entire generation.
-public final class LeasedModelRunner: ContinuableLogitProducer,
+/// Text prefill takes the lease one prefill chunk at a time, so a long
+/// prompt never holds the shared model for its whole prefill and another
+/// session's forward can run between its chunks. Until 11.6 this path read
+/// text prompts a token at a time for that reason, which made every API
+/// prompt run at decode speed.
+public final class LeasedModelRunner: ChunkedPrefillRunner, ContinuableLogitProducer,
     ContextWindowReporting, GreedyHeadReporting, PrefillHeadSkippingRunner,
     MultimodalPrefillRunner,
     StateSnapshottingRunner, PrefixCheckpointingRunner, @unchecked Sendable {
@@ -42,6 +50,46 @@ public final class LeasedModelRunner: ContinuableLogitProducer,
             try await self.runner.consumePrefillToken(token, position: position, scratchLogits: output.buffer)
         }
     }
+    var supportsChunkedPrefill: Bool { runner.supportsChunkedPrefill }
+    func prefillBlockTokens(_ config: PrefillRuntimeConfig) -> Int { runner.prefillBlockTokens(config) }
+
+    /// One lease per block. The runner splits a prompt into blocks of
+    /// `prefillBlockTokens` from its start position anyway, so the slices
+    /// are the blocks one call would have run, in the same order. Flint is
+    /// the exception: it runs the last token of every call through decode,
+    /// so each slice's last token does: the same state by another path, not
+    /// necessarily byte for byte. Each slice also runs the output head,
+    /// which only the last one needs: about 3 ms a block on Gemma E2B,
+    /// against hundreds for the block itself.
+    func prefillChunked(tokens: ArraySlice<Int32>, startPosition: Int,
+                        outputMode: PrefillOutputMode, config: PrefillRuntimeConfig,
+                        into logits: MTLBuffer,
+                        onProgress: (Int) -> Void) async throws -> PrefillResult {
+        let output = SessionOutputBuffer(buffer: logits)
+        let step = max(1, runner.prefillBlockTokens(config))
+        var result: PrefillResult?
+        var start = tokens.startIndex
+        while start < tokens.endIndex {
+            let end = min(start + step, tokens.endIndex)
+            let slice = tokens[start..<end]
+            let position = startPosition + (start - tokens.startIndex)
+            let done = start - tokens.startIndex
+            result = try await withoutActuallyEscaping(onProgress) { progress in
+                let report = SessionProgress(body: progress)
+                return try await lease.withLease {
+                    try await self.runner.prefillChunked(
+                        tokens: slice, startPosition: position, outputMode: outputMode,
+                        config: config, into: output.buffer) { report.body(done + $0) }
+                }
+            }
+            start = end
+        }
+        guard let result else {
+            throw PrefillError.chunkedUnsupported("an empty prompt has nothing to prefill")
+        }
+        return result
+    }
+
     /// The lease covers one planned chunk (a text span or one image span) at
     /// a time. The vision runtime's chunks are independent forwards over this
     /// runner's private KV and scratch, so another session's forward can run

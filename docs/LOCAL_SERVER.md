@@ -160,6 +160,11 @@ continues from where it left off instead of reading everything again.
 and `prompt_cache_key` helps it find the right conversation first. Under
 memory pressure the extra states are dropped.
 
+Each `prompt_cache_key` gets its own session, up to four at a time. Requests
+without one share a session per model, as long as no keyed session is open
+for that model. A request that arrives while its session is busy runs in a
+fresh one and reuses nothing.
+
 A new conversation that starts with the same system prompt and tools as an
 earlier one (256 tokens or more) skips reading them again. The server also
 saves that state to disk the first time it reads a system prompt, so it

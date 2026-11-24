@@ -600,7 +600,8 @@ private func post(_ port: Int, _ body: [String: Any], path: String = "/v1/chat/c
         let record = h.host.record.withLock { $0 }
         #expect(record.loads == [model.apiModelID])
         #expect(record.prepares.count == 2)
-        #expect(Set(record.started.map(\.sessionID)).count == 2)
+        // Requests without a prompt-cache key share the model's session.
+        #expect(Set(record.started.map(\.sessionID)).count == 1)
         // It is the API's own load, so releasing an idle API unloads it.
         #expect(await h.provider.unloadIfIdle())
         #expect(h.host.record.withLock { $0.unloads } == [model.apiModelID])
@@ -642,6 +643,9 @@ private func post(_ port: Int, _ body: [String: Any], path: String = "/v1/chat/c
         let h = try Harness(); defer { Task { await h.finish() } }
         h.host.record.withLock { $0.endFailures = 1 }
         _ = try await h.complete(try h.validated([user("a")]))
+        // The implicit session stays open until the API is idle.
+        #expect(h.host.record.withLock { $0.ended.isEmpty })
+        #expect(await h.provider.unloadIfIdle())
         let record = h.host.record.withLock { $0 }
         let session = try #require(record.started.first?.sessionID)
         // The first cleanup failed and was retried until the host confirmed.
@@ -653,7 +657,13 @@ private func post(_ port: Int, _ body: [String: Any], path: String = "/v1/chat/c
     @Test func aCleanupThatKeepsFailingIsRemembered() async throws {
         let h = try Harness(); defer { Task { await h.finish() } }
         h.host.record.withLock { $0.endFailures = 3 }
-        _ = try await h.complete(try h.validated([user("a")]))
+        // A cancelled request's session is ended at once.
+        h.host.record.withLock { $0.scripts = [Script(hold: true)] }
+        let request = try h.validated([user("a")])
+        let task = Task { try await h.complete(request) }
+        #expect(await eventually { h.host.record.withLock { $0.started.count == 1 } })
+        task.cancel()
+        _ = await task.result
         let session = try #require(h.host.record.withLock { $0.started.first?.sessionID })
         #expect(h.provider.state.withLock { $0.failedSessionEnds } == [session])
         // The next request retries it first.
@@ -675,6 +685,64 @@ private func post(_ port: Int, _ body: [String: Any], path: String = "/v1/chat/c
         #expect(record.ended.isEmpty)
         #expect(await h.provider.unloadIfIdle())
         #expect(Set(h.host.record.withLock { $0.ended }) == [record.started[0].sessionID, record.started[2].sessionID])
+        await h.finish()
+    }
+
+    /// A client that resends its conversation without a prompt-cache key
+    /// continues in the same session, so the host can reuse its state.
+    @Test func requestsWithoutAKeyShareTheModelsSessionUntilTheAPIIsIdle() async throws {
+        let h = try Harness(); defer { Task { await h.finish() } }
+        for text in ["a", "b", "c"] { _ = try await h.complete(try h.validated([user(text)])) }
+        let record = h.host.record.withLock { $0 }
+        #expect(Set(record.started.map(\.sessionID)).count == 1)
+        #expect(record.started.allSatisfy { $0.payload.conversationKey == nil })
+        #expect(record.ended.isEmpty)
+        #expect(await h.provider.unloadIfIdle())
+        #expect(h.host.record.withLock { $0.ended } == [record.started[0].sessionID])
+        await h.finish()
+    }
+
+    /// The implicit session never sits beside a session a client asked for:
+    /// a key ends an idle implicit session, and a request without a key
+    /// while keyed sessions are open runs in a private one.
+    @Test func keyedSessionsTakeOverFromTheImplicitOne() async throws {
+        let h = try Harness(); defer { Task { await h.finish() } }
+        _ = try await h.complete(try h.validated([user("a")]))
+        let implicit = try #require(h.host.record.withLock { $0.started.last?.sessionID })
+        _ = try await h.complete(try h.validated([user("b")], extra: ["prompt_cache_key": "chat"]))
+        let keyed = try #require(h.host.record.withLock { $0.started.last?.sessionID })
+        #expect(keyed != implicit)
+        #expect(h.host.record.withLock { $0.ended } == [implicit])
+        _ = try await h.complete(try h.validated([user("c")]))
+        let unkeyed = try #require(h.host.record.withLock { $0.started.last?.sessionID })
+        #expect(![implicit, keyed].contains(unkeyed))
+        #expect(h.host.record.withLock { $0.ended } == [implicit, unkeyed])
+        _ = try await h.complete(try h.validated([user("d")], extra: ["prompt_cache_key": "chat"]))
+        #expect(h.host.record.withLock { $0.started.last?.sessionID } == keyed)
+        await h.finish()
+    }
+
+    /// The host admits one request per session; a second request for a
+    /// session in use gets a private session instead of a busy error.
+    @Test func aBusySessionIsNotSharedByAConcurrentRequest() async throws {
+        let h = try Harness(); defer { Task { await h.finish() } }
+        // Connects to the host.
+        _ = try await h.complete(try h.validated([user("connect")], extra: ["prompt_cache_key": "other"]))
+        let model = "busy-test-model"
+        for key in [nil, "chat"] as [String?] {
+            let first = await h.provider.openSession(model: model, cacheKey: key)
+            let second = await h.provider.openSession(model: model, cacheKey: key)
+            #expect(first.keyed && !second.keyed && first.id != second.id)
+            await h.provider.closeSession(second.id, keyed: second.keyed, reuse: true)
+            await h.provider.closeSession(first.id, keyed: first.keyed, reuse: true)
+            // The private session was dropped; the first one is kept, free.
+            let kept = h.provider.state.withLock { $0.keyed.values.filter { $0.model == model } }
+            #expect(kept.map(\.id) == [first.id] && kept.allSatisfy { !$0.busy })
+            let again = await h.provider.openSession(model: model, cacheKey: key)
+            #expect(again.id == first.id && again.keyed)
+            await h.provider.closeSession(again.id, keyed: true, reuse: false)
+            #expect(h.provider.state.withLock { $0.keyed.values.allSatisfy { $0.model != model } })
+        }
         await h.finish()
     }
 
