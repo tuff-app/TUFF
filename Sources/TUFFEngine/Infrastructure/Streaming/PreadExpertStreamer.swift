@@ -503,7 +503,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                 defer { buffer.deallocate() }
                 while let range = nextReadAheadRange(work, generation: generation) {
                     var done: UInt64 = 0
-                    while done < range.count {
+                    while done < range.count, readAheadIsCurrent(generation) {
                         let length = Int(min(UInt64(chunk), range.count - done))
                         let count = pread(fd, buffer, length, off_t(range.offset + done))
                         if count < 0, errno == EINTR { continue }
@@ -516,6 +516,19 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                 }
             }
         }
+    }
+
+    /// Stops this streamer's read-ahead at the next 1 MB chunk.
+    public func cancelReadAhead() {
+        readAheadLock.lock()
+        readAheadGeneration &+= 1
+        readAheadLock.unlock()
+    }
+
+    private func readAheadIsCurrent(_ generation: Int) -> Bool {
+        readAheadLock.lock()
+        defer { readAheadLock.unlock() }
+        return generation == readAheadGeneration
     }
 
     /// Bytes read ahead into the file cache so far. Diagnostic.

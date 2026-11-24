@@ -844,3 +844,148 @@ kernel void ink_expert_reduce(
     }
     out[size_t(row) * width + i] = acc;
 }
+
+// ---------------------------------------------------------------------------
+// Decode products, several rows per SIMD group.
+//
+// The one-row expert kernels above read the input row again for every
+// output row, eight floats for every 4-bit word. These give each SIMD group
+// kInkRows consecutive rows: every lane loads its slice of the input once and
+// runs it against all of them. On a 16 GB M2 a decoded token's eight NVFP4
+// experts take 454 us instead of 741, MXFP8 1.27 ms instead of 1.36. (The
+// same change made the affine projections slower, so they keep one row.)
+//
+// Every lane still walks the same words in the same order with the same
+// fused multiply-adds, and each row ends in the same simd_sum, so a row's
+// result is the one-row kernel's to the bit. The runner checks that once per
+// GPU when the model loads and keeps the one-row kernels if it differs.
+// ---------------------------------------------------------------------------
+constant constexpr uint kInkRows = 4;
+constant constexpr uint kInkRowGroups = 2;
+// ink_e2m1 as a table, sign in bit 3; the negative zero matches it too.
+constant float kInkE2M1[16] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f,
+                               -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f};
+
+static inline void ink_load8(device const float* x, thread float v[8]) {
+    const packed_float4 a = ((device const packed_float4*)x)[0];
+    const packed_float4 b = ((device const packed_float4*)x)[1];
+    v[0] = a[0]; v[1] = a[1]; v[2] = a[2]; v[3] = a[3];
+    v[4] = b[0]; v[5] = b[1]; v[6] = b[2]; v[7] = b[3];
+}
+
+// Rows first .. first + R - 1 of one expert matrix, reduced: what
+// ink_expert_row returns for each.
+template <uint R>
+static inline void ink_expert_rows(device const uchar* blob, uint codes_offset, uint scales_offset,
+                                   device const float* x, uint columns, uint first, uint lane,
+                                   bool nvfp4, thread float out[R]) {
+    float acc[R];
+    for (uint r = 0u; r < R; ++r) acc[r] = 0.0f;
+    if (nvfp4) {
+        device const uint* codes = (device const uint*)(blob + codes_offset);
+        device const uchar* scales = blob + scales_offset;
+        const uint words = columns / 8u;
+        for (uint w = lane; w < words; w += 32u) {
+            float v[8];
+            ink_load8(x + w * 8u, v);
+            for (uint r = 0u; r < R; ++r) {
+                const uint packed = codes[size_t(first + r) * words + w];
+                float dot = 0.0f;
+                for (uint j = 0u; j < 8u; ++j)
+                    dot = fma(kInkE2M1[(packed >> (4u * j)) & 15u], v[j], dot);
+                acc[r] = fma(ink_e4m3(uint(scales[size_t(first + r) * (columns / 16u) + w / 2u])),
+                             dot, acc[r]);
+            }
+        }
+    } else {
+        device const uchar* codes = blob + codes_offset;
+        device const uchar* scales = blob + scales_offset;
+        const uint blocks = columns / 32u;
+        for (uint b = lane; b < blocks; b += 32u) {
+            float v[32];
+            for (uint q = 0u; q < 4u; ++q) ink_load8(x + b * 32u + q * 8u, v + q * 8u);
+            for (uint r = 0u; r < R; ++r) {
+                device const uchar* c = codes + size_t(first + r) * columns + b * 32u;
+                float dot = 0.0f;
+                for (uint j = 0u; j < 32u; ++j) dot = fma(ink_e4m3(uint(c[j])), v[j], dot);
+                acc[r] = fma(ink_e8m0(uint(scales[size_t(first + r) * blocks + b])), dot, acc[r]);
+            }
+        }
+    }
+    for (uint r = 0u; r < R; ++r) out[r] = simd_sum(acc[r]);
+}
+
+// Phase 1 for kInkRows hidden units of one expert per SIMD group: their gate
+// and up rows are 2 * kInkRows consecutive rows. Grid: (units / (kInkRows *
+// kInkRowGroups), 8), with `intermediate` a multiple of that.
+#define INK_EXPERT_PHASE1_ROWS_BODY(NVFP4)                                      \
+    device const uchar* blobs[8] = {e0, e1, e2, e3, e4, e5, e6, e7};            \
+    const uint unit = (tg.x * kInkRowGroups + sg) * kInkRows, e = tg.y;         \
+    float rows[2u * kInkRows];                                                  \
+    ink_expert_rows<2u * kInkRows>(blobs[e], codes_offset, scales_offset, x, columns,      \
+                                   2u * unit, lane, NVFP4, rows);               \
+    if (lane != 0u) return;                                                     \
+    for (uint r = 0u; r < kInkRows; ++r)                                        \
+        hidden[size_t(e) * intermediate + unit + r] = ink_expert_unit(          \
+            rows[2u * r] * factors[e], rows[2u * r + 1u] * factors[e], gate_cap, up_cap);
+
+#define INK_EXPERT_PHASE1_ROWS_ARGS                                             \
+    device const uchar* e0 [[buffer(0)]], device const uchar* e1 [[buffer(1)]], \
+    device const uchar* e2 [[buffer(2)]], device const uchar* e3 [[buffer(3)]], \
+    device const uchar* e4 [[buffer(4)]], device const uchar* e5 [[buffer(5)]], \
+    device const uchar* e6 [[buffer(6)]], device const uchar* e7 [[buffer(7)]], \
+    device const float* x [[buffer(8)]],                                        \
+    device float* hidden [[buffer(9)]],                                         \
+    constant float* factors [[buffer(10)]],                                     \
+    constant uint& codes_offset [[buffer(11)]],                                 \
+    constant uint& scales_offset [[buffer(12)]],                                \
+    constant uint& columns [[buffer(13)]],                                      \
+    constant uint& intermediate [[buffer(14)]],                                 \
+    constant float& gate_cap [[buffer(15)]],                                    \
+    constant float& up_cap [[buffer(16)]],                                      \
+    uint2 tg [[threadgroup_position_in_grid]],                                  \
+    uint sg [[simdgroup_index_in_threadgroup]],                                 \
+    uint lane [[thread_index_in_simdgroup]]
+
+kernel void ink_expert_phase1_rows_nvfp4(INK_EXPERT_PHASE1_ROWS_ARGS) { INK_EXPERT_PHASE1_ROWS_BODY(true) }
+kernel void ink_expert_phase1_rows_mxfp8(INK_EXPERT_PHASE1_ROWS_ARGS) { INK_EXPERT_PHASE1_ROWS_BODY(false) }
+
+// Phase 2 for kInkRows output rows per SIMD group. Grid: (width / (kInkRows *
+// kInkRowGroups), 1), with `width` a multiple of that.
+#define INK_EXPERT_PHASE2_ROWS_BODY(NVFP4)                                      \
+    device const uchar* blobs[8] = {e0, e1, e2, e3, e4, e5, e6, e7};            \
+    const uint first = (tg.x * kInkRowGroups + sg) * kInkRows;                  \
+    float total[kInkRows];                                                      \
+    for (uint r = 0u; r < kInkRows; ++r) total[r] = 0.0f;                       \
+    for (uint e = 0u; e < 8u; ++e) {                                            \
+        float rows[kInkRows];                                                   \
+        ink_expert_rows<kInkRows>(blobs[e], codes_offset, scales_offset,        \
+                                  hidden + size_t(e) * intermediate, intermediate, first, \
+                                  lane, NVFP4, rows);                           \
+        for (uint r = 0u; r < kInkRows; ++r) total[r] = fma(rows[r], factors[e], total[r]); \
+    }                                                                           \
+    if (lane != 0u) return;                                                     \
+    for (uint r = 0u; r < kInkRows; ++r) y[first + r] = total[r];
+
+#define INK_EXPERT_PHASE2_ROWS_ARGS                                             \
+    device const uchar* e0 [[buffer(0)]], device const uchar* e1 [[buffer(1)]], \
+    device const uchar* e2 [[buffer(2)]], device const uchar* e3 [[buffer(3)]], \
+    device const uchar* e4 [[buffer(4)]], device const uchar* e5 [[buffer(5)]], \
+    device const uchar* e6 [[buffer(6)]], device const uchar* e7 [[buffer(7)]], \
+    device const float* hidden [[buffer(8)]],                                   \
+    device float* y [[buffer(9)]],                                              \
+    constant float* factors [[buffer(10)]],                                     \
+    constant uint& codes_offset [[buffer(11)]],                                 \
+    constant uint& scales_offset [[buffer(12)]],                                \
+    constant uint& intermediate [[buffer(13)]],                                 \
+    uint2 tg [[threadgroup_position_in_grid]],                                  \
+    uint sg [[simdgroup_index_in_threadgroup]],                                 \
+    uint lane [[thread_index_in_simdgroup]]
+
+kernel void ink_expert_phase2_rows_nvfp4(INK_EXPERT_PHASE2_ROWS_ARGS) { INK_EXPERT_PHASE2_ROWS_BODY(true) }
+kernel void ink_expert_phase2_rows_mxfp8(INK_EXPERT_PHASE2_ROWS_ARGS) { INK_EXPERT_PHASE2_ROWS_BODY(false) }
+
+#undef INK_EXPERT_PHASE1_ROWS_ARGS
+#undef INK_EXPERT_PHASE1_ROWS_BODY
+#undef INK_EXPERT_PHASE2_ROWS_ARGS
+#undef INK_EXPERT_PHASE2_ROWS_BODY

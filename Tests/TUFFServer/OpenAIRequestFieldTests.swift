@@ -232,7 +232,7 @@ struct OpenAIRequestFieldTests {
 
         // Other families still refuse it through the validator's own message.
         #expect(throws: ServerRequestError.invalid(
-            message: "reasoning_effort is only supported by GPT-OSS",
+            message: "reasoning_effort is only supported by GPT-OSS; other models accept none",
             param: "reasoning_effort",
             code: "unsupported_parameter")) {
             try OpenAIRequestValidator.validate(harmony, modelID: "m", dialect: .gemma)
@@ -240,6 +240,83 @@ struct OpenAIRequestFieldTests {
 
         let thinking = try Self.decode(#""enable_thinking":true"#)
         #expect(thinking.enableThinking == true)
+    }
+
+    /// gBench sends `reasoning_effort: none` next to
+    /// `chat_template_kwargs.enable_thinking: false` on every no-thinking
+    /// request, whatever the model.
+    @Test func reasoningEffortNoneTurnsThinkingOffOnEveryFamily() throws {
+        let both = try Self.decode(
+            #""reasoning_effort":"none","chat_template_kwargs":{"enable_thinking":false}"#)
+        let alone = try Self.decode(#""reasoning_effort":"none""#)
+        #expect(alone.reasoningEffort == OpenAIReasoningEffort.none)
+        for request in [both, alone] {
+            // Gemma, Qwen (ChatML), Flint and Inkling: thinking off.
+            for dialect in [ChatDialect.gemma, .chatml, .flint, .inkling] {
+                let validated = try OpenAIRequestValidator.validate(
+                    request, modelID: "m", dialect: dialect)
+                #expect(validated.reasoning == .off)
+                #expect(validated.reasoningEffort == nil)
+            }
+            // GPT-OSS cannot skip reasoning; none is its least, Low.
+            let harmony = try OpenAIRequestValidator.validate(
+                request, modelID: "m", dialect: .harmony)
+            #expect(harmony.reasoning == .off)
+            #expect(harmony.reasoningEffort == .low)
+            // MiniMax always reasons, as it does with enable_thinking false.
+            let minimax = try OpenAIRequestValidator.validate(
+                request, modelID: "m", dialect: .minimax)
+            #expect(minimax.reasoning == .on)
+            // Apple has no reasoning to turn off.
+            _ = try OpenAIRequestValidator.validate(
+                request, modelID: "m", dialect: .gemma, preStagedImages: [:],
+                attachmentLease: nil, appleModel: true)
+        }
+
+        // Thinking on and off at once is refused, not guessed.
+        let conflict = try Self.decode(#""reasoning_effort":"none","enable_thinking":true"#)
+        for dialect in [ChatDialect.gemma, .chatml, .harmony] {
+            #expect(throws: ServerRequestError.invalid(
+                message: "reasoning_effort none and enable_thinking true disagree",
+                param: "reasoning_effort", code: "invalid_value")) {
+                try OpenAIRequestValidator.validate(conflict, modelID: "m", dialect: dialect)
+            }
+        }
+        #expect(throws: ServerRequestError.invalid(
+            message: "reasoning_effort none and enable_thinking true disagree",
+            param: "reasoning_effort", code: "invalid_value")) {
+            try OpenAIRequestValidator.validate(
+                conflict, modelID: "m", dialect: .gemma, preStagedImages: [:],
+                attachmentLease: nil, appleModel: true)
+        }
+        // enable_thinking alone is still GPT-OSS's wrong switch.
+        #expect(throws: ServerRequestError.self) {
+            try OpenAIRequestValidator.validate(
+                try Self.decode(#""enable_thinking":false"#), modelID: "m", dialect: .harmony)
+        }
+        // Graded values stay GPT-OSS only; unknown values are invalid.
+        #expect(throws: ServerRequestError.self) {
+            try OpenAIRequestValidator.validate(
+                try Self.decode(#""reasoning_effort":"high""#), modelID: "m", dialect: .chatml)
+        }
+        for value in [#""minimal""#, "1", "true"] {
+            let refused = try Self.rejection(#""reasoning_effort":"# + value)
+            #expect(refused.code == "invalid_value")
+            #expect(refused.param == "reasoning_effort")
+        }
+        #expect(try Self.decode(#""reasoning_effort":null"#).reasoningEffort == nil)
+    }
+
+    @Test func ignoreEOSIsAcceptedAndChangesNothing() throws {
+        let plain = try OpenAIRequestValidator.validate(try Self.decode(""), modelID: "m")
+        for value in ["true", "false"] {
+            let request = try Self.decode(#""ignore_eos":"# + value)
+            #expect(request.ignoreEOS == (value == "true"))
+            let validated = try OpenAIRequestValidator.validate(request, modelID: "m")
+            #expect(validated.generationConfig == plain.generationConfig)
+            #expect(validated.maximumCompletionTokens == plain.maximumCompletionTokens)
+        }
+        #expect(throws: (any Error).self) { try Self.decode(#""ignore_eos":"yes""#) }
     }
 
     @Test func responseFormatTextIsAcceptedAndStructuredOutputIsRefused() throws {

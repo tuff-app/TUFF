@@ -55,11 +55,24 @@ struct InklingKernels {
         "ink_expert_phase1_nvfp4", "ink_expert_phase1_mxfp8",
         "ink_expert_phase2_nvfp4", "ink_expert_phase2_mxfp8",
     ]
+    /// The several-rows expert kernels. Optional: a GPU that cannot build one
+    /// keeps the one-row kernels.
+    static let rowNames = [
+        "ink_expert_phase1_rows_nvfp4", "ink_expert_phase1_rows_mxfp8",
+        "ink_expert_phase2_rows_nvfp4", "ink_expert_phase2_rows_mxfp8",
+    ]
+    /// Rows one threadgroup of a `_rows` kernel covers: kInkRows x kInkRowGroups.
+    static let rowsPerGroup = 8
+    static let rowGroupThreads = 64
     private let pipelines: [String: MTLComputePipelineState]
+    let hasRowKernels: Bool
 
     init(context: MetalContext) throws {
         var pipelines: [String: MTLComputePipelineState] = [:]
         for name in Self.names { pipelines[name] = try context.pipeline(name) }
+        let rows = Self.rowNames.compactMap { name in (try? context.pipeline(name)).map { (name, $0) } }
+        hasRowKernels = rows.count == Self.rowNames.count
+        if hasRowKernels { for (name, pipeline) in rows { pipelines[name] = pipeline } }
         self.pipelines = pipelines
     }
 
@@ -418,6 +431,9 @@ final class InklingForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
     /// Positions a sliding layer's query can see, its own included.
     private let window: Int
     private let fusedDecode: Bool
+    /// A decoded token's experts through the several-rows kernels, after the
+    /// load-time comparison found them byte-identical to the one-row kernels.
+    let rowKernels: Bool
     /// Token rows one forward pass can hold.
     private let rowCapacity: Int
     /// Scores one attention dispatch may write, in floats.
@@ -446,6 +462,9 @@ final class InklingForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
     private(set) var totalCb1Nanos: UInt64 = 0
     private(set) var totalCb2Nanos: UInt64 = 0
     private(set) var totalHeadNanos: UInt64 = 0
+    /// GPU time of every committed command buffer, and how many.
+    private(set) var totalGPULayerNanos: UInt64 = 0
+    private(set) var totalGPULayerCommandBuffers: UInt64 = 0
     private(set) var totalRoutedExpertReads: UInt64 = 0
     private(set) var totalRoutedExpertBytes: UInt64 = 0
     private(set) var totalRoutedExpertCacheHits: UInt64 = 0
@@ -454,6 +473,27 @@ final class InklingForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
     private(set) var batchedBlocks = 0
     private var prefillClock = PrefillPhaseClock()
     var prefillPhaseTimes: PrefillPhaseTimes { prefillClock.times }
+
+    /// Decode lookahead: once a visit's own experts are read, the next
+    /// visit's router over this visit's feed-forward input guesses the next
+    /// visit's experts, and storage is asked to start reading them while
+    /// this visit and the next one's attention run. 76% of the guessed
+    /// experts are the ones routed; on a 16 GB M2 decode waited on reads 35
+    /// to 45% less and ran 8% faster on average from a cold file cache. The
+    /// next visit still routes on its own input; a wrong guess only costs
+    /// bandwidth. See `ExpertLookahead`. `TUFF_EXPERT_LOOKAHEAD=off` turns it off.
+    private var lookahead = ExpertLookahead()
+    /// The layer of the visit after each visit within a token, by visit.
+    private let nextLayerOfVisit: [Int?]
+    var lookaheadPrecision: Double { lookahead.precision }
+    var lookaheadReadsIssued: Int { lookahead.readsIssued }
+    var lookaheadEnabled: Bool { lookahead.enabled }
+    /// Prompt blocks read ahead too, with background `pread`s: the rest of a
+    /// visit's experts while its first batch is read, and the next visit's
+    /// while this one computes. On a 16 GB M2 a 1,062-token prompt took
+    /// 32.8 s instead of 46.6. (Storage hints, which decode uses, saved
+    /// little here.) `TUFF_INKLING_PREFILL_READAHEAD=off` turns it off.
+    private let blockReadAhead = ProcessInfo.processInfo.environment["TUFF_INKLING_PREFILL_READAHEAD"] != "off"
     var expertReadMetrics: ExpertReadMetrics { model.expertReadMetrics }
 
     /// `slidingWindow` is for tests: a shorter window lets a short sequence
@@ -484,6 +524,7 @@ final class InklingForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         }
         window = slidingWindow ?? config.slidingWindow
         self.fusedDecode = fusedDecode
+        nextLayerOfVisit = Self.nextLayers(numLayers: config.numLayers, loop: loop)
         try context.prepareKernelGroups(MetalKernelGroup.required(for: config))
         self.model = model
         self.context = context
@@ -491,6 +532,14 @@ final class InklingForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         self.loop = loop
         self.maxContext = maxContext
         kernels = try InklingKernels(context: context)
+        rowKernels = ProcessInfo.processInfo.environment["TUFF_INKLING_ROW_KERNELS"] != "off"
+            && kernels.hasRowKernels
+            && config.hiddenSize % InklingKernels.rowsPerGroup == 0
+            && config.moeIntermediateSize % InklingKernels.rowsPerGroup == 0
+            && Self.rowKernelsMatch(kernels, device: context.device)
+        if ProcessInfo.processInfo.environment["TUFF_PHASES"] == "1" {
+            FileHandle.standardError.write(Data("[inkling] row kernels \(rowKernels ? "on" : "off")\n".utf8))
+        }
         let useBatched = batchedProducts
             ?? (ProcessInfo.processInfo.environment["TUFF_INKLING_BATCHED_PREFILL"] != "off")
         batched = useBatched ? InklingBatchedProducts(context: context) : nil
@@ -666,6 +715,27 @@ final class InklingForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         tokenBuffer = try buffer(rows, "token")
     }
 
+    /// Visits in the order a token makes them, as (visit, layer): the layers
+    /// before the loop, the loop `passes` times, then the layers after it.
+    /// Matches the numbering in `run`.
+    static func visitOrder(numLayers: Int, loop: InklingLoopConfig) -> [(visit: Int, layer: Int)] {
+        var order = (0..<loop.loopStart).map { ($0, $0) }
+        order += loop.loopLayers.map { ($0, $0) }
+        for loopPass in 1..<max(1, loop.passes) {
+            let base = numLayers + (loopPass - 1) * loop.loopLayers.count - loop.loopStart
+            order += loop.loopLayers.map { ($0 + base, $0) }
+        }
+        order += (loop.loopEnd..<numLayers).map { ($0, $0) }
+        return order
+    }
+
+    static func nextLayers(numLayers: Int, loop: InklingLoopConfig) -> [Int?] {
+        let order = visitOrder(numLayers: numLayers, loop: loop)
+        var next = [Int?](repeating: nil, count: loop.visits(numLayers: numLayers))
+        for index in order.indices.dropLast() { next[order[index].visit] = order[index + 1].layer }
+        return next
+    }
+
     /// Test seam: called when a visit's attention has run, while
     /// `attentionRows` still holds its output (before the output gate).
     var afterAttention: ((_ visit: Int) -> Void)?
@@ -676,7 +746,11 @@ final class InklingForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
 
     // MARK: Sequence
 
-    func reset() { state.reset() }
+    func reset() {
+        lookahead.pending = nil
+        model.cancelRoutedExpertReadAhead()
+        state.reset()
+    }
 
     var continuationPosition: Int { state.position }
 
@@ -767,7 +841,14 @@ final class InklingForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
             throw PrefillError.chunkedUnsupported("Inkling prefill exceeds maxContext \(maxContext)")
         }
         prefillClock.active = true
-        defer { prefillClock.active = false }
+        // However it ends, nothing read ahead for a block is wanted once the
+        // prompt is done: the token's last visit has nothing after it, and a
+        // cancel between blocks never reaches `execute`. Decode's lookahead
+        // only hints storage and is not affected.
+        defer {
+            prefillClock.active = false
+            model.cancelRoutedExpertReadAhead()
+        }
         let all = Array(tokens)
         var done = 0
         while done < all.count {
@@ -872,6 +953,9 @@ final class InklingForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         pass.commandBuffer.waitUntilCompleted()
         let elapsed = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - start
         prefillClock.waited(pass.commandBuffer, wallNanos: elapsed)
+        let gpu = pass.commandBuffer.gpuEndTime - pass.commandBuffer.gpuStartTime
+        if gpu > 0 { totalGPULayerNanos &+= UInt64(gpu * 1e9) }
+        totalGPULayerCommandBuffers &+= 1
         try checkCommandBufferError(pass.commandBuffer)
         return elapsed
     }
@@ -889,7 +973,10 @@ final class InklingForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         do {
             try await run(tokens: tokens, startPosition: startPosition, emitHead: emitHead, logits: logits)
         } catch let error as CancellationError {
-            // Every committed command buffer has been waited for.
+            // Every committed command buffer has been waited for. Reads
+            // started for the rest of the block are no longer wanted.
+            model.cancelRoutedExpertReadAhead()
+            lookahead.pending = nil
             state.restoreConvolutions()
             throw error
         } catch let error as PrefillError {
@@ -1168,7 +1255,7 @@ final class InklingForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         totalCb1Nanos &+= try commitAndWait(pass)
         afterAttention?(visit)
 
-        pass = try await experts(layer: layer, views: views, rows: rows)
+        pass = try await experts(visit: visit, layer: layer, views: views, rows: rows)
         staticConv(pass, input: mlpOutput, taps: views.mlpTaps, state: conv[3],
                    output: mlpConv, channels: width, rows: rows)
         kernels.threads(pass, "ink_add",
@@ -1198,30 +1285,78 @@ final class InklingForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         return blobs
     }
 
+    /// The top-K experts of one feed-forward input row under a layer's
+    /// router, best first, and the sigmoid scores of all experts. Scores
+    /// are sigmoids; the correction bias only affects which experts are
+    /// chosen, not their weights.
+    private func route(_ views: LayerViews, input: UnsafePointer<Float>,
+                       logit: inout [Float]) -> (chosen: ArraySlice<Int>, score: [Float]) {
+        let expertCount = config.numExperts
+        vDSP_mmul(views.routerWeight, 1, input, 1, &logit, 1,
+                  vDSP_Length(expertCount), 1, vDSP_Length(config.hiddenSize))
+        let score = logit.map { 1 / (1 + exp(-$0)) }
+        let chosen = (0..<expertCount).sorted {
+            let a = score[$0] + views.routerBias[$0], b = score[$1] + views.routerBias[$1]
+            return a != b ? a > b : $0 < $1
+        }.prefix(config.topKExperts)
+        return (chosen, score)
+    }
+
+    /// Guesses the next visit's experts from this visit's single
+    /// feed-forward input row and asks storage to start reading them.
+    private func readAheadNextVisit(after visit: Int) {
+        guard lookahead.enabled, let next = nextLayerOfVisit[visit] else { return }
+        var logit = [Float](repeating: 0, count: config.numExperts)
+        let predicted = Array(route(layers[next], input: mlpNormed.contents().assumingMemoryBound(to: Float.self),
+                                    logit: &logit).chosen)
+        // A hint, not a read: storage starts on the pages and nothing waits
+        // for them; the visit reads whatever is still missing when it
+        // routes. Background `pread`s gained nothing here, because copying
+        // the guesses out cost as much GPU time as the reads saved.
+        _ = try? model.adviseRoutedExperts(layer: next, experts: predicted)
+        lookahead.noteRead()
+        lookahead.pending = ExpertLookahead.Pending(layer: next, experts: predicted, reads: nil)
+    }
+
+    /// A block's guess at the next visit's experts: each row through the
+    /// next visit's router, or, once the block picks at least twice as many
+    /// experts as there are, all of them. Started at utility priority after
+    /// this visit's own reads, so it never competes with them.
+    private func readAheadNextVisit(after visit: Int, rows: Int) {
+        guard blockReadAhead, let next = nextLayerOfVisit[visit] else { return }
+        let expertCount = config.numExperts
+        var experts: [Int]
+        if rows * config.topKExperts >= 2 * expertCount {
+            experts = Array(0..<expertCount)
+        } else {
+            var chosen = Set<Int>()
+            var logit = [Float](repeating: 0, count: expertCount)
+            let input = mlpNormed.contents().assumingMemoryBound(to: Float.self)
+            for row in 0..<rows {
+                chosen.formUnion(route(layers[next], input: input + row * config.hiddenSize, logit: &logit).chosen)
+            }
+            experts = chosen.sorted()
+        }
+        try? model.readAheadRoutedExperts(layer: next, experts: experts, lowPriority: true)
+    }
+
     /// Routes every row, reads the experts they chose, and encodes the
     /// feed-forward block into a new command buffer that leaves the weighted
     /// sum in `mlpOutput`.
-    private func experts(layer: Int, views: LayerViews, rows: Int) async throws -> InklingPass {
+    private func experts(visit: Int, layer: Int, views: LayerViews, rows: Int) async throws -> InklingPass {
         let width = config.hiddenSize
         let floatBytes = MemoryLayout<Float>.stride
         let intermediate = config.moeIntermediateSize
         let topK = config.topKExperts
         let expertCount = config.numExperts
 
-        // Routing. Scores are sigmoids; the correction bias only affects
-        // which experts are chosen, not their weights.
+        // Routing.
         struct Pair { let row: Int; let slot: Int; let weight: Float }
         var byExpert: [Int: [Pair]] = [:]
         let input = mlpNormed.contents().assumingMemoryBound(to: Float.self)
         var logit = [Float](repeating: 0, count: expertCount)
         for row in 0..<rows {
-            vDSP_mmul(views.routerWeight, 1, input + row * width, 1, &logit, 1,
-                      vDSP_Length(expertCount), 1, vDSP_Length(width))
-            let score = logit.map { 1 / (1 + exp(-$0)) }
-            let chosen = (0..<expertCount).sorted {
-                let a = score[$0] + views.routerBias[$0], b = score[$1] + views.routerBias[$1]
-                return a != b ? a > b : $0 < $1
-            }.prefix(topK)
+            let (chosen, score) = route(views, input: input + row * width, logit: &logit)
             let total = chosen.reduce(Float(0)) { $0 + score[$1] } + 1e-20
             for (slot, expert) in chosen.enumerated() {
                 byExpert[expert, default: []].append(
@@ -1229,6 +1364,13 @@ final class InklingForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
             }
         }
         let chosenExperts = byExpert.keys.sorted()
+        // Only decode's guesses are scored; a block's cover most experts.
+        if let guess = lookahead.pending {
+            lookahead.pending = nil
+            if rows == 1, guess.layer == layer {
+                lookahead.record(predicted: guess.experts, actual: chosenExperts)
+            }
+        }
         // Pairs in expert order, and where each token's pairs landed.
         let pairRow = pairRowIndex.contents().assumingMemoryBound(to: UInt32.self)
         let pairWeight = pairWeights.contents().assumingMemoryBound(to: Float.self)
@@ -1258,21 +1400,25 @@ final class InklingForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         // A decoded token: its eight experts in two dispatches.
         if fusedDecode, rows == 1, topK == 8, groups.count == 8, slotLimit >= 8 {
             let blobs = try await fetch(layer: layer, experts: groups.map(\.expert))
+            readAheadNextVisit(after: visit)
             let bound = blobs.map { InklingArgument.buffer($0.buffer, Int($0.offset)) }
             let format = views.nvfp4 ? "nvfp4" : "mxfp8"
-            kernels.groups(pass, "ink_expert_phase1_" + format,
+            let span = rowKernels ? InklingKernels.rowsPerGroup : 1
+            let threads = rowKernels ? InklingKernels.rowGroupThreads : 32
+            let rowsName = rowKernels ? "rows_" : ""
+            kernels.groups(pass, "ink_expert_phase1_" + rowsName + format,
                            bound + [.buffer(mlpNormed), .buffer(activation),
                                     .floats(groups.map { views.nvfp4 ? views.gateUpFactors[$0.expert] : 1 }),
                                     .u32(views.gateUpCodes), .u32(views.gateUpScales), .u32(width),
                                     .u32(intermediate), .f32(Float(loop.gateSoftcap)), .f32(Float(loop.upSoftcap))],
-                           grid: (intermediate, 8), threads: 32)
-            kernels.groups(pass, "ink_expert_phase2_" + format,
+                           grid: (intermediate / span, 8), threads: threads)
+            kernels.groups(pass, "ink_expert_phase2_" + rowsName + format,
                            bound + [.buffer(activation), .buffer(mlpOutput),
                                     .floats(groups.enumerated().map {
                                         (views.nvfp4 ? views.downFactors[$1.expert] : 1) * pairWeight[$0]
                                     }),
                                     .u32(views.downCodes), .u32(views.downScales), .u32(intermediate)],
-                           grid: (width, 1), threads: 32)
+                           grid: (width / span, 1), threads: threads)
             return pass
         }
         if useBatched {
@@ -1282,6 +1428,11 @@ final class InklingForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         } else {
             kernels.threads(pass, "ink_zero", [.buffer(mlpOutput), .u32(rows * width)],
                             grid: (rows * width, 1, 1))
+        }
+        // The batches below each wait for their own reads; the rest of the
+        // block's experts start now, so the drive always has work queued.
+        if rows > 1, blockReadAhead, groups.count > slotLimit {
+            try? model.readAheadRoutedExperts(layer: layer, experts: groups[slotLimit...].map(\.expert))
         }
         var next = 0
         while next < groups.count {
@@ -1349,6 +1500,7 @@ final class InklingForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
             }
             next += batch.count
         }
+        if rows == 1 { readAheadNextVisit(after: visit) } else { readAheadNextVisit(after: visit, rows: rows) }
         if useBatched {
             kernels.threads(pass, "ink_expert_reduce",
                             [.buffer(pairDown), .buffer(tokenPairs), .buffer(tokenWeights), .buffer(mlpOutput),

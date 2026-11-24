@@ -109,3 +109,5 @@ These aren't app settings; they exist so changes can be compared.
 | `TUFF_SAVED_CHATS=off` | Keep chat state in memory only, never on disk. |
 | `TUFF_SOFTMAX_SPLIT=off` | Run the sampler's softmax as one kernel, as before 11.3. |
 | `TUFF_ROUTER_SELECT=serial` | Pick each layer's experts with the single-thread scan, as before 11.4. |
+| `TUFF_INKLING_ROW_KERNELS=off` | Run Inkling's expert kernels one row per SIMD group, as before 11.6. |
+| `TUFF_INKLING_PREFILL_READAHEAD=off` | Read Inkling's prompt-block experts only when a block needs them, as before 11.6. |

@@ -87,7 +87,8 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
             return (runner.lookaheadPrecision, runner.lookaheadReadsIssued,
                     runner.lookaheadEnabled)
         #endif
-        case .inkling: return nil
+        case .inkling(let runner):
+            return (runner.lookaheadPrecision, runner.lookaheadReadsIssued, runner.lookaheadEnabled)
         }
     }
 
@@ -536,7 +537,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss: return 0
         #endif
-        case .inkling: return 0
+        case .inkling(let runner): return runner.totalGPULayerNanos
         }
     }
     public var totalGPUHeadNanos: UInt64 {
@@ -580,7 +581,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         #if !TUFF_ENGINE_AFFINE_ONLY
         case .gptOss: return 0
         #endif
-        case .inkling: return 0
+        case .inkling(let runner): return runner.totalGPULayerCommandBuffers
         }
     }
     public var totalHeadFusedNanos: UInt64 {

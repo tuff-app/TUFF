@@ -109,6 +109,12 @@ behavior. `chat_template_kwargs` accepts only `enable_thinking` and
 random seed and the default limit of 4,096 tokens. Other clients for local
 servers send them that way.
 
+`ignore_eos` is accepted and ignored. The reply still ends where the model
+ends its turn, and `usage.completion_tokens` counts the tokens it really
+wrote. Benchmark clients such as gBench always send it, so it is accepted
+rather than refused. With a benchmark, expect replies shorter than
+`max_tokens`, and compare speeds per token, not per reply.
+
 ### Messages and Responses
 
 These are smaller subsets, enough for clients that speak those formats.
@@ -129,6 +135,21 @@ setups, which send options these subsets refuse.
 Models that reason return it separately from the answer, as
 `reasoning_content` (or `delta.reasoning_content` when streaming). The usage
 block does not split out reasoning tokens.
+
+Turning thinking on or off:
+
+| Model | Switch |
+| --- | --- |
+| GPT-OSS | `reasoning_effort`: `low`, `medium` (default) or `high`. |
+| MiniMax | Always thinks. |
+| Every other model | `enable_thinking` (or `chat_template_kwargs.enable_thinking`). Off by default. |
+
+`reasoning_effort: "none"` works with every model and means thinking off.
+GPT-OSS can't skip reasoning, so there it means `low`, and
+`enable_thinking: false` is accepted next to it. MiniMax keeps thinking, as it
+does with `enable_thinking: false`. Sending `"none"` together with
+`enable_thinking: true` is refused with `invalid_value`. The other
+`reasoning_effort` values work only with GPT-OSS.
 
 ## Prompt reuse
 

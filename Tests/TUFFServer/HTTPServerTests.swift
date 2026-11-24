@@ -348,6 +348,35 @@ struct HTTPServerTests {
         try await server.shutdown()
     }
 
+    /// The shape of gBench's serving and stress requests: `ignore_eos` and
+    /// `reasoning_effort: none` are always present and must not be refused.
+    @Test func benchmarkClientStreamingRequestIsAccepted() async throws {
+        let server = TUFFHTTPServer(
+            modelID: "test-model",
+            queueLimit: 1,
+            backend: ScriptedServerBackend())
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+        var request = URLRequest(
+            url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = Data(#"""
+        {"model":"test-model","messages":[{"role":"user","content":"hi"}],
+         "stream":true,"stream_options":{"include_usage":true},"max_tokens":64,
+         "ignore_eos":true,"reasoning_effort":"none",
+         "chat_template_kwargs":{"enable_thinking":false},"seed":0,"stop":["###"]}
+        """#.utf8)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(text.contains(#""content":"hello""#))
+        #expect(text.contains(#""finish_reason":"stop""#))
+        #expect(text.hasSuffix("data: [DONE]\n\n"))
+
+        try await server.shutdown()
+    }
+
     @Test func queryStringDoesNotChangeRoute() async throws {
         let server = TUFFHTTPServer(
             modelID: "test-model",

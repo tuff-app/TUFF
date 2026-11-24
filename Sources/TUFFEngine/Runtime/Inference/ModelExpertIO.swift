@@ -125,6 +125,12 @@ extension Model {
                                        lowPriority: lowPriority)
     }
 
+    /// Stops every opened layer's background read-ahead at its next chunk.
+    public func cancelRoutedExpertReadAhead() {
+        let streamers = streamersQueue.sync { streamersBox.streamers.compactMap { $0 } }
+        for streamer in streamers { streamer.cancelReadAhead() }
+    }
+
     public func routedExpertAdviceByteEstimate(layer: Int,
                                                missCount: Int) throws -> UInt64 {
         guard missCount > 0 else { return 0 }

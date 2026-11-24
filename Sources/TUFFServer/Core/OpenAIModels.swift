@@ -138,6 +138,14 @@ public struct OpenAIStreamOptions: Codable, Equatable, Sendable {
     }
 }
 
+/// `reasoning_effort` as a request may send it: OpenAI's `none` plus the
+/// three GPT-OSS levels.
+public enum OpenAIReasoningEffort: String, Codable, Equatable, Sendable {
+    case none, low, medium, high
+
+    var gptOSS: GPTOSSReasoningEffort? { GPTOSSReasoningEffort(rawValue: rawValue) }
+}
+
 public struct OpenAIChatRequest: Codable, Equatable, Sendable {
     public let model: String
     public let messages: [OpenAIChatMessage]
@@ -168,8 +176,15 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
     /// and both are folded into the fields above.
     public let chatTemplateKwargs: [String: JSONValue]?
     /// GPT-OSS graded reasoning control. Harmony defaults to Medium when this
-    /// field is absent; other model families reject it.
-    public let reasoningEffort: GPTOSSReasoningEffort?
+    /// field is absent. `none` turns thinking off on every family (Low on
+    /// GPT-OSS, which cannot skip reasoning); other families refuse the
+    /// graded values.
+    public let reasoningEffort: OpenAIReasoningEffort?
+    /// Accepted so benchmark clients that always send it (gBench, vLLM's
+    /// benchmark tools) are not refused. Ignored: generation still ends at
+    /// the model's end of turn, and the usage block counts the tokens that
+    /// were really generated.
+    public let ignoreEOS: Bool?
     /// Kept as raw JSON so a value of any shape reaches the validator as a
     /// request error rather than as malformed JSON. Only `type` is read.
     public let responseFormat: JSONValue?
@@ -197,6 +212,7 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
         case reasoningEffort = "reasoning_effort"
         case responseFormat = "response_format"
         case promptCacheKey = "prompt_cache_key"
+        case ignoreEOS = "ignore_eos"
     }
 
     /// The `chat_template_kwargs` TUFF understands: the same switches it
@@ -364,8 +380,17 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
         }
         enableThinking = try flag(.enableThinking)
         preserveThinking = try flag(.preserveThinking)
-        reasoningEffort = try container.decodeIfPresent(
-            GPTOSSReasoningEffort.self, forKey: .reasoningEffort)
+        switch try container.decodeIfPresent(JSONValue.self, forKey: .reasoningEffort) {
+        case nil, .null?:
+            reasoningEffort = nil
+        case .string(let value)? where OpenAIReasoningEffort(rawValue: value) != nil:
+            reasoningEffort = OpenAIReasoningEffort(rawValue: value)
+        default:
+            throw ServerRequestError.invalid(
+                message: "reasoning_effort must be none, low, medium or high",
+                param: "reasoning_effort", code: "invalid_value")
+        }
+        ignoreEOS = try container.decodeIfPresent(Bool.self, forKey: .ignoreEOS)
         responseFormat = try container.decodeIfPresent(
             JSONValue.self, forKey: .responseFormat)
         switch try container.decodeIfPresent(JSONValue.self, forKey: .promptCacheKey) {
@@ -767,10 +792,20 @@ public enum OpenAIRequestValidator {
         }
         try validateResponseFormat(request.responseFormat)
 
+        // `reasoning_effort: none` is the OpenAI spelling of thinking off.
+        // It must not contradict `enable_thinking`, which some clients send
+        // alongside it.
+        let thinkingOff = request.reasoningEffort == OpenAIReasoningEffort.none
+        if thinkingOff, request.enableThinking == true {
+            throw invalid(
+                "reasoning_effort none and enable_thinking true disagree",
+                "reasoning_effort", "invalid_value")
+        }
+
         let isApple = appleModel || ["apple", "apple.on-device"].contains(modelID)
         if isApple, request.topK != nil || request.topP != nil || request.seed != nil
             || !(request.stop?.values.isEmpty ?? true) || request.enableThinking == true
-            || request.reasoningEffort != nil || !(request.tools?.isEmpty ?? true)
+            || request.reasoningEffort.map { $0 != OpenAIReasoningEffort.none } == true || !(request.tools?.isEmpty ?? true)
             || (request.repetitionPenalty ?? 1) != 1 {
             throw invalid("Apple supports text, temperature and output limits; sampling filters, seeds, stops, reasoning, tools and penalties are unsupported", "model", "unsupported_parameter")
         }
@@ -806,30 +841,25 @@ public enum OpenAIRequestValidator {
         let reasoningEffort: GPTOSSReasoningEffort?
         let harmonyCurrentDate: String?
         if dialect == .harmony {
-            guard request.enableThinking == nil else {
+            // GPT-OSS always reasons; Low is the least it does. Thinking off
+            // asked both ways is accepted, enable_thinking alone is not.
+            guard request.enableThinking == nil || thinkingOff else {
                 throw invalid(
                     "enable_thinking is not supported by GPT-OSS; use reasoning_effort",
                     "enable_thinking", "unsupported_parameter")
             }
             reasoning = .off
-            reasoningEffort = request.reasoningEffort ?? .medium
+            reasoningEffort = thinkingOff ? .low : request.reasoningEffort?.gptOSS ?? .medium
             harmonyCurrentDate = InferenceCalendarDate.calendarDate()
-        } else if dialect == .minimax {
-            guard request.reasoningEffort == nil else {
-                throw invalid(
-                    "reasoning_effort is only supported by GPT-OSS",
-                    "reasoning_effort", "unsupported_parameter")
-            }
-            reasoning = .on
-            reasoningEffort = nil
-            harmonyCurrentDate = nil
         } else {
-            guard request.reasoningEffort == nil else {
+            guard request.reasoningEffort == nil || thinkingOff else {
                 throw invalid(
-                    "reasoning_effort is only supported by GPT-OSS",
+                    "reasoning_effort is only supported by GPT-OSS; other models accept none",
                     "reasoning_effort", "unsupported_parameter")
             }
-            reasoning = request.enableThinking == true ? .on : .off
+            // MiniMax always reasons, and treats thinking off the way it
+            // already treats enable_thinking false.
+            reasoning = dialect == .minimax || request.enableThinking == true ? .on : .off
             reasoningEffort = nil
             harmonyCurrentDate = nil
         }
