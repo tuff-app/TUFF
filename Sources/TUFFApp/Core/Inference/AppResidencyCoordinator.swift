@@ -58,7 +58,14 @@ public struct AppResidencyCoordinator: Sendable {
             }
             return try await reserve(model: model, context: context, slots: slots, chunk: chunk)
         }
-        // A custom pack still participates in admission, without publishing its path.
+        // A pack this build does not list by name, such as a catalog model
+        // added after this engine shipped, is sized from its own layout when
+        // a listed model shares its architecture. Its path stays private.
+        if let options, let estimate = AppAutomaticMemoryPlanner.estimatedAllocation(
+            directory: directory, context: context, options: options) {
+            return try await reserve(record: .init(owner: .app, modelID: "custom",
+                estimatedBytes: estimate.peakAllocatedBytes))
+        }
         return try await reserve(record: .init(owner: .app, modelID: "custom", estimatedBytes: budgetBytes))
     }
 

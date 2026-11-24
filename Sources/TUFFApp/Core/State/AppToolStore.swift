@@ -32,7 +32,7 @@ public enum AppToolSupport: Equatable, Sendable {
              .qwen36_35B_A3B, .gptOss_20B, .ornith15_9B, .ornith15_35B_A3B, .ornith15_122B, .qwen38_27B, .ornith15_397B,
              .inkling2Mini:
             .validated
-        case .gptOss_120B, .minimaxM27, .flint40B, .bonsai2_2B, .bonsai2_27B:
+        case .gptOss_120B, .minimaxM27, .flint40B, .bonsai2_2B, .bonsai2_27B, .bonsai25_27B:
             .untested
         }
     }

@@ -21,25 +21,58 @@ enum PrismLocalRepacker {
         ("chat_template.jinja", "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"),
     ]
 
-    static func write(snapshotDirectory: URL, outputDirectory: URL) throws {
+    /// Bonsai 2.5 27B ships the same config, rotations and template as
+    /// Bonsai 2 27B; only the weights and the tokenizer file differ.
+    static let pins25_27B: [(String, String)] = [
+        ("model.safetensors", "b7b1cbfa351fca7039d0c9d5ac20e5ba3d69ec03c8a0d236a16e0c7f45b7cdd1"),
+        ("config.json", "238de7c512cc56a733421e3fd011d88f8260739e3d00e32c5d65b7943cc9f837"),
+        ("hadamard.json", "7132a3ec364f0bdac1f08f905f24f0ad2f14245060f592637a0396826d3b5fe6"),
+        ("tokenizer.json", "87a7830d63fcf43bf241c3c5242e96e62dd3fdc29224ca26fed8ea333db72de4"),
+        ("tokenizer_config.json", "b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27"),
+        ("chat_template.jinja", "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"),
+    ]
+    static let sources: [(modelID: String, pins: [(String, String)])] = [
+        ("prism-ml/Ternary-Bonsai-2-2B-mlx-2bit", pins2B),
+        ("prism-ml/Ternary-Bonsai-2-27B-mlx-2bit", pins27B),
+        ("prism-ml/Ternary-Bonsai-2.5-27B-mlx-2bit", pins25_27B),
+    ]
+
+    /// The pinned source whose config and weights match. Configs alone are
+    /// ambiguous: Bonsai 2 27B and 2.5 27B share one byte for byte.
+    static func source(configSHA256: String, weightsSHA256: () throws -> String,
+                       modelID: String?) throws -> (modelID: String, pins: [(String, String)])? {
+        let candidates = sources.filter {
+            $0.pins[1].1 == configSHA256 && (modelID == nil || $0.modelID == modelID)
+        }
+        guard !candidates.isEmpty else { return nil }
+        let weights = try weightsSHA256()
+        return candidates.first { $0.pins[0].1 == weights }
+    }
+
+    /// `modelID` names the source the caller downloaded; without it the
+    /// snapshot is matched against every pinned source.
+    static func write(snapshotDirectory: URL, outputDirectory: URL, modelID expectedModelID: String? = nil) throws {
         let fm = FileManager.default
         guard !fm.fileExists(atPath: outputDirectory.path) else {
             throw RepackError.configurationInvalid(detail: "Prism output already exists")
         }
         let configPath = snapshotDirectory.appendingPathComponent("config.json").path
         let configHash = try Sha256Stream.hashFile(path: configPath, noFollow: true)
-        let pins: [(String, String)]
-        let modelID: String
-        if configHash == pins2B[1].1 {
-            pins = pins2B
-            modelID = "prism-ml/Ternary-Bonsai-2-2B-mlx-2bit"
-        } else if configHash == pins27B[1].1 {
-            pins = pins27B
-            modelID = "prism-ml/Ternary-Bonsai-2-27B-mlx-2bit"
-        } else {
+        let weightsPath = snapshotDirectory.appendingPathComponent("model.safetensors").path
+        var weightsHash: String?
+        guard let source = try source(configSHA256: configHash, weightsSHA256: {
+            let hash = try Sha256Stream.hashFile(path: weightsPath, noFollow: true)
+            weightsHash = hash
+            return hash
+        }, modelID: expectedModelID) else {
+            if let weightsHash {
+                throw RepackError.sourceFingerprintRejected(path: weightsPath, sha256: weightsHash)
+            }
             throw RepackError.sourceFingerprintRejected(path: configPath, sha256: configHash)
         }
-        for (name, expected) in pins {
+        let pins = source.pins
+        let modelID = source.modelID
+        for (name, expected) in pins.dropFirst() {
             try Task.checkCancellation()
             let path = snapshotDirectory.appendingPathComponent(name).path
             let actual = try Sha256Stream.hashFile(path: path, noFollow: true)

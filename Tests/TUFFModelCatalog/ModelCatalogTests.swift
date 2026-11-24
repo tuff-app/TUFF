@@ -28,7 +28,7 @@ import Testing
 
     @Test func legacyStatusDoesNotRemoveModelsOrChangeTheirIdentity() {
         let legacy = TUFFModelCatalog.all.filter { $0.maintenanceStatus == .legacy }
-        #expect(Set(legacy.map(\.id)) == [.gptOss_20B, .gptOss_120B, .minimaxM27])
+        #expect(Set(legacy.map(\.id)) == [.gptOss_20B, .gptOss_120B, .minimaxM27, .bonsai2_27B])
         for model in legacy {
             #expect(TUFFModelCatalog.model(selector: model.selector)?.id == model.id)
             #expect(model.qualification == .qualified)
@@ -42,7 +42,7 @@ import Testing
         #expect(TUFFModelCatalog.all.map(\.selector) == [
             "gemma4-e2b", "gemma4-e4b", "gemma4-12b-qat", "gemma4", "qwen36",
             "gpt-oss-20b", "gpt-oss-120b", "minimax-m2.7", "qwen38-flash-next", "ornith-9b", "ornith-35b", "ornith-122b", "ornith-397b", "qwen38-27b", "gemma4-heretic",
-            "flint-40b", "bonsai-2-2b", "bonsai-2-27b", "inkling-2-mini",
+            "flint-40b", "bonsai-2-2b", "bonsai-2.5-27b", "bonsai-2-27b", "inkling-2-mini",
         ])
         #expect(TUFFModelCatalog.model(selector: "e2b")?.id == .gemma4_E2B)
         #expect(TUFFModelCatalog.default.id == .gemma4_26B_A4B)
@@ -72,19 +72,25 @@ import Testing
         #expect(optiq.hardware.minimumUnifiedMemoryBytes == 16 * 1024 * 1024 * 1024)
         #expect(TUFFModelCatalog.model(manifestModelID: optiq.source.manifestModelID)?.source.revision
                 == optiq.source.revision)
-        for model in [flint, optiq, TUFFModelCatalog.bonsai2_2B, TUFFModelCatalog.bonsai2_27B] {
+        for model in [flint, optiq, TUFFModelCatalog.bonsai2_2B, TUFFModelCatalog.bonsai2_27B, TUFFModelCatalog.bonsai25_27B] {
             #expect(model.source.revision.count == 40)
             #expect(model.source.sourceIndexSHA256.count == 64)
             #expect(model.capabilities.contains(.textGeneration))
             #expect(!model.capabilities.contains(.imageInput))
             #expect(model.addons.isEmpty)
         }
-        for model in [TUFFModelCatalog.bonsai2_2B, TUFFModelCatalog.bonsai2_27B] {
+        for model in [TUFFModelCatalog.bonsai2_2B, TUFFModelCatalog.bonsai2_27B, TUFFModelCatalog.bonsai25_27B] {
             #expect(model.qualification == .qualified)
             #expect(TUFFModelCatalog.model(selector: model.selector)?.id == model.id)
             #expect(model.architecture.weightLayout == .prismQ2)
         }
-        #expect(TUFFModelCatalog.all.count == 19)
+        // 2.5 replaces 2 27B in the main list and runs on its architecture.
+        let bonsai25 = TUFFModelCatalog.bonsai25_27B
+        #expect(bonsai25.architecture == TUFFModelCatalog.bonsai2_27B.architecture)
+        #expect(bonsai25.maintenanceStatus == .maintained)
+        #expect(TUFFModelCatalog.bonsai2_27B.maintenanceStatus == .legacy)
+        #expect(bonsai25.installDirectoryName != TUFFModelCatalog.bonsai2_27B.installDirectoryName)
+        #expect(TUFFModelCatalog.all.count == 20)
     }
 
     @Test func sourcesRemainPinnedAndUnique() {

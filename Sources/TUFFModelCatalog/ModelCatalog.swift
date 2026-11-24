@@ -5,6 +5,7 @@ public enum TUFFModelID: String, Codable, CaseIterable, Sendable {
     case flint40B = "flint-40b-a2.5b"
     case bonsai2_2B = "ternary-bonsai-2-2b"
     case bonsai2_27B = "ternary-bonsai-2-27b"
+    case bonsai25_27B = "ternary-bonsai-2.5-27b"
     case gemma4_E2B = "gemma4-e2b"
     case gemma4_E4B = "gemma4-e4b"
     case gemma4_12B_QAT = "gemma4-12b-qat"
@@ -464,7 +465,7 @@ public struct TUFFModelDescriptor: Codable, Equatable, Sendable, Identifiable {
         switch id {
         case .gemma4_E2B, .gemma4_E4B, .gptOss_20B, .gptOss_120B: 131_072
         case .minimaxM27: 204_800
-        case .flint40B, .bonsai2_2B, .bonsai2_27B, .gemma4_12B_QAT, .gemma4_26B_A4B, .gemma4_26B_Heretic, .qwen36_35B_A3B, .qwen38FlashNext,
+        case .flint40B, .bonsai2_2B, .bonsai2_27B, .bonsai25_27B, .gemma4_12B_QAT, .gemma4_26B_A4B, .gemma4_26B_Heretic, .qwen36_35B_A3B, .qwen38FlashNext,
              .ornith15_9B, .ornith15_35B_A3B, .ornith15_122B, .ornith15_397B, .qwen38_27B: 262_144
         // The checkpoint allows 1,048,576. TUFF has not run it past this.
         case .inkling2Mini: 262_144
@@ -541,7 +542,7 @@ public struct TUFFModelDescriptor: Codable, Equatable, Sendable, Identifiable {
         let id = try values.decode(TUFFModelID.self, forKey: .id)
         let defaultMaintenance: TUFFModelMaintenanceStatus
         switch id {
-        case .gptOss_20B, .gptOss_120B, .minimaxM27: defaultMaintenance = .legacy
+        case .gptOss_20B, .gptOss_120B, .minimaxM27, .bonsai2_27B: defaultMaintenance = .legacy
         default: defaultMaintenance = .maintained
         }
         self.init(id: id,
@@ -1492,6 +1493,25 @@ public enum TUFFModelCatalog {
             kvCache: .init(fullAttentionBytesPerToken: 65_536)),
         qualification: .qualified,
         runtimeDefaults: TUFFModelRuntimeDefaults(temperature: 0.7, topK: 20, topP: 0.8),
+        capabilities: [.textGeneration, .reasoning], reasoningControl: .toggleWithPreservation,
+        maintenanceStatus: .legacy)
+
+    /// Same architecture, ternary format and file sizes as Bonsai 2 27B, with
+    /// retrained weights, so it runs on the Bonsai 2 27B engine path.
+    public static let bonsai25_27B = TUFFModelDescriptor(
+        id: .bonsai25_27B, selector: "bonsai-2.5-27b", apiModelID: "bonsai-2.5-27b",
+        displayName: "Ternary Bonsai 2.5 27B", shortName: "Bonsai 2.5 27B",
+        summary: "Text-only 27B model using Q2 Hadamard projections, tuned for agentic coding.",
+        family: .qwen36, architecture: .bonsai2_27B, installDirectoryName: "bonsai-2.5-27b.gturbo",
+        source: .init(repoID: "prism-ml/Ternary-Bonsai-2.5-27B-mlx-2bit", revision: "aa432fd0e17612f6684e728d4d3c42b6656bcabb",
+            sourceIndexSHA256: "b7b1cbfa351fca7039d0c9d5ac20e5ba3d69ec03c8a0d236a16e0c7f45b7cdd1",
+            manifestModelID: "prism-ml/Ternary-Bonsai-2.5-27B-mlx-2bit", approximateDownloadBytes: 8_630_000_000,
+            installedBytes: 7_800_000_000, reserveBytes: oneGiB),
+        hardware: .init(minimumUnifiedMemoryBytes: 16 * oneGiB),
+        memory: .init(qualifiedDefaultWorkingSetBytes: 10 * oneGiB, expertCacheBytesPerSlot: 0,
+            kvCache: .init(fullAttentionBytesPerToken: 65_536)),
+        qualification: .qualified,
+        runtimeDefaults: TUFFModelRuntimeDefaults(temperature: 0.7, topK: 20, topP: 0.8),
         capabilities: [.textGeneration, .reasoning], reasoningControl: .toggleWithPreservation)
 
     public static let all: [TUFFModelDescriptor] = [
@@ -1512,6 +1532,7 @@ public enum TUFFModelCatalog {
         gemma4_26B_Heretic,
         flint40BOptiQ,
         bonsai2_2B,
+        bonsai25_27B,
         bonsai2_27B,
         inkling2Mini,
     ]

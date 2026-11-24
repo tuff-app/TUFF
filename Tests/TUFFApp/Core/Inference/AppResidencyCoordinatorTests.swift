@@ -57,6 +57,28 @@ import TUFFModelCatalog
             lease.release()
         }
     }
+    /// An engine meets packs for catalog models added after it shipped. With a
+    /// readable layout they are sized like any other model instead of taking
+    /// the whole budget, so a second session can still open beside them.
+    /// Point `TUFF_UNLISTED_PACK` at a real pack whose manifest model ID this
+    /// build does not list.
+    @Test func unlistedPackWithReadableLayoutIsSizedFromIt() async throws {
+        guard let path = ProcessInfo.processInfo.environment["TUFF_UNLISTED_PACK"] else { return }
+        let pack = URL(fileURLWithPath: path, isDirectory: true)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("TUFFUnlisted-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let registry = TUFFResidencyRegistry(directory: root)
+        let budget = UInt64(64) * 1_073_741_824
+        let coordinator = AppResidencyCoordinator(registry: registry, budgetBytes: budget, reclaim: { _ in false })
+        let options = AppRuntimeOptions()
+        let lease = try await coordinator.reserve(directory: pack, context: 4096,
+            slots: options.expertCacheSlots, chunk: options.prefillChunkTokens, options: options)
+        #expect(lease.record.modelID == "custom")
+        #expect(lease.record.estimatedBytes < budget / 2)
+        let session = try await coordinator.reserveSession(directory: pack, context: 4096, options: options)
+        session.release()
+        lease.release()
+    }
     @Test func idleServerYieldsBeforeAppReservation() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("TUFFAppResidency-\(UUID())")
         defer { try? FileManager.default.removeItem(at: root) }

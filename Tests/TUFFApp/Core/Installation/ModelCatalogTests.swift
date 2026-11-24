@@ -177,6 +177,7 @@ import TUFFRepackCore
             "gemma4-26b-heretic",
             "flint-40b-a2.5b",
             "ternary-bonsai-2-2b",
+            "ternary-bonsai-2.5-27b",
             "ternary-bonsai-2-27b",
             "inkling-2-mini",
         ])
@@ -198,6 +199,7 @@ import TUFFRepackCore
             "gemma4-heretic.gturbo",
             "flint-40b.gturbo",
             "bonsai-2-2b.gturbo",
+            "bonsai-2.5-27b.gturbo",
             "bonsai-2-27b.gturbo",
             "inkling-2-mini.gturbo",
         ])

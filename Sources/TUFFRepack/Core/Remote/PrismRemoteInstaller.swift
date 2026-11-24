@@ -6,7 +6,7 @@ import TUFFModelCatalog
 /// snapshot is temporary, so peak disk includes both it and the final pack.
 public enum PrismRemoteInstaller {
     public enum Size: Sendable {
-        case twoB, twentySevenB
+        case twoB, twentySevenB, twentySevenB25
 
         /// The installer for a catalog model, or `nil` for models that use the
         /// generic streaming repacker.
@@ -14,6 +14,7 @@ public enum PrismRemoteInstaller {
             switch modelID {
             case .bonsai2_2B: self = .twoB
             case .bonsai2_27B: self = .twentySevenB
+            case .bonsai25_27B: self = .twentySevenB25
             default: return nil
             }
         }
@@ -22,31 +23,35 @@ public enum PrismRemoteInstaller {
             switch self {
             case .twoB: "prism-ml/Ternary-Bonsai-2-2B-mlx-2bit"
             case .twentySevenB: "prism-ml/Ternary-Bonsai-2-27B-mlx-2bit"
+            case .twentySevenB25: "prism-ml/Ternary-Bonsai-2.5-27B-mlx-2bit"
             }
         }
         var revision: String {
             switch self {
             case .twoB: "1c6cbae21f8c38830ce337972b46fdae7b18eaaa"
             case .twentySevenB: "fcba37d2117a7077eac6b613b2668d14d9779edd"
+            case .twentySevenB25: "aa432fd0e17612f6684e728d4d3c42b6656bcabb"
             }
         }
         var fileSizes: [UInt64] {
             switch self {
             case .twoB: [1_200_284_784, 22_998, 87_679, 12_807_982, 16_709, 7_755]
             case .twentySevenB: [8_595_477_990, 58_145, 297_903, 12_809_320, 17_928, 8_952]
+            case .twentySevenB25: [8_595_477_990, 58_145, 297_903, 19_989_343, 17_928, 8_952]
             }
         }
         var pins: [(String, String)] {
             switch self {
             case .twoB: PrismLocalRepacker.pins2B
             case .twentySevenB: PrismLocalRepacker.pins27B
+            case .twentySevenB25: PrismLocalRepacker.pins25_27B
             }
         }
         /// Conservative final pack reservation, including tokenizer and index.
         public var outputReservationBytes: UInt64 {
             switch self {
             case .twoB: 600_000_000
-            case .twentySevenB: 7_800_000_000
+            case .twentySevenB, .twentySevenB25: 7_800_000_000
             }
         }
         public var snapshotBytes: UInt64 { fileSizes.reduce(0, +) }
@@ -144,7 +149,8 @@ public enum PrismRemoteInstaller {
         }
         try Task.checkCancellation()
         progress(.finalizing)
-        try PrismLocalRepacker.write(snapshotDirectory: staging, outputDirectory: destination)
+        try PrismLocalRepacker.write(snapshotDirectory: staging, outputDirectory: destination,
+                                     modelID: size.repoID)
         return destination
     }
 }

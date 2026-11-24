@@ -86,11 +86,14 @@ TUFF updates itself. If an update stops it from opening, see
 | Gemma 4 26B-A4B Heretic Q4 | 15.0 GB | 8 GB | Optional |
 | Recursive Flint 40B A2.5B OptiQ | 25.6 GB | 16 GB | No |
 | Bonsai 2 2B Q2 | 1.2 GB | 8 GB | No |
+| Bonsai 2.5 27B Q2 | 8.6 GB | 16 GB | No |
 | Bonsai 2 27B Q2 | 8.6 GB | 16 GB | No |
 | Inkling 2 Mini Q4 | 16.7 GB | 16 GB | No |
 
 Models are grouped under **MoE**, **Dense** and **Legacy**. Each section can be
-collapsed. MiniMax and both GPT-OSS models stay available under Legacy.
+collapsed. MiniMax, both GPT-OSS models and Bonsai 2 27B stay available under
+Legacy. Bonsai 2.5 27B replaces Bonsai 2 27B: same size and speed, stronger at
+coding and tool use.
 
 The app downloads an inference engine when you install its first model. Models
 with compatible architectures share that engine. Auto chooses context, expert

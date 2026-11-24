@@ -86,6 +86,7 @@ public struct AppBugReport: Sendable {
         case .inkling2Mini: "Inkling 2 Mini"
         case .bonsai2_2B: "Bonsai 2 2B"
         case .bonsai2_27B: "Bonsai 2 27B"
+        case .bonsai25_27B: "Bonsai 2.5 27B"
         case .gemma4_E2B: "Gemma 4 E2B"
         case .gemma4_E4B: "Gemma 4 E4B"
         case .gemma4_12B_QAT: "Gemma 4 12B QAT"
