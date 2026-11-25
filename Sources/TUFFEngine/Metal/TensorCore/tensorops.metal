@@ -129,11 +129,12 @@ kernel void mpp_prefill_affine_threadgroup_f16(
 // than the 64 x 32 x 64 tile. Every output still accumulates its products in
 // ascending K order into one FP32 accumulator, and the results matched the
 // 64-row tile bit for bit on that GPU.
-template <uint Bits, uint GroupSize, int TileM, int TileN, int TileK = kMPPAffineTileK>
+template <uint Bits, uint GroupSize, int TileM, int TileN, int TileK = kMPPAffineTileK,
+          typename ScaleT = bfloat>
 static inline void mpp_prefill_affine_qmm_f16_impl(
     device const uint8_t* packedWeights,
-    device const bfloat* scales,
-    device const bfloat* biases,
+    device const ScaleT* scales,
+    device const ScaleT* biases,
     device half* activations,
     device half* output,
     uint M, uint N, uint K,
@@ -180,7 +181,16 @@ static inline void mpp_prefill_affine_qmm_f16_impl(
                 const float scale = float(scales[group]);
                 const float bias = float(biases[group]);
                 float4 low, high;
-                if (Bits == 4u) {
+                if (Bits == 2u) {
+                    // Ternary Bonsai: sixteen low-first 2-bit codes per word;
+                    // these 8 codes are 2 bytes (byte-aligned reads).
+                    const uint packed = uint(*(device const uchar*)(packedWeights + globalN * rowBytes + (globalK >> 2)))
+                        | (uint(*(device const uchar*)(packedWeights + globalN * rowBytes + (globalK >> 2) + 1u)) << 8);
+                    low = float4(float(packed & 3u), float((packed >> 2) & 3u),
+                                 float((packed >> 4) & 3u), float((packed >> 6) & 3u));
+                    high = float4(float((packed >> 8) & 3u), float((packed >> 10) & 3u),
+                                  float((packed >> 12) & 3u), float((packed >> 14) & 3u));
+                } else if (Bits == 4u) {
                     // Byte-aligned: .gturbo tensors are not 4-byte aligned.
                     const uint packed = as_type<uint>(uchar4(*(device const packed_uchar4*)(
                         packedWeights + globalN * rowBytes + (globalK >> 1))));
@@ -253,6 +263,33 @@ TUFF_MPP_AFFINE_QMM_LAYOUT(mpp_prefill_affine_qmm_f16_w4g32, 4u, 32u)
 TUFF_MPP_AFFINE_QMM_LAYOUT(mpp_prefill_affine_qmm_f16_w4g64, 4u, 64u)
 TUFF_MPP_AFFINE_QMM_LAYOUT(mpp_prefill_affine_qmm_f16_w8g64, 8u, 64u)
 TUFF_MPP_AFFINE_QMM_LAYOUT(mpp_prefill_affine_qmm_f16_w8g32, 8u, 32u)
+
+
+// Ternary Bonsai's projections: 2-bit codes, group 128, FP16 scales and biases.
+#define TUFF_MPP_AFFINE_QMM_KERNEL_HALF(NAME, BITS, GROUP, TM, TN, TK)         \
+kernel void NAME(                                                              \
+    device const uint8_t* packedWeights [[buffer(0)]],                         \
+    device const half* scales           [[buffer(1)]],                         \
+    device const half* biases           [[buffer(2)]],                         \
+    device half* activations            [[buffer(3)]],                         \
+    device half* output                 [[buffer(4)]],                         \
+    constant uint& M                    [[buffer(5)]],                         \
+    constant uint& N                    [[buffer(6)]],                         \
+    constant uint& K                    [[buffer(7)]],                         \
+    uint3 tgid                          [[threadgroup_position_in_grid]],      \
+    uint3 lid3                          [[thread_position_in_threadgroup]],    \
+    uint3 threads3                      [[threads_per_threadgroup]]) {         \
+    threadgroup half weightTile[(TN) * (TK)];                                  \
+    mpp_prefill_affine_qmm_f16_impl<BITS, GROUP, TM, TN, TK, half>(            \
+        packedWeights, scales, biases, activations, output, M, N, K,           \
+        tgid, lid3.x, threads3.x, weightTile);                                 \
+}
+TUFF_MPP_AFFINE_QMM_KERNEL_HALF(mpp_prefill_affine_qmm_f16_w2g128h, 2u, 128u, 64, 32, kMPPAffineTileK)
+TUFF_MPP_AFFINE_QMM_KERNEL_HALF(mpp_prefill_affine_qmm_f16_w2g128h_m32, 2u, 128u, 32, 32, kMPPAffineTileK)
+TUFF_MPP_AFFINE_QMM_KERNEL_HALF(mpp_prefill_affine_qmm_f16_w2g128h_m16, 2u, 128u, 16, 64, kMPPAffineTileK)
+TUFF_MPP_AFFINE_QMM_KERNEL_HALF(mpp_prefill_affine_qmm_f16_w2g128h_m8, 2u, 128u, 8, 64, kMPPAffineTileK)
+TUFF_MPP_AFFINE_QMM_KERNEL_HALF(mpp_prefill_affine_qmm_f16_w2g128h_m128, 2u, 128u, 128, 16, 256)
+#undef TUFF_MPP_AFFINE_QMM_KERNEL_HALF
 
 #undef TUFF_MPP_AFFINE_QMM_LAYOUT
 #undef TUFF_MPP_AFFINE_QMM_KERNEL

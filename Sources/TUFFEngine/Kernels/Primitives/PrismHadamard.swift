@@ -97,6 +97,10 @@ final class PrismAffine2 {
     private let gemmPipeline: MTLComputePipelineState
     private let embeddingPipeline: MTLComputePipelineState
     private let dualPipeline: MTLComputePipelineState
+    /// The tiled tensor-op matmul used for 8 or more token rows (prompt
+    /// reading), when this GPU builds it. `TUFF_PRISM_GEMM=reference` keeps
+    /// the simple 32 x 32 kernel, for comparisons.
+    let tiledPrefill: MPPPrefillAffineQMM?
     /// Single-row kernel choice; `TUFF_PRISM_GEMV` selects one for benchmarks.
     static let defaultVariant = Variant(rawValue: ProcessInfo.processInfo.environment["TUFF_PRISM_GEMV"] ?? "") ?? .wide
 
@@ -109,6 +113,8 @@ final class PrismAffine2 {
         gemmPipeline = try context.pipeline("prism_affine2_gemm")
         embeddingPipeline = try context.pipeline("prism_affine2_embedding")
         dualPipeline = try context.pipeline("prism_affine2_gemv_dual")
+        tiledPrefill = ProcessInfo.processInfo.environment["TUFF_PRISM_GEMM"] == "reference" ? nil
+            : MPPPrefillAffineQMM(context: context, bits: 2, groupSize: 128, halfScales: true)
         precondition(pipeline.threadExecutionWidth == 32 && pipeline.maxTotalThreadsPerThreadgroup >= 256,
                      "Prism affine2 currently requires 32-lane SIMD groups")
         precondition(batchPipeline.threadExecutionWidth == 32 && batchPipeline.maxTotalThreadsPerThreadgroup >= 256,
@@ -120,7 +126,7 @@ final class PrismAffine2 {
                 output: MTLBuffer, inputOffset: Int = 0, weightsOffset: Int = 0,
                 scalesOffset: Int = 0, biasesOffset: Int = 0, outputOffset: Int = 0,
                 columns: Int, outputs: Int, rows: Int, outputStride: Int? = nil,
-                variant: Variant = PrismAffine2.defaultVariant) {
+                variant: Variant = PrismAffine2.defaultVariant, allowTiledPrefill: Bool = true) {
         let outputStride = outputStride ?? outputs
         let variant = (variant == .wide || variant == .wideShift) && columns % 1024 != 0 ? Variant.rows4 : variant
         precondition(columns > 0 && columns % 128 == 0 && outputs > 0 && rows > 0)
@@ -136,6 +142,18 @@ final class PrismAffine2 {
         precondition(weightsOffset <= weights.length && weights.length - weightsOffset >= outputs * columns / 4)
         precondition(scalesOffset <= scales.length && scales.length - scalesOffset >= outputs * columns / 128 * 2)
         precondition(biasesOffset <= biases.length && biases.length - biasesOffset >= outputs * columns / 128 * 2)
+        if allowTiledPrefill, rows >= 8, outputStride == outputs, let tiledPrefill,
+           tiledPrefill.accepts(scalesOffset: scalesOffset, biasesOffset: biasesOffset,
+                                xOffset: inputOffset, yOffset: outputOffset,
+                                m: rows, n: outputs, k: columns),
+           tiledPrefill.encode(commandBuffer: commandBuffer,
+                               weights: weights, weightsOffset: weightsOffset,
+                               scales: scales, scalesOffset: scalesOffset,
+                               biases: biases, biasesOffset: biasesOffset,
+                               x: input, xOffset: inputOffset, y: output, yOffset: outputOffset,
+                               m: rows, n: outputs, k: columns) {
+            return
+        }
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.setComputePipelineState(rows == 1
             ? (variant == .wide ? widePipeline : variant == .wideShift ? wideShiftPipeline

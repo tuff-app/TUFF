@@ -122,6 +122,47 @@ import TUFFValidationSupport
         #expect(mismatches == 0, "\(mismatches) of \(outputs) outputs differ")
     }
 
+    /// Prompt reading runs Bonsai's projections on the tiled tensor-op
+    /// matmul. It must agree with the simple 32 x 32 kernel up to FP32
+    /// summation order, across the 128-row tile, the smaller tiles and a
+    /// partial output tile.
+    @Test(arguments: [8, 40, 128, 200])
+    func affine2TiledPrefillMatchesReferenceKernel(rows: Int) throws {
+        let columns = 2048, outputs = 100
+        var seed: UInt64 = 0x1234_5678_9ABC_DEF0 &+ UInt64(rows)
+        func next() -> UInt64 { seed = seed &* 6364136223846793005 &+ 1442695040888963407; return seed >> 33 }
+        let input: [Float16] = (0..<(rows * columns)).map { _ in Float16(Float(next() % 4000) / 1000 - 2) }
+        let words: [UInt32] = (0..<(outputs * columns / 16)).map { _ in UInt32(truncatingIfNeeded: next() ^ (next() << 16)) }
+        let scales: [Float16] = (0..<(outputs * columns / 128)).map { _ in Float16(Float(next() % 1000) / 20000 + 0.005) }
+        let biases: [Float16] = (0..<(outputs * columns / 128)).map { _ in Float16(-Float(next() % 1000) / 20000 - 0.005) }
+        let context = try MetalContext()
+        let kernel = try PrismAffine2(context: context)
+        guard kernel.tiledPrefill != nil else { return }
+        let x = try #require(Fp16Buffer.make(context.device, halves: input))
+        let w = try #require(context.device.makeBuffer(bytes: words,
+            length: words.count * MemoryLayout<UInt32>.stride, options: .storageModeShared))
+        let sBuf = try #require(Fp16Buffer.make(context.device, halves: scales))
+        let bBuf = try #require(Fp16Buffer.make(context.device, halves: biases))
+        let tiled = try #require(Fp16Buffer.make(context.device, count: rows * outputs))
+        let reference = try #require(Fp16Buffer.make(context.device, count: rows * outputs))
+        let cb = try #require(context.queue.makeCommandBuffer())
+        let before = kernel.tiledPrefill?.encodedProjections ?? 0
+        kernel.encode(commandBuffer: cb, input: x, weights: w, scales: sBuf, biases: bBuf, output: tiled,
+                      columns: columns, outputs: outputs, rows: rows)
+        kernel.encode(commandBuffer: cb, input: x, weights: w, scales: sBuf, biases: bBuf, output: reference,
+                      columns: columns, outputs: outputs, rows: rows, allowTiledPrefill: false)
+        cb.commit(); cb.waitUntilCompleted()
+        try checkCommandBufferError(cb)
+        #expect(kernel.tiledPrefill?.encodedProjections == before + 1)
+        let a = Fp16Buffer.read(tiled, count: rows * outputs)
+        let b = Fp16Buffer.read(reference, count: rows * outputs)
+        var worst: Float = 0
+        for i in a.indices { worst = max(worst, abs(a[i] - b[i]) / max(1, abs(b[i]))) }
+        // Both round each dequantized weight to FP16 and accumulate in FP32;
+        // only the order of the sums differs.
+        #expect(worst < 0.01, "largest relative difference \(worst)")
+    }
+
     @Test func affine2BatchedMatchesSingleRowsBitwise() throws {
         let columns = 256, outputs = 11, rows = 7, stride = 17
         let input: [Float16] = (0..<(columns * rows)).map {

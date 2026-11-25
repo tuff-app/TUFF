@@ -22,6 +22,8 @@ final class MPPPrefillAffineQMM {
 
     let bits: Int
     let groupSize: Int
+    /// FP16 scales and biases (Ternary Bonsai) instead of BF16.
+    let halfScales: Bool
     /// Pipelines by tile shape, smallest M first. A routed expert sees a
     /// handful of rows per chunk, where a 64-row tile is mostly padding.
     private let tiles: [(rows: Int, columns: Int, pso: MTLComputePipelineState)]
@@ -33,15 +35,17 @@ final class MPPPrefillAffineQMM {
     /// path a prefill took.
     private(set) var encodedProjections = 0
 
-    init?(context: MetalContext, bits: Int, groupSize: Int,
+    init?(context: MetalContext, bits: Int, groupSize: Int, halfScales: Bool = false,
           shapes: [(suffix: String, rows: Int, columns: Int)] = MPPPrefillAffineQMM.shapes) {
-        guard [4, 8].contains(bits), [32, 64].contains(groupSize),
+        let layout = halfScales ? "w\(bits)g\(groupSize)h" : "w\(bits)g\(groupSize)"
+        guard halfScales ? (bits == 2 && groupSize == 128)
+                         : ([4, 8].contains(bits) && [32, 64].contains(groupSize)),
               let library = try? MetalContext.privateLibrary(device: context.device,
                                                              module: "tensorops")
         else { return nil }
         var tiles: [(rows: Int, columns: Int, pso: MTLComputePipelineState)] = []
         for shape in shapes {
-            let name = "mpp_prefill_affine_qmm_f16_w\(bits)g\(groupSize)\(shape.suffix)"
+            let name = "mpp_prefill_affine_qmm_f16_\(layout)\(shape.suffix)"
             guard let function = library.makeFunction(name: name),
                   let pso = try? context.device.makeComputePipelineState(function: function)
             else { return nil }
@@ -49,15 +53,16 @@ final class MPPPrefillAffineQMM {
         }
         self.bits = bits
         self.groupSize = groupSize
+        self.halfScales = halfScales
         self.tiles = tiles
         let wide = library.makeFunction(
-            name: "mpp_prefill_affine_qmm_f16_w\(bits)g\(groupSize)_m128").flatMap {
+            name: "mpp_prefill_affine_qmm_f16_\(layout)_m128").flatMap {
                 try? context.device.makeComputePipelineState(function: $0)
             }.flatMap { $0.maxTotalThreadsPerThreadgroup >= $0.threadExecutionWidth * 4 ? $0 : nil }
         if let wide, let reference = tiles.last,
            autoreleasepool(invoking: {
                Self.wideTileMatches(reference, wide: wide, context: context,
-                                    bits: bits, groupSize: groupSize)
+                                    bits: bits, groupSize: groupSize, halfScales: halfScales)
            }) {
             self.wideTile = wide
         } else {
@@ -74,7 +79,7 @@ final class MPPPrefillAffineQMM {
     private static func wideTileMatches(
         _ reference: (rows: Int, columns: Int, pso: MTLComputePipelineState),
         wide: MTLComputePipelineState, context: MetalContext,
-        bits: Int, groupSize: Int
+        bits: Int, groupSize: Int, halfScales: Bool
     ) -> Bool {
         // Two K steps and an N that leaves a partial tile in both shapes.
         let m = wideTileRows, n = 40, k = 2 * wideTileK
@@ -85,10 +90,12 @@ final class MPPPrefillAffineQMM {
             return state >> 16
         }
         func unit() -> Float { Float(next() & 0xFFFF) / 65_536 }
-        func bf16(_ value: Float) -> UInt16 { UInt16(truncatingIfNeeded: value.bitPattern >> 16) }
+        func bf16(_ value: Float) -> UInt16 {
+            halfScales ? Float16(value).bitPattern : UInt16(truncatingIfNeeded: value.bitPattern >> 16)
+        }
         let packed = (0..<(n * k * bits / 8)).map { _ in UInt8(truncatingIfNeeded: next()) }
         let groups = n * k / groupSize
-        let scaleBase: Float = bits == 4 ? 0.004 : 0.0003
+        let scaleBase: Float = bits == 2 ? 0.02 : bits == 4 ? 0.004 : 0.0003
         let scales = (0..<groups).map { _ in bf16(scaleBase * (0.5 + unit())) }
         let biases = (0..<groups).map { _ in bf16(-0.04 + 0.02 * unit()) }
         let x = (0..<(m * k)).map { _ in Float16(4 * unit() - 2) }
