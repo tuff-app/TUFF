@@ -187,9 +187,68 @@ static inline float prism_code_dot(uint packed, float4 x0, float4 x1, float4 x2,
     return dot(c0, x0) + dot(c1, x1) + dot(c2, x2) + dot(c3, x3);
 }
 
+// Code k of a word sits at bits 2k, so (packed & (3 << 2k)) is code * 4^k.
+// Multiplying x by 4^-k first turns each code into one AND and a convert,
+// with no shift. Powers of two scale exactly, so every product, and so the
+// result, is bit-identical to shifting the codes down.
+constant float4 prism_q2_scale0 = float4(1.0f, 0.25f, 0.0625f, 0.015625f);
+constant uint4 prism_q2_mask0 = uint4(0x3u, 0xCu, 0x30u, 0xC0u);
+
+static inline float prism_code_dot_scaled(uint packed, float4 x0, float4 x1, float4 x2, float4 x3) {
+    const uint4 p = uint4(packed);
+    return dot(float4(p & prism_q2_mask0), x0)
+         + dot(float4(p & (prism_q2_mask0 << 8u)), x1)
+         + dot(float4(p & (prism_q2_mask0 << 16u)), x2)
+         + dot(float4(p & (prism_q2_mask0 << 24u)), x3);
+}
+
 // Two words (32 columns, one quantization group half) per lane per step with
-// 8-byte weight loads. Requires columns % 1024 == 0.
+// 8-byte weight loads, codes read with the prescaled inputs above.
+// Requires columns % 1024 == 0.
 static inline void prism_gemv_wide_core(
+    device const half *input, device const uint *weights,
+    device const half *scales, device const half *biases, device half *output,
+    uint columns, uint outputs, uint firstRow, uint lane) {
+    const uint groups = columns / 128u;
+    const uint words = columns / 16u;
+    // Per-byte scales: byte j of a word holds codes 4j..4j+3.
+    const float4 s0 = prism_q2_scale0, s1 = s0 / 256.0f, s2 = s1 / 256.0f, s3 = s2 / 256.0f;
+    float sums[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    uint rowWords[4], rowGroups[4];
+    for (uint r = 0; r < 4u; ++r) {
+        const uint row = min(firstRow + r, outputs - 1u);
+        rowWords[r] = row * words;
+        rowGroups[r] = row * groups;
+    }
+    for (uint word = lane * 2u; word < words; word += 64u) {
+        const device half4 *xp = (const device half4 *)(input + word * 16u);
+        const float4 a0 = float4(xp[0]), a1 = float4(xp[1]), a2 = float4(xp[2]), a3 = float4(xp[3]);
+        const float4 b0 = float4(xp[4]), b1 = float4(xp[5]), b2 = float4(xp[6]), b3 = float4(xp[7]);
+        const float xsum = dot(a0 + a1 + a2 + a3 + b0 + b1 + b2 + b3, float4(1.0f));
+        const float4 sa0 = a0 * s0, sa1 = a1 * s1, sa2 = a2 * s2, sa3 = a3 * s3;
+        const float4 sb0 = b0 * s0, sb1 = b1 * s1, sb2 = b2 * s2, sb3 = b3 * s3;
+        const uint quantGroup = word / 8u;
+        uint2 packed[4];
+        float s[4], b[4];
+        for (uint r = 0; r < 4u; ++r) {
+            packed[r] = *(const device uint2 *)(weights + rowWords[r] + word);
+            s[r] = float(scales[rowGroups[r] + quantGroup]);
+            b[r] = float(biases[rowGroups[r] + quantGroup]);
+        }
+        for (uint r = 0; r < 4u; ++r) {
+            const float codeDot = prism_code_dot_scaled(packed[r].x, sa0, sa1, sa2, sa3)
+                                + prism_code_dot_scaled(packed[r].y, sb0, sb1, sb2, sb3);
+            sums[r] = fma(s[r], codeDot, fma(b[r], xsum, sums[r]));
+        }
+    }
+    for (uint r = 0; r < 4u; ++r) {
+        const float sum = simd_sum(sums[r]);
+        if (lane == 0 && firstRow + r < outputs) output[firstRow + r] = half(sum);
+    }
+}
+
+// The same loop shifting each code down; kept to compare against.
+static inline void prism_gemv_wide_shift_core(
     device const half *input, device const uint *weights,
     device const half *scales, device const half *biases, device half *output,
     uint columns, uint outputs, uint firstRow, uint lane) {
@@ -241,6 +300,22 @@ kernel void prism_affine2_gemv_wide(
     const uint firstRow = (group * 2u + simd) * 4u;
     if (firstRow >= outputs) return;
     prism_gemv_wide_core(input, weights, scales, biases, output, columns, outputs, firstRow, lane);
+}
+
+kernel void prism_affine2_gemv_wide_shift(
+    device const half *input [[buffer(0)]],
+    device const uint *weights [[buffer(1)]],
+    device const half *scales [[buffer(2)]],
+    device const half *biases [[buffer(3)]],
+    device half *output [[buffer(4)]],
+    constant uint &columns [[buffer(5)]],
+    constant uint &outputs [[buffer(6)]],
+    uint group [[threadgroup_position_in_grid]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    const uint firstRow = (group * 2u + simd) * 4u;
+    if (firstRow >= outputs) return;
+    prism_gemv_wide_shift_core(input, weights, scales, biases, output, columns, outputs, firstRow, lane);
 }
 
 // Two projections in one dispatch: rows [0, outputsA) use set A, the next

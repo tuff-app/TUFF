@@ -86,11 +86,12 @@ final class PrismHadamard {
 /// per-tensor signs and invoke the transform before each rotated projection.
 final class PrismAffine2 {
     enum Variant: String, CaseIterable {
-        case rows4, wide, split
+        case rows4, wide, split, wideShift
     }
 
     private let pipeline: MTLComputePipelineState
     private let widePipeline: MTLComputePipelineState
+    private let wideShiftPipeline: MTLComputePipelineState
     private let splitPipeline: MTLComputePipelineState
     private let batchPipeline: MTLComputePipelineState
     private let gemmPipeline: MTLComputePipelineState
@@ -102,6 +103,7 @@ final class PrismAffine2 {
     init(context: MetalContext) throws {
         pipeline = try context.pipeline("prism_affine2_gemv")
         widePipeline = try context.pipeline("prism_affine2_gemv_wide")
+        wideShiftPipeline = try context.pipeline("prism_affine2_gemv_wide_shift")
         splitPipeline = try context.pipeline("prism_affine2_gemv_split")
         batchPipeline = try context.pipeline("prism_affine2_batched")
         gemmPipeline = try context.pipeline("prism_affine2_gemm")
@@ -120,7 +122,7 @@ final class PrismAffine2 {
                 columns: Int, outputs: Int, rows: Int, outputStride: Int? = nil,
                 variant: Variant = PrismAffine2.defaultVariant) {
         let outputStride = outputStride ?? outputs
-        let variant = variant == .wide && columns % 1024 != 0 ? Variant.rows4 : variant
+        let variant = (variant == .wide || variant == .wideShift) && columns % 1024 != 0 ? Variant.rows4 : variant
         precondition(columns > 0 && columns % 128 == 0 && outputs > 0 && rows > 0)
         precondition(columns <= Int(UInt32.max) && outputs <= Int(UInt32.max))
         precondition(rows <= Int(UInt32.max) / outputs)
@@ -136,7 +138,8 @@ final class PrismAffine2 {
         precondition(biasesOffset <= biases.length && biases.length - biasesOffset >= outputs * columns / 128 * 2)
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.setComputePipelineState(rows == 1
-            ? (variant == .wide ? widePipeline : variant == .split ? splitPipeline : pipeline)
+            ? (variant == .wide ? widePipeline : variant == .wideShift ? wideShiftPipeline
+               : variant == .split ? splitPipeline : pipeline)
             : (rows >= 8 ? gemmPipeline : batchPipeline))
         encoder.setBuffer(input, offset: inputOffset, index: 0)
         encoder.setBuffer(weights, offset: weightsOffset, index: 1)

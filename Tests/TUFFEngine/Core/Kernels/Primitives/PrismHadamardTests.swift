@@ -84,6 +84,44 @@ import TUFFValidationSupport
         }
     }
 
+    /// The wide kernel reads codes against inputs prescaled by powers of
+    /// four; that must give exactly the bits of shifting the codes down.
+    @Test(arguments: [(2048, 37), (5120, 72)])
+    func affine2WidePrescaledMatchesShiftedCodesBitwise(shape: (columns: Int, outputs: Int)) throws {
+        let (columns, outputs) = shape
+        var seed: UInt64 = 0x9E37_79B9_7F4A_7C15
+        func next() -> UInt64 { seed = seed &* 6364136223846793005 &+ 1442695040888963407; return seed >> 33 }
+        // Inputs span tiny to large magnitudes, including half subnormals.
+        let input: [Float16] = (0..<columns).map { i in
+            let magnitude = Float(next() % 2000) / 100 - 10
+            return Float16(Float(i % 7 == 0 ? 0.00001 : 1) * magnitude * Float(1 << Int(next() % 6)))
+        }
+        let words: [UInt32] = (0..<(outputs * columns / 16)).map { _ in UInt32(truncatingIfNeeded: next() ^ (next() << 16)) }
+        let scales: [Float16] = (0..<(outputs * columns / 128)).map { _ in Float16(Float(next() % 1000) / 4000 + 0.001) }
+        let biases: [Float16] = (0..<(outputs * columns / 128)).map { _ in Float16(Float(next() % 1000) / 1000 - 0.5) }
+        let context = try MetalContext()
+        let kernel = try PrismAffine2(context: context)
+        let x = try #require(Fp16Buffer.make(context.device, halves: input))
+        let w = try #require(context.device.makeBuffer(bytes: words,
+            length: words.count * MemoryLayout<UInt32>.stride, options: .storageModeShared))
+        let sBuf = try #require(Fp16Buffer.make(context.device, halves: scales))
+        let bBuf = try #require(Fp16Buffer.make(context.device, halves: biases))
+        let prescaled = try #require(Fp16Buffer.make(context.device, count: outputs))
+        let shifted = try #require(Fp16Buffer.make(context.device, count: outputs))
+        let cb = try #require(context.queue.makeCommandBuffer())
+        kernel.encode(commandBuffer: cb, input: x, weights: w, scales: sBuf, biases: bBuf, output: prescaled,
+                      columns: columns, outputs: outputs, rows: 1, variant: .wide)
+        kernel.encode(commandBuffer: cb, input: x, weights: w, scales: sBuf, biases: bBuf, output: shifted,
+                      columns: columns, outputs: outputs, rows: 1, variant: .wideShift)
+        cb.commit(); cb.waitUntilCompleted()
+        try checkCommandBufferError(cb)
+        let actual = prescaled.contents().assumingMemoryBound(to: UInt16.self)
+        let expected = shifted.contents().assumingMemoryBound(to: UInt16.self)
+        var mismatches = 0
+        for i in 0..<outputs where actual[i] != expected[i] { mismatches += 1 }
+        #expect(mismatches == 0, "\(mismatches) of \(outputs) outputs differ")
+    }
+
     @Test func affine2BatchedMatchesSingleRowsBitwise() throws {
         let columns = 256, outputs = 11, rows = 7, stride = 17
         let input: [Float16] = (0..<(columns * rows)).map {
