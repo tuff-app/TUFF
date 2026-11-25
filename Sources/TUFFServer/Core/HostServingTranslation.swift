@@ -65,7 +65,8 @@ enum HostServingTranslation {
     static func decodeRequest(
         _ request: ValidatedChatRequest, generationID: UUID,
         maxContextTokens: Int, runtimeOptions: DecodeRuntimeOptions,
-        images: [UUID: DecodeImageAttachment]
+        images: [UUID: DecodeImageAttachment],
+        correction: String? = nil
     ) throws -> DecodeGenerationRequest {
         let messages = request.messages
         var index = 0
@@ -76,6 +77,7 @@ enum HostServingTranslation {
             if let text = messages[index].content, !text.isEmpty { instructions.append(text) }
             index += 1
         }
+        if let correction { instructions.append(correction) }
 
         func attachments(at position: Int) -> [DecodeImageAttachment] {
             guard let multimodal = request.multimodalMessages, position < multimodal.count else { return [] }
@@ -201,7 +203,7 @@ enum HostServingTranslation {
                 "The shared model changed while the request was starting. Retry the request.")
         }
         if kind == "malformedToolCall" {
-            return HostServingError("The model produced a tool call that could not be read: \(message)")
+            return ServerRequestError.malformedToolCall(message)
         }
         return HostServingError(message)
     }

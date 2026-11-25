@@ -22,6 +22,11 @@ private struct Script: Sendable {
     var cached = 0
     var stopReason = "eos"
     var failure: String?
+    /// The failure's kind, as the decode service tags it.
+    var failureKind: String?
+    /// Fail only after the prefill and the text, as a generation that ends in
+    /// an unreadable tool call does.
+    var failAtEnd = false
     /// Stay open after the text until released or cancelled.
     var hold = false
 }
@@ -160,8 +165,10 @@ private final class ScriptedAPIHost: @unchecked Sendable {
             emit(.generation(identity: identity, event: event))
         }
         emit(.queue(identity: identity, state: .admitted, position: nil))
-        if let failure = script.failure {
-            send(DecodeServiceEvent(kind: .failed, generationID: id, error: failure))
+        if let failure = script.failure, !script.failAtEnd {
+            var failed = DecodeServiceEvent(kind: .failed, generationID: id, error: failure)
+            failed.errorKind = script.failureKind
+            send(failed)
             return
         }
         let prefill = DecodeServiceEvent(kind: .prefill, generationID: id, sequence: 1,
@@ -177,6 +184,13 @@ private final class ScriptedAPIHost: @unchecked Sendable {
             send(DecodeServiceEvent(kind: .snapshot, generationID: id, sequence: sequence,
                                     textDelta: piece))
             sequence += 1
+        }
+        if let failure = script.failure {
+            var failed = DecodeServiceEvent(kind: .failed, generationID: id, sequence: sequence,
+                                            error: failure)
+            failed.errorKind = script.failureKind
+            send(failed)
+            return
         }
         if script.hold {
             while !record.withLock({ $0.cancelled.contains(id) || $0.released }) {
@@ -499,6 +513,82 @@ private func post(_ port: Int, _ body: [String: Any], path: String = "/v1/chat/c
             #expect(reply.status == 400)
             #expect(reply.text.contains("context_length_exceeded"))
         }
+        try await server.shutdown()
+        await h.finish()
+    }
+
+    private static let unreadableCall = "The model produced a tool call TUFF could not read, so nothing was run."
+
+    @Test(arguments: [false, true])
+    func anUnreadableToolCallIsRetriedOnceWithACorrection(failAtEnd: Bool) async throws {
+        let h = try Harness(); defer { Task { await h.finish() } }
+        h.host.record.withLock { value in
+            value.scripts = [Script(text: [], failure: Self.unreadableCall,
+                                    failureKind: "malformedToolCall", failAtEnd: failAtEnd),
+                             Script(text: ["Sunny"])]
+        }
+        let server = TUFFHTTPServer(provider: h.provider)
+        let port = try #require(try await server.start(port: 0).localAddress?.port)
+        let reply = try await post(port, ["model": "default", "messages": [
+            ["role": "system", "content": "Be brief."], user("Weather?")]])
+        #expect(reply.status == 200)
+        #expect(reply.text.contains("Sunny"))
+        let started = h.host.record.withLock { $0.started }
+        #expect(started.count == 2)
+        #expect(started[0].payload.systemPrompt == "Be brief.")
+        #expect(started[1].payload.systemPrompt
+            == "Be brief.\n\n" + HostServingBackend.malformedToolCallCorrection)
+        // The retry runs in a fresh session; the failed one is ended.
+        #expect(started[0].sessionID != started[1].sessionID)
+        #expect(h.host.record.withLock { $0.ended }.contains(started[0].sessionID))
+        try await server.shutdown()
+        await h.finish()
+    }
+
+    @Test func aToolCallThatStaysUnreadableIsAClearBadGateway() async throws {
+        let h = try Harness(); defer { Task { await h.finish() } }
+        h.host.record.withLock { $0.defaultScript = Script(
+            text: [], failure: Self.unreadableCall, failureKind: "malformedToolCall", failAtEnd: true) }
+        let server = TUFFHTTPServer(provider: h.provider)
+        let port = try #require(try await server.start(port: 0).localAddress?.port)
+        let reply = try await post(port, ["model": "default", "messages": [user("Weather?")]])
+        #expect(reply.status == 502)
+        #expect(reply.text.contains("malformed_tool_call"))
+        #expect(reply.text.contains("could not read"))
+        #expect(h.host.record.withLock { $0.started }.count == 2)
+        try await server.shutdown()
+        await h.finish()
+    }
+
+    @Test func anUnreadableToolCallAfterTextIsRetriedWhenNothingWasSent() async throws {
+        let h = try Harness(); defer { Task { await h.finish() } }
+        h.host.record.withLock { value in
+            value.scripts = [Script(text: ["Let me check. "], failure: Self.unreadableCall,
+                                    failureKind: "malformedToolCall", failAtEnd: true),
+                             Script(text: ["Sunny"])]
+        }
+        let server = TUFFHTTPServer(provider: h.provider)
+        let port = try #require(try await server.start(port: 0).localAddress?.port)
+        let reply = try await post(port, ["model": "default", "messages": [user("Weather?")]])
+        #expect(reply.status == 200)
+        #expect(reply.text.contains("Sunny"))
+        #expect(!reply.text.contains("Let me check"))
+        #expect(h.host.record.withLock { $0.started }.count == 2)
+        try await server.shutdown()
+        await h.finish()
+    }
+
+    @Test func anUnreadableToolCallAfterStreamedTextIsNotRetried() async throws {
+        let h = try Harness(); defer { Task { await h.finish() } }
+        h.host.record.withLock { $0.defaultScript = Script(
+            text: ["Let me check. "], failure: Self.unreadableCall,
+            failureKind: "malformedToolCall", failAtEnd: true) }
+        let server = TUFFHTTPServer(provider: h.provider)
+        let port = try #require(try await server.start(port: 0).localAddress?.port)
+        let reply = try await post(port, ["model": "default", "stream": true, "messages": [user("Weather?")]])
+        #expect(reply.text.contains("Let me check."))
+        #expect(reply.text.contains("malformed_tool_call"))
+        #expect(h.host.record.withLock { $0.started }.count == 1)
         try await server.shutdown()
         await h.finish()
     }

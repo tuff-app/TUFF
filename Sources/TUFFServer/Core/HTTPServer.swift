@@ -564,6 +564,9 @@ final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                             timings.generating()
                             phaseState.set("generating")
                             ServerLog.generating(id: responseID)
+                            var prepared = prepared
+                            prepared.eventsReachClient = request.stream || adapter != nil
+                            prepared.onDiscardedAttempt = { timings.discardVisibleEvent() }
                             return try await backend.generate(prepared) { event in
                                 if let adapter {
                                     let frames = adapter.event(event)
@@ -1057,6 +1060,9 @@ private extension ServerRequestError {
             .tooManyRequests
         case .modelMemoryBusy, .hostUnavailable, .modelBusy:
             .serviceUnavailable
+        case .malformedToolCall:
+            // The request was fine; the model's output was not.
+            .badGateway
         case .invalid(_, _, let code):
             switch code {
             case "request_too_large", "image_too_large", "too_many_images":

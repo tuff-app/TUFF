@@ -67,6 +67,10 @@ package enum ServerLog {
     /// added because excluding it from logging altogether left the request's last
     /// line as `generating` forever: an operator could not tell a running request
     /// from an abandoned one, or from a crashed one. Carries no content.
+    package static func malformedToolCallRetry(model: String) {
+        write("\(model) wrote a tool call TUFF could not read; retrying once with a correction")
+    }
+
     package static func cancelled(id: String, phase: String, duration: Duration) {
         write(cancelledMessage(id: id, phase: phase, duration: duration))
     }

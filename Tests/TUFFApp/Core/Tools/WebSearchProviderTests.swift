@@ -70,6 +70,32 @@ enum DuckDuckGoFixtures {
     ])
 }
 
+/// Synthetic pages in the shape of DuckDuckGo's lite endpoint. The content is
+/// invented; only the markup structure is copied.
+enum DuckDuckGoLiteFixtures {
+    static func result(_ number: Int, _ title: String, _ href: String, _ snippet: String,
+                       ad: Bool = false) -> String {
+        let row = ad ? #"<tr class="result-sponsored">"# : "<tr>"
+        return """
+        \(row)<td valign="top">\(number).&nbsp;</td><td>
+          <a rel="nofollow" href="\(href)" class='result-link'>\(title)</a>
+          \(ad ? #"(Sponsored link - <a href="https://duckduckgo.com/duckduckgo-help-pages/ads/" class="result-link">more info</a>)"# : "")
+        </td></tr>
+        \(row)<td>&nbsp;&nbsp;&nbsp;</td><td class='result-snippet'>\(snippet)</td></tr>
+        \(row)<td>&nbsp;</td><td><span class='link-text'>example</span></td></tr>
+        """
+    }
+
+    static let ordinary = """
+        <html><body><form action="/lite/" method="post"><input class='query' name="q" value="x"></form>
+        <table border="0">
+        \(result(1, "Sponsored thing", "https://duckduckgo.com/y.js?ad_domain=ads.example", "Buy now", ad: true))
+        \(result(1, "Swift actors &amp; isolation", "https://docs.example.org/actors", "Actors <b>isolate</b> mutable state."))
+        \(result(2, "Second docs page", "https://docs.example.org/reentrancy", "Reentrancy &#x27;explained&#x27;."))
+        </table></body></html>
+        """
+}
+
 @Suite struct WebSearchProviderTests {
     @Test func tlsFailureNamesTheProviderAndExplainsRecovery() async {
         let transport = FixtureHTTPTransport { _ in throw AppHTTPError.connectionFailed(code: 35) }
@@ -144,6 +170,63 @@ enum DuckDuckGoFixtures {
         await #expect(throws: expected) {
             _ = try await DuckDuckGoSearchProvider(transport: transport).search("x", count: 5)
         }
+    }
+
+    @Test(arguments: [
+        ("<html><body><div class=\"anomaly-modal\"></div></body></html>", 200),
+        ("", 202),
+        ("", 403),
+    ])
+    func duckDuckGoTriesItsLitePageWhenTheHTMLPageIsChallenged(body: String, status: Int) async throws {
+        let transport = FixtureHTTPTransport { request in
+            request.url == DuckDuckGoSearchProvider.liteEndpoint
+                ? .html(DuckDuckGoLiteFixtures.ordinary, url: request.url)
+                : .html(body, status: status)
+        }
+        let response = try await DuckDuckGoSearchProvider(transport: transport)
+            .search("swift actors", count: 5)
+        #expect(response.provider == .duckDuckGo)
+        #expect(response.results.map(\.url.absoluteString) == [
+            "https://docs.example.org/actors", "https://docs.example.org/reentrancy"])
+        #expect(response.results.first?.title == "Swift actors & isolation")
+        #expect(response.results.first?.excerpt == "Actors isolate mutable state.")
+        #expect(response.results.last?.excerpt == "Reentrancy 'explained'.")
+        // The same query, once to each DuckDuckGo page, and nowhere else.
+        #expect(transport.requests.map(\.url) == [
+            DuckDuckGoSearchProvider.endpoint, DuckDuckGoSearchProvider.liteEndpoint])
+        #expect(Set(transport.requests.map(\.body)).count == 1)
+    }
+
+    @Test(arguments: [
+        ("", 429),
+        ("", 500),
+        ("<html><body><div class=\"serp\">A redesigned page</div></body></html>", 200),
+        (DuckDuckGoFixtures.page([]) + #"<div class="no-results">No results.</div>"#, 200),
+    ])
+    func duckDuckGoUsesTheLitePageOnlyForChallenges(body: String, status: Int) async {
+        let transport = FixtureHTTPTransport { _ in .html(body, status: status) }
+        await #expect(throws: AppWebSearchError.self) {
+            _ = try await DuckDuckGoSearchProvider(transport: transport).search("x", count: 5)
+        }
+        #expect(transport.requests.map(\.url) == [DuckDuckGoSearchProvider.endpoint])
+    }
+
+    @Test func aLitePageThatCannotBeReachedReportsTheOriginalBlock() async {
+        let transport = FixtureHTTPTransport { request in
+            if request.url == DuckDuckGoSearchProvider.liteEndpoint {
+                throw AppHTTPError.sandbox("The sandbox does not reach this site.")
+            }
+            return .html("<html><body><div class=\"anomaly-modal\"></div></body></html>")
+        }
+        await #expect(throws: AppWebSearchError.challenge(.duckDuckGo)) {
+            _ = try await DuckDuckGoSearchProvider(transport: transport).search("x", count: 5)
+        }
+        #expect(transport.requests.count == 2)
+    }
+
+    @Test func duckDuckGoLitePageHonoursTheResultCount() {
+        let results = DuckDuckGoSearchProvider.parseLiteResults(DuckDuckGoLiteFixtures.ordinary, limit: 1)
+        #expect(results.map(\.url.absoluteString) == ["https://docs.example.org/actors"])
     }
 
     @Test(arguments: [AppHTTPError.timedOut, .oversized(limit: 1_048_576),

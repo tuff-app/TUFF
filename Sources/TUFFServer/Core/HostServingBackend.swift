@@ -66,12 +66,18 @@ actor HostServingBackend: ServerInferenceBackend {
     private var session: (id: UUID, keyed: Bool)?
     private var staged: HostServingStagedImages?
     private var completed = false
+    private var retriedMalformedToolCall = false
 
     init(provider: HostRoutedModelProvider, descriptor: TUFFModelDescriptor) {
         self.provider = provider
         self.descriptor = descriptor
         visionCapability = provider.installed.visionCapability(for: descriptor)
     }
+
+    /// Appended to the system prompt for the one retry after a tool call the
+    /// decoder could not read. The same words the app's answer runner uses;
+    /// nothing from the failed output is echoed back to the model.
+    static let malformedToolCallCorrection = "Your previous response contained an invalid tool call. Use the declared tool format, tool names and required argument types, and finish every argument. If you cannot make a valid call, answer directly without calling tools."
 
     func prepare(_ request: ValidatedChatRequest) async throws -> ServerPreparedRequest {
         guard generation == nil else {
@@ -82,10 +88,43 @@ actor HostServingBackend: ServerInferenceBackend {
                 message: "The loaded model cannot accept images on this Mac",
                 param: "messages", code: "image_input_unavailable")
         }
+        do {
+            try await start(request, requestID: UUID(), correction: nil)
+        } catch ServerRequestError.malformedToolCall where !retriedMalformedToolCall {
+            // The whole generation failed before the host reported progress.
+            try await retryWithCorrection(request)
+        }
+        guard let started = generation else {
+            throw HostServingError("the host generation did not start")
+        }
+        return ServerPreparedRequest(request: request, remotePreparationID: started.requestID)
+    }
+
+    /// Ends the failed attempt and starts the one corrective retry, in a
+    /// fresh session so none of the failed attempt's state is reused.
+    private func retryWithCorrection(_ request: ValidatedChatRequest) async throws {
+        retriedMalformedToolCall = true
+        ServerLog.malformedToolCallRetry(model: descriptor.apiModelID)
+        if let running = generation {
+            let terminal = await running.sawTerminal
+            await running.drain(cancel: !terminal)
+        }
+        generation = nil
+        if let session {
+            await provider.closeSession(session.id, keyed: session.keyed, reuse: false)
+        }
+        session = nil
+        try Task.checkCancellation()
+        try await start(request, requestID: UUID(), correction: Self.malformedToolCallCorrection)
+    }
+
+    /// Starts one host generation for the request and waits until the host
+    /// accepted it.
+    private func start(_ request: ValidatedChatRequest, requestID: UUID,
+                       correction: String?) async throws {
         let config = request.generationConfig
         let force = HostServingTranslation.forceLogitsHead(
             temperature: config.temperature, repetitionPenalty: config.repetitionPenalty)
-        let requestID = UUID()
         var attempt = 0
         while true {
             let preparation = try await provider.acquire(descriptor, forceLogitsHead: force)
@@ -97,7 +136,8 @@ actor HostServingBackend: ServerInferenceBackend {
                 request, generationID: requestID,
                 maxContextTokens: preparation.maxContextTokens,
                 runtimeOptions: preparation.runtimeOptions,
-                images: staged?.attachments ?? [:])
+                images: staged?.attachments ?? [:],
+                correction: correction)
             if session == nil {
                 session = await provider.openSession(
                     model: descriptor.apiModelID, cacheKey: request.promptCacheKey)
@@ -117,7 +157,7 @@ actor HostServingBackend: ServerInferenceBackend {
             generation = started
             do {
                 try await started.awaitStart()
-                return ServerPreparedRequest(request: request, remotePreparationID: requestID)
+                return
             } catch ServerRequestError.hostUnavailable where attempt == 0 {
                 // The host went away between the model check and the start
                 // (it may have idled out or restarted). Reconnect, re-prepare
@@ -139,11 +179,38 @@ actor HostServingBackend: ServerInferenceBackend {
 
     func generate(_ prepared: ServerPreparedRequest,
                   onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void) async throws -> ServerCompletion {
-        guard let running = generation, prepared.remotePreparationID == running.requestID else {
+        guard let first = generation, prepared.remotePreparationID == first.requestID else {
             throw HostServingError("the request was not prepared by this backend")
         }
+        while true {
+            guard let running = generation else {
+                throw HostServingError("the request was not prepared by this backend")
+            }
+            do {
+                return try await run(running, request: prepared.request, onEvent: onEvent)
+            } catch let failure as HostServingAttemptFailure {
+                // A tool call the decoder could not read, before anything
+                // reached the client: regenerate once with a correction, as
+                // the app does, instead of failing a request that was valid.
+                // Once text has reached the client, a retry would repeat it,
+                // so the error goes to the client instead.
+                guard !retriedMalformedToolCall, !Task.isCancelled,
+                      !failure.emitted || !prepared.eventsReachClient else {
+                    throw failure.error
+                }
+                prepared.onDiscardedAttempt?()
+                try await retryWithCorrection(prepared.request)
+            }
+        }
+    }
+
+    /// Reads one host generation to its end. A failure is wrapped with
+    /// whether any event reached the client.
+    private func run(_ running: HostServingGeneration, request: ValidatedChatRequest,
+                     onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void) async throws -> ServerCompletion {
         var translator = HostServingEventTranslator(
-            stops: prepared.request.generationConfig.stopStrings)
+            stops: request.generationConfig.stopStrings)
+        var emitted = false
         return try await withTaskCancellationHandler {
             while true {
                 guard let event = try await running.next() else {
@@ -152,7 +219,10 @@ actor HostServingBackend: ServerInferenceBackend {
                         "The TUFF inference host connection ended before the generation finished.")
                 }
                 let output = translator.consume(event)
-                if !Task.isCancelled { for item in output.events { onEvent(item) } }
+                if !Task.isCancelled, !output.events.isEmpty {
+                    emitted = true
+                    for item in output.events { onEvent(item) }
+                }
                 if output.requestStop { running.cancel() }
                 guard let terminal = output.terminal else { continue }
                 await running.markTerminal()
@@ -165,6 +235,10 @@ actor HostServingBackend: ServerInferenceBackend {
                     try Task.checkCancellation()
                     throw HostServingError("The TUFF inference host cancelled the generation.")
                 case .failed(let error):
+                    if let requestError = error as? ServerRequestError,
+                       case .malformedToolCall = requestError {
+                        throw HostServingAttemptFailure(error: requestError, emitted: emitted)
+                    }
                     throw error
                 }
             }
@@ -190,4 +264,10 @@ actor HostServingBackend: ServerInferenceBackend {
         }
         session = nil
     }
+}
+
+/// A failed attempt the backend may retry.
+private struct HostServingAttemptFailure: Error {
+    let error: ServerRequestError
+    let emitted: Bool
 }

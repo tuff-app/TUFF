@@ -21,7 +21,7 @@ public enum AppSearchProviderKind: String, Codable, CaseIterable, Sendable, Iden
     public var privacyNote: String {
         switch self {
         case .duckDuckGo:
-            "Searches send the query to DuckDuckGo. No key is needed. DuckDuckGo may block or challenge automated searches; TUFF reports that rather than working around it."
+            "Searches send the query to DuckDuckGo. No key is needed. When DuckDuckGo challenges a search, TUFF tries its lite page once and otherwise reports the block."
         case .brave:
             "Searches send the query to Brave Search with your API key."
         case .tavily:
@@ -107,9 +107,16 @@ func boundedSearchText(_ text: String, limit: Int) -> String {
 /// for its result anchors and snippets; ads are skipped. A verification page,
 /// a refusal, a page without the expected markup and a genuine empty result
 /// are told apart and reported as such.
+///
+/// DuckDuckGo sometimes answers the HTML page with a verification step or a
+/// refusal while its lite page still serves the same search. The query then
+/// goes once to the lite page, which is the same provider: it is never sent
+/// anywhere else. If the lite page answers with an error, that error is
+/// reported; if it cannot be reached, the original block is.
 public struct DuckDuckGoSearchProvider: AppWebSearchProvider {
     public let kind = AppSearchProviderKind.duckDuckGo
     public static let endpoint = URL(string: "https://html.duckduckgo.com/html/")!
+    public static let liteEndpoint = URL(string: "https://lite.duckduckgo.com/lite/")!
     private let transport: any AppHTTPTransport
     private let timeoutSeconds: Double
 
@@ -122,10 +129,33 @@ public struct DuckDuckGoSearchProvider: AppWebSearchProvider {
         var form = URLComponents()
         form.queryItems = [URLQueryItem(name: "q", value: query)]
         let body = Data((form.percentEncodedQuery ?? "").utf8)
-        let response: AppHTTPResponse
         do {
-            response = try await transport.perform(AppHTTPRequest(
-                url: Self.endpoint, method: "POST",
+            let response = try await post(body, to: Self.endpoint)
+            return AppWebSearchResponse(provider: kind,
+                                        results: try Self.parse(response, count: count))
+        } catch let block as AppWebSearchError {
+            switch block {
+            case .challenge, .blocked: break
+            default: throw block
+            }
+            let response: AppHTTPResponse
+            do {
+                response = try await post(body, to: Self.liteEndpoint)
+            } catch AppWebSearchError.transport {
+                // The lite page could not be reached at all; the web sandbox,
+                // for one, does not allow it. The block is what happened.
+                throw block
+            }
+            return AppWebSearchResponse(
+                provider: kind,
+                results: try Self.parse(response, count: count, results: Self.parseLiteResults))
+        }
+    }
+
+    private func post(_ body: Data, to url: URL) async throws -> AppHTTPResponse {
+        do {
+            return try await transport.perform(AppHTTPRequest(
+                url: url, method: "POST",
                 headers: ["Content-Type": "application/x-www-form-urlencoded",
                           "Accept": "text/html"],
                 body: body, maximumBytes: AppWebSearchLimits.maximumResponseBytes,
@@ -133,11 +163,12 @@ public struct DuckDuckGoSearchProvider: AppWebSearchProvider {
         } catch let error as AppHTTPError {
             throw AppWebSearchError.transport(kind, error)
         }
-        return AppWebSearchResponse(provider: kind,
-                                    results: try Self.parse(response, count: count))
     }
 
-    static func parse(_ response: AppHTTPResponse, count: Int) throws -> [AppWebResult] {
+    static func parse(
+        _ response: AppHTTPResponse, count: Int,
+        results parseResults: (String, Int) -> [AppWebResult] = DuckDuckGoSearchProvider.parseResults
+    ) throws -> [AppWebResult] {
         // 202 is DuckDuckGo's answer to traffic it treats as automated.
         switch response.statusCode {
         case 200: break
@@ -151,7 +182,7 @@ public struct DuckDuckGoSearchProvider: AppWebSearchProvider {
             || lowered.contains("bots use duckduckgo too") || lowered.contains("anomaly.js") {
             throw AppWebSearchError.challenge(.duckDuckGo)
         }
-        let results = parseResults(html, limit: count)
+        let results = parseResults(html, count)
         if results.isEmpty {
             if lowered.contains("class=\"no-results\"") || lowered.contains("no results.") {
                 throw AppWebSearchError.noResults(.duckDuckGo)
@@ -204,6 +235,62 @@ public struct DuckDuckGoSearchProvider: AppWebSearchProvider {
                     capturing = ("title", "a", 1)
                 } else if classes.contains("result__snippet"), current != nil {
                     capturing = ("snippet", name, 1)
+                }
+            case .end(let name):
+                if var open = capturing, open.tag == name {
+                    open.nesting -= 1
+                    capturing = open.nesting == 0 ? nil : open
+                }
+            case .text(let text):
+                guard !inAd, let open = capturing else { continue }
+                if open.kind == "title" { current?.title += text } else { current?.snippet += text }
+            }
+        }
+        if results.count < limit { finish() }
+        return Array(results.prefix(limit))
+    }
+
+    /// Reads the lite page's results in document order. Each result's link is
+    /// an `a.result-link` and its excerpt the next `td.result-snippet`. Ads
+    /// sit in rows marked `result-sponsored`, and those rows are ignored.
+    static func parseLiteResults(_ html: String, limit: Int) -> [AppWebResult] {
+        struct Partial { var title = ""; var href: String?; var snippet = "" }
+        var results: [AppWebResult] = []
+        var current: Partial?
+        var inAd = false
+        var capturing: (kind: String, tag: String, nesting: Int)?
+        func finish() {
+            defer { current = nil }
+            guard let partial = current, let href = partial.href,
+                  let url = resolve(href) else { return }
+            let title = boundedSearchText(partial.title, limit: AppWebSearchLimits.maximumTitleCharacters)
+            guard !title.isEmpty, !results.contains(where: { $0.url == url }) else { return }
+            results.append(AppWebResult(
+                title: title, url: url,
+                excerpt: boundedSearchText(partial.snippet,
+                                           limit: AppWebSearchLimits.maximumExcerptCharacters)))
+        }
+        for token in AppHTML.tokens(html) {
+            if results.count >= limit { break }
+            switch token {
+            case .start(let name, let attributes, let selfClosing):
+                let classes = Set((attributes["class"] ?? "").split(separator: " ").map(String.init))
+                if name == "tr" {
+                    capturing = nil
+                    inAd = classes.contains("result-sponsored")
+                    continue
+                }
+                if inAd || selfClosing { continue }
+                if var open = capturing, open.tag == name {
+                    open.nesting += 1
+                    capturing = open
+                }
+                if name == "a", classes.contains("result-link") {
+                    finish()
+                    current = Partial(href: attributes["href"])
+                    capturing = ("title", "a", 1)
+                } else if name == "td", classes.contains("result-snippet"), current != nil {
+                    capturing = ("snippet", "td", 1)
                 }
             case .end(let name):
                 if var open = capturing, open.tag == name {

@@ -608,6 +608,10 @@ public enum ServerRequestError: Error, Codable, Equatable, Sendable {
     /// The model is held by another client in a configuration this request
     /// cannot use, and the holder is busy.
     case modelBusy(String)
+    /// The model wrote a tool call TUFF could not read. The backend retries
+    /// once with a correction before this reaches the client. The value is the
+    /// host's message, kept for the log.
+    case malformedToolCall(String)
 
     public var envelope: OpenAIErrorEnvelope {
         switch self {
@@ -620,6 +624,12 @@ public enum ServerRequestError: Error, Codable, Equatable, Sendable {
                                 type: "server_error")
         case .modelBusy(let message):
             OpenAIErrorEnvelope(message: message, code: "model_busy")
+        case .malformedToolCall:
+            OpenAIErrorEnvelope(
+                message: "The model wrote a tool call TUFF could not read, "
+                    + "including after one retry, so nothing was run. Sending the request again may work; "
+                    + "fewer or simpler tools, or a larger model, make this less likely.",
+                code: "malformed_tool_call", type: "server_error")
         case .invalid(let message, let param, let code):
             OpenAIErrorEnvelope(message: message, param: param, code: code)
         case .unknownModel:

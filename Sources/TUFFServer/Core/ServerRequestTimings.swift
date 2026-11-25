@@ -28,6 +28,11 @@ final class ServerRequestTimings: @unchecked Sendable {
     func visibleEvent(at time: UInt64 = DispatchTime.now().uptimeNanoseconds) {
         lock.withLock { if firstEvent == nil { firstEvent = time } }
     }
+    /// A discarded attempt's output was never shown, so the next attempt's
+    /// first output is the first visible event.
+    func discardVisibleEvent() {
+        lock.withLock { firstEvent = nil }
+    }
     func snapshot() -> [String: Double] {
         lock.withLock {
             func seconds(_ start: UInt64, _ end: UInt64) -> Double {

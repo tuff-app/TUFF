@@ -19,6 +19,15 @@ import TUFFEngine
         #expect(s["generation_to_first_event"] == 3)
         #expect(s["time_to_first_event"] == 8)
     }
+    @Test func aDiscardedAttemptsOutputIsNotTheFirstEvent() {
+        let t = ServerRequestTimings(arrival: 0, validated: 1_000_000_000)
+        t.preparing(at: 2_000_000_000); t.prepared(at: 3_000_000_000); t.generating(at: 4_000_000_000)
+        t.visibleEvent(at: 5_000_000_000)
+        t.discardVisibleEvent()
+        t.visibleEvent(at: 14_000_000_000)
+        #expect(t.snapshot()["time_to_first_event"] == 14)
+        #expect(t.snapshot()["generation_to_first_event"] == 10)
+    }
     @Test func emptyAnswerDoesNotInventFirstToken() {
         let t = ServerRequestTimings(arrival: 1, validated: 2)
         t.preparing(at: 3); t.prepared(at: 4); t.generating(at: 5)

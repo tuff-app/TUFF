@@ -28,9 +28,11 @@ Once a chat includes your own files, images or folder results, web searches
 can only use words you typed in your current message. That keeps private
 material out of search queries.
 
-DuckDuckGo sometimes blocks automated searches. TUFF tells you when that
-happens instead of working around it. **Settings > Tools** can pause web
-search automatically while you're offline.
+DuckDuckGo sometimes blocks automated searches. TUFF then sends the same
+query once to DuckDuckGo's lite page, and tells you if that is blocked too.
+The query never goes anywhere else. With the web sandbox on, only the main
+page is reachable, so a block is reported straight away. **Settings > Tools**
+can pause web search automatically while you're offline.
 
 ## Files
 

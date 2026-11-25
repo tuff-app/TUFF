@@ -100,6 +100,11 @@ Chat Completions supports streaming, reasoning, function tools, images (with
 an image pack installed) and prompt reuse. Your client runs tool calls; the
 server never does.
 
+If the model writes a tool call TUFF cannot read, the server regenerates once
+with a short note to use the declared tools or answer without them. If that is
+unreadable too, it answers 502 `malformed_tool_call`. A stream that has already
+sent text is not regenerated; it ends with that error.
+
 Unknown fields return `unknown_parameter`, and unsupported values return
 `unsupported_value`, so you find out instead of getting silently different
 behavior. `chat_template_kwargs` accepts only `enable_thinking` and

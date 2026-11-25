@@ -44,6 +44,13 @@ public struct ServerPreparedRequest: Sendable {
     package let remotePreparationID: UUID?
     package let remotePromptTokenCount: Int?
     public var promptTokenCount: Int? { remotePromptTokenCount ?? promptIDs?.count }
+    /// Whether generation events reach the client as they arrive: a stream,
+    /// or an API adapter that keeps state from them. When false, a failed
+    /// attempt's events were only counted for timings, so it can be retried.
+    package var eventsReachClient = true
+    /// Called when the backend discards an attempt whose events never reached
+    /// the client and starts another.
+    package var onDiscardedAttempt: (@Sendable () -> Void)?
 
     package init(request: ValidatedChatRequest, promptIDs: [Int32]? = nil,
          timingSeconds: [String: Double] = [:],
