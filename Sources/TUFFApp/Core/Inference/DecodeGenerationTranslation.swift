@@ -47,6 +47,7 @@ public enum DecodeGenerationTranslation {
             ? nil : request.currentRounds.map(DecodeServiceInferenceClient.decodeToolRound)
         command.conversationKey = request.conversationKey
         command.preservesFullHistory = request.preservesFullHistory
+        command.ignoreEOS = request.ignoreEOS
         return command
     }
 }

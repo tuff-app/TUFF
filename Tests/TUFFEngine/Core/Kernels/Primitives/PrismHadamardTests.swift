@@ -126,7 +126,10 @@ import TUFFValidationSupport
     /// matmul. It must agree with the simple 32 x 32 kernel up to FP32
     /// summation order, across the 128-row tile, the smaller tiles and a
     /// partial output tile.
-    @Test(arguments: [8, 40, 128, 200])
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice()?.supportsFamily(.apple8) == true
+                      && ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26,
+                   "Metal tensor operations are unavailable on this device"),
+          arguments: [8, 40, 128, 200])
     func affine2TiledPrefillMatchesReferenceKernel(rows: Int) throws {
         let columns = 2048, outputs = 100
         var seed: UInt64 = 0x1234_5678_9ABC_DEF0 &+ UInt64(rows)
@@ -137,7 +140,7 @@ import TUFFValidationSupport
         let biases: [Float16] = (0..<(outputs * columns / 128)).map { _ in Float16(-Float(next() % 1000) / 20000 - 0.005) }
         let context = try MetalContext()
         let kernel = try PrismAffine2(context: context)
-        guard kernel.tiledPrefill != nil else { return }
+        let tiledPrefill = try #require(kernel.tiledPrefill)
         let x = try #require(Fp16Buffer.make(context.device, halves: input))
         let w = try #require(context.device.makeBuffer(bytes: words,
             length: words.count * MemoryLayout<UInt32>.stride, options: .storageModeShared))
@@ -146,14 +149,14 @@ import TUFFValidationSupport
         let tiled = try #require(Fp16Buffer.make(context.device, count: rows * outputs))
         let reference = try #require(Fp16Buffer.make(context.device, count: rows * outputs))
         let cb = try #require(context.queue.makeCommandBuffer())
-        let before = kernel.tiledPrefill?.encodedProjections ?? 0
+        let before = tiledPrefill.encodedProjections
         kernel.encode(commandBuffer: cb, input: x, weights: w, scales: sBuf, biases: bBuf, output: tiled,
                       columns: columns, outputs: outputs, rows: rows)
         kernel.encode(commandBuffer: cb, input: x, weights: w, scales: sBuf, biases: bBuf, output: reference,
                       columns: columns, outputs: outputs, rows: rows, allowTiledPrefill: false)
         cb.commit(); cb.waitUntilCompleted()
         try checkCommandBufferError(cb)
-        #expect(kernel.tiledPrefill?.encodedProjections == before + 1)
+        #expect(tiledPrefill.encodedProjections == before + 1)
         let a = Fp16Buffer.read(tiled, count: rows * outputs)
         let b = Fp16Buffer.read(reference, count: rows * outputs)
         var worst: Float = 0

@@ -90,6 +90,8 @@ public protocol AppInferenceEngineReporting: Sendable {
 /// generation so the UI can pre-load the ~1.6 GB resident weights once and
 /// keep them warm across runs. Generation never loads or replaces a session.
 public protocol AppModelLifecycleClient: AnyObject, AppInferenceClient {
+    /// Whether generation selects its head without changing the loaded model.
+    var selectsHeadPerRequest: Bool { get }
     func ensureLoaded(modelDirectory: URL, maxContextTokens: Int,
                       options: AppRuntimeOptions, forceLogitsHead: Bool,
                       onState: @escaping @Sendable (AppModelLoadState) -> Void) async throws
@@ -101,6 +103,8 @@ public protocol AppModelLifecycleClient: AnyObject, AppInferenceClient {
 }
 
 public extension AppModelLifecycleClient {
+    var selectsHeadPerRequest: Bool { false }
+
     func unload(modelDirectory: URL) async { await unload() }
 }
 

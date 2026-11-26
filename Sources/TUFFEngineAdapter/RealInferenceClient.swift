@@ -535,7 +535,8 @@ actor RealInferenceSession {
                          topK: request.topK,
                          topP: request.topP,
                          repetitionPenalty: request.repetitionPenalty,
-                         seed: request.seed)
+                         seed: request.seed,
+                         ignoreEOS: request.ignoreEOS ? true : nil)
     }
 
     static func effectiveMaxNewTokens(requested: Int,
@@ -873,12 +874,13 @@ actor RealInferenceSession {
             let prefillDiagnostics = PrefillExecutionDiagnostics(config: prefillConfig,
                                                                  executedMode: executedPrefillMode,
                                                                  kvStorageMode: .fp16)
+            guard let loadedKey else { throw AppInferenceError.modelNotLoaded }
             let requestKey = SessionLoadKey(
                 directory: request.modelDirectory.standardizedFileURL,
                 maxContext: request.maxContextTokens,
                 options: request.runtimeOptions,
-                forceLogitsHead: Self.forceLogitsHead(for: request))
-            guard let loadedKey else { throw AppInferenceError.modelNotLoaded }
+                forceLogitsHead: sharedForwardLease == nil
+                    ? Self.forceLogitsHead(for: request) : loadedKey.forceLogitsHead)
             guard loadedKey == requestKey else { throw AppInferenceError.reloadRequired }
             guard let runner, let tokenizer, let ctx, let scratch, let model,
                   let conversationDomain else {
@@ -1040,7 +1042,7 @@ actor RealInferenceSession {
             // A template that rewrites a finished turn when the next one is
             // rendered (GPT-OSS always, Gemma and Qwen with thinking on) is
             // resumed where the user turn began. Tool rounds keep it.
-            let capturesTurnCheckpoint = multimodalInput == nil
+            let capturesTurnCheckpoint = !request.ignoreEOS && multimodalInput == nil
                 && !Self.allowsTextBridge(request)
                 && request.assistantPrefix.isEmpty
                 && transcript.messages.last?.role == .user
@@ -1053,7 +1055,7 @@ actor RealInferenceSession {
             // The chat is saved where this user turn begins: the next turn's
             // prompt starts with exactly those tokens whatever the template
             // does to finished turns.
-            let chatSavePosition = turnPosition.flatMap { position -> Int? in
+            let chatSavePosition = (request.ignoreEOS ? nil : turnPosition).flatMap { position -> Int? in
                 guard let key = request.conversationKey, let savedChats,
                       Self.shouldSaveChat(at: position, saved: savedChats.savedChatTokenCount(
                         conversationKey: key, prompt: promptIds)) else { return nil }
@@ -1089,7 +1091,7 @@ actor RealInferenceSession {
                     guard progress.assistantDecodeError == nil else { break }
                     do {
                         publishAssistantEvents(
-                            try assistantDecoder.consume(
+                            request.ignoreEOS ? (delta.isEmpty ? [] : [.content(delta)]) : try assistantDecoder.consume(
                                 tokenID: tokenID, delta: delta),
                             index,
                             progress.elapsedDecodeSeconds)
@@ -1100,7 +1102,7 @@ actor RealInferenceSession {
                     guard progress.assistantDecodeError == nil else { break }
                     do {
                         publishAssistantEvents(
-                            try assistantDecoder.consumeTail(text),
+                            request.ignoreEOS ? [.content(text)] : try assistantDecoder.consumeTail(text),
                             max(progress.generated - 1, 0),
                             progress.elapsedDecodeSeconds)
                     } catch {
@@ -1110,7 +1112,7 @@ actor RealInferenceSession {
             }
             // A stop token that closes a structure (Harmony's `<|call|>`) is not
             // reported as `.token`; the decoder must see it before `finish()`.
-            if progress.assistantDecodeError == nil {
+            if !request.ignoreEOS, progress.assistantDecodeError == nil {
                 do {
                     for tokenID in result.undeliveredBoundaryTokenIDs {
                         publishAssistantEvents(
@@ -1128,7 +1130,7 @@ actor RealInferenceSession {
             // off, not malformed: nothing of it runs, the answer so far stands
             // as a length stop, and the state holding the partial call is not
             // offered for reuse.
-            let truncatedCall = try Self.finish(assistantDecoder, reason: result.reason)
+            let truncatedCall = request.ignoreEOS ? false : try Self.finish(assistantDecoder, reason: result.reason)
             if truncatedCall { progress.toolCalls = [] }
             if !toolNames.isEmpty, result.reason == .toolCalls, progress.toolCalls.isEmpty {
                 throw AppInferenceError.malformedToolCall("a tool response marker without a call")
@@ -1136,7 +1138,7 @@ actor RealInferenceSession {
             // An awaited completion must not publish into a session that was
             // unloaded or replaced while that completion was in flight.
             if self.loadedKey == requestKey, self.runner === runner {
-                conversations.publish(conversationTrim.droppedTurns == 0 && !truncatedCall
+                conversations.publish(!request.ignoreEOS && conversationTrim.droppedTurns == 0 && !truncatedCall
                     ? ConversationCache.entry(
                         domain: conversationDomain, transcript: transcript,
                         content: request.assistantPrefix + progress.responseText,

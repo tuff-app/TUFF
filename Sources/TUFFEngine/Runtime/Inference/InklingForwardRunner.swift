@@ -436,9 +436,6 @@ final class InklingForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
     let rowKernels: Bool
     /// Token rows one forward pass can hold.
     private let rowCapacity: Int
-    /// The prompt rows one block of `prefillChunked` runs, whatever the
-    /// requested chunk size.
-    var prefillBlockTokens: Int { rowCapacity }
     /// Scores one attention dispatch may write, in floats.
     private let scoreCapacity: Int
 
@@ -829,9 +826,21 @@ final class InklingForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
 
     func prefillChunked(tokens: ArraySlice<Int32>,
                         startPosition: Int,
+                        outputMode: PrefillOutputMode,
+                        config prefillConfig: PrefillRuntimeConfig,
+                        into logits: MTLBuffer,
+                        onProgress: (Int) -> Void) async throws -> PrefillResult {
+        try await prefillChunked(tokens: tokens, startPosition: startPosition,
+            outputMode: outputMode, config: prefillConfig, into: logits,
+            chunkGate: nil, onProgress: onProgress)
+    }
+
+    func prefillChunked(tokens: ArraySlice<Int32>,
+                        startPosition: Int,
                         outputMode _: PrefillOutputMode,
                         config prefillConfig: PrefillRuntimeConfig,
                         into logits: MTLBuffer,
+                        chunkGate: PrefillChunkGate?,
                         onProgress: (Int) -> Void) async throws -> PrefillResult {
         guard prefillConfig.mode == .chunked else {
             throw PrefillError.chunkedUnsupported("Inkling chunked prefill requires chunked mode")
@@ -850,15 +859,22 @@ final class InklingForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         // only hints storage and is not affected.
         defer {
             prefillClock.active = false
-            model.cancelRoutedExpertReadAhead()
+            if chunkGate == nil { model.cancelRoutedExpertReadAhead() }
         }
         let all = Array(tokens)
         var done = 0
         while done < all.count {
             try Task.checkCancellation()
             let count = min(rowCapacity, all.count - done)
-            try await execute(tokens: Array(all[done..<(done + count)]), startPosition: startPosition + done,
-                              emitHead: done + count == all.count, logits: logits)
+            func run() async throws {
+                // Read-ahead lives on the shared model. Retire this block's
+                // reads before handing the lease to another session.
+                defer { if chunkGate != nil { model.cancelRoutedExpertReadAhead() } }
+                try await execute(tokens: Array(all[done..<(done + count)]),
+                                  startPosition: startPosition + done,
+                                  emitHead: done + count == all.count, logits: logits)
+            }
+            if let chunkGate { try await chunkGate(run) } else { try await run() }
             for completed in (done + 1)...(done + count) { onProgress(completed) }
             done += count
         }

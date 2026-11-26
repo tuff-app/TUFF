@@ -38,6 +38,7 @@ public struct AppGenerationRequest: Equatable, Sendable {
     public var conversationKey: String?
     /// Auto refuses to silently remove history when its token estimate was low.
     public var preservesFullHistory: Bool
+    public var ignoreEOS: Bool
 
     public init(modelDirectory: URL,
                 prompt: String,
@@ -58,7 +59,8 @@ public struct AppGenerationRequest: Equatable, Sendable {
                 runtimeOptions: AppRuntimeOptions = AppRuntimeOptions(),
                 tools: [InferenceFunctionDefinition] = [],
                 currentRounds: [AppToolRound] = [],
-                conversationKey: String? = nil, preservesFullHistory: Bool = false) {
+                conversationKey: String? = nil, preservesFullHistory: Bool = false,
+                ignoreEOS: Bool = false) {
         self.modelDirectory = modelDirectory
         self.prompt = prompt
         self.systemPrompt = systemPrompt
@@ -80,6 +82,7 @@ public struct AppGenerationRequest: Equatable, Sendable {
         self.currentRounds = currentRounds
         self.conversationKey = conversationKey
         self.preservesFullHistory = preservesFullHistory
+        self.ignoreEOS = ignoreEOS
     }
 
     /// Whether the prompt is rendered through the model's tool template:
@@ -126,6 +129,9 @@ public struct AppGenerationRequest: Equatable, Sendable {
                 throw AppInferenceError.invalidRequest(
                     "Invalid image attachment \(attachment.displayName).")
             }
+        }
+        if ignoreEOS, usesToolTemplate {
+            throw AppInferenceError.invalidRequest("ignore_eos requires a request without tools or tool history.")
         }
         guard maxNewTokens > 0 else {
             throw AppInferenceError.invalidRequest("Max response length must be greater than zero.")

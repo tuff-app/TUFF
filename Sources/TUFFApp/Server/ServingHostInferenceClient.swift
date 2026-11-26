@@ -68,6 +68,8 @@ public final class ServingHostInferenceClient: AppModelLifecycleClient, AppPoole
         }
     }
 
+    public var selectsHeadPerRequest: Bool { true }
+
     public var currentEngineIdentity: String? {
         state.withLock { $0.ipc?.host.buildIdentity }
     }
@@ -140,7 +142,7 @@ public final class ServingHostInferenceClient: AppModelLifecycleClient, AppPoole
             preparation = try ServingModelPreparation(
                 modelID: modelID, maxContextTokens: maxContextTokens,
                 runtimeOptions: DecodeServiceInferenceClient.decodeRuntimeOptions(options),
-                forceLogitsHead: forceLogitsHead)
+                forceLogitsHead: false)
         } catch { throw AppInferenceError.invalidRequest("\(error)") }
         let directory = modelDirectory.standardizedFileURL
         let seconds = try await prepare(preparation, onState: { phase in

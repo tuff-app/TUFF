@@ -396,7 +396,8 @@ final class DecodeService: @unchecked Sendable {
             tools: request.tools ?? [],
             currentRounds: (request.currentRounds ?? []).map(appToolRound),
             conversationKey: request.conversationKey,
-            preservesFullHistory: request.preservesFullHistory)
+            preservesFullHistory: request.preservesFullHistory,
+            ignoreEOS: request.ignoreEOS)
     }
 
     /// A round as the model reads it. Status and summaries stay in the app;

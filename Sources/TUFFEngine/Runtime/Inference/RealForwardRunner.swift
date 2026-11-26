@@ -1178,17 +1178,24 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                emitHead: false, outputMode: .logits)
     }
 
-    /// The prompt rows one block of `prefillChunked` runs under `config`.
-    func prefillBlockTokens(_ config: PrefillRuntimeConfig) -> Int {
-        max(1, min(config.chunkTokens, prefillTextChunkCapacity, PrefillRuntimeConfig.maxChunkTokens))
-    }
-
     public func prefillChunked(tokens: ArraySlice<Int32>,
                                startPosition: Int,
                                outputMode: PrefillOutputMode,
                                config: PrefillRuntimeConfig,
                                into logits: MTLBuffer,
                                onProgress: (Int) -> Void) async throws -> PrefillResult {
+        try await prefillChunked(tokens: tokens, startPosition: startPosition,
+            outputMode: outputMode, config: config, into: logits,
+            chunkGate: nil, onProgress: onProgress)
+    }
+
+    func prefillChunked(tokens: ArraySlice<Int32>,
+                        startPosition: Int,
+                        outputMode: PrefillOutputMode,
+                        config: PrefillRuntimeConfig,
+                        into logits: MTLBuffer,
+                        chunkGate: PrefillChunkGate?,
+                        onProgress: (Int) -> Void) async throws -> PrefillResult {
         try prefillChunkState.requireClean(operation: "prefillChunked")
         guard config.mode == .chunked else {
             throw PrefillError.chunkedUnsupported(
@@ -1213,7 +1220,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         if cfg.family == .flint {
             return try await prefillFlintBatched(tokens: tokens, startPosition: startPosition,
                                                  outputMode: outputMode, config: config,
-                                                 into: logits, onProgress: onProgress)
+                                                 into: logits, chunkGate: chunkGate, onProgress: onProgress)
         }
         let config = config.replacingChunkTokens(
             min(config.chunkTokens, prefillTextChunkCapacity))
@@ -1224,14 +1231,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         try await PrefillSpanIteration.forEachSpan(spans) { spanIndex, span in
             let lower = tokens.index(tokens.startIndex, offsetBy: span.tokenOffset)
             let upper = tokens.index(lower, offsetBy: span.tokenCount)
-            try await executePrefillChunk(
-                tokens: tokens[lower..<upper],
-                startPosition: span.startPosition,
-                outputMode: outputMode,
-                logits: logits,
-                scratch: scratch,
-                config: config,
-                writeFinalHead: spanIndex == spans.count - 1)
+            func run() async throws {
+                try await executePrefillChunk(
+                    tokens: tokens[lower..<upper],
+                    startPosition: span.startPosition,
+                    outputMode: outputMode,
+                    logits: logits,
+                    scratch: scratch,
+                    config: config,
+                    writeFinalHead: spanIndex == spans.count - 1)
+            }
+            if let chunkGate { try await chunkGate(run) } else { try await run() }
             onProgress(span.completedCount)
         }
         if outputMode == .greedyIfAvailable, useFusedGreedyHead {
@@ -4389,7 +4399,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 totalGPULayerNanos &+= UInt64(max(0, (cb.gpuEndTime - cb.gpuStartTime) * 1e9))
                 totalGPULayerCommandBuffers &+= 1
             } else {
-                try runSync(head)
+                try runSync { cb in
+                    try head(cb)
+                    epilogue?(cb)
+                }
             }
             if !useFusedHeadForThisToken { try flintFiniteLogits?.validate() }
             if useFusedHeadForThisToken {
@@ -4787,7 +4800,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
 
         // One dispatch over the concatenated qkv/z/a/b row space instead of four
         // separate GEMVs (a and b were 4 threadgroups each).
-        gdn.encodeInputProjections(commandBuffer: cb,
+        try gdn.encodeInputProjections(commandBuffer: cb,
                                    x: blockInput,
                                    qkv: qkvW, qkvOut: gdnQKVRaw,
                                    z: zW, zOut: gdnZ,
@@ -5342,6 +5355,7 @@ extension RealForwardRunner {
                              outputMode: PrefillOutputMode,
                              config: PrefillRuntimeConfig,
                              into logits: MTLBuffer,
+                             chunkGate: PrefillChunkGate?,
                              onProgress: (Int) -> Void) async throws -> PrefillResult {
         let total = tokens.count
         let batched = total - 1
@@ -5361,16 +5375,22 @@ extension RealForwardRunner {
                 let lower = tokens.index(tokens.startIndex, offsetBy: offset)
                 let upper = tokens.index(lower, offsetBy: count)
                 try Task.checkCancellation()
-                try await encodeFlintPrefillChunk(tokens: tokens[lower..<upper],
-                                                  startPosition: startPosition + offset,
-                                                  state: state)
+                func run() async throws {
+                    try await encodeFlintPrefillChunk(tokens: tokens[lower..<upper],
+                                                      startPosition: startPosition + offset,
+                                                      state: state)
+                }
+                if let chunkGate { try await chunkGate(run) } else { try await run() }
                 offset += count
                 onProgress(offset)
             }
         }
-        try await produceToken(token: tokens[tokens.index(before: tokens.endIndex)],
-                               position: startPosition + total - 1, into: logits,
-                               emitHead: true, outputMode: outputMode)
+        func finish() async throws {
+            try await produceToken(token: tokens[tokens.index(before: tokens.endIndex)],
+                                   position: startPosition + total - 1, into: logits,
+                                   emitHead: true, outputMode: outputMode)
+        }
+        if let chunkGate { try await chunkGate(finish) } else { try await finish() }
         onProgress(total)
         if outputMode == .greedyIfAvailable, useFusedGreedyHead {
             return PrefillResult(newPosition: startPosition + total, seed: .greedyToken(lastGreedyToken))

@@ -174,6 +174,7 @@ public struct DecodeGenerationRequest: Codable, Sendable {
     public var currentRounds: [DecodeToolRound]?
     public var conversationKey: String?
     public var preservesFullHistory: Bool
+    public var ignoreEOS: Bool
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -208,6 +209,7 @@ public struct DecodeGenerationRequest: Codable, Sendable {
             [DecodeToolRound].self, forKey: .currentRounds)
         conversationKey = try container.decodeIfPresent(String.self, forKey: .conversationKey)
         preservesFullHistory = try container.decodeIfPresent(Bool.self, forKey: .preservesFullHistory) ?? false
+        ignoreEOS = try container.decodeIfPresent(Bool.self, forKey: .ignoreEOS) ?? false
     }
 
     public init(prompt: String, systemPrompt: String? = nil,
@@ -225,7 +227,8 @@ public struct DecodeGenerationRequest: Codable, Sendable {
                 generationID: UUID = UUID(),
                 tools: [InferenceFunctionDefinition]? = nil,
                 currentRounds: [DecodeToolRound]? = nil,
-                conversationKey: String? = nil, preservesFullHistory: Bool = false) {
+                conversationKey: String? = nil, preservesFullHistory: Bool = false,
+                ignoreEOS: Bool = false) {
         self.prompt = prompt
         self.systemPrompt = systemPrompt
         self.assistantPrefix = assistantPrefix
@@ -247,6 +250,7 @@ public struct DecodeGenerationRequest: Codable, Sendable {
         self.currentRounds = currentRounds
         self.conversationKey = conversationKey
         self.preservesFullHistory = preservesFullHistory
+        self.ignoreEOS = ignoreEOS
     }
 }
 

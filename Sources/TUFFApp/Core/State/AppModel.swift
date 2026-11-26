@@ -1668,8 +1668,12 @@ public final class AppModel {
                             forceLogitsHead: currentForceLogitsHead)
     }
 
+    private var selectsHeadPerRequest: Bool {
+        (client as? any AppModelLifecycleClient)?.selectsHeadPerRequest == true
+    }
+
     private var currentForceLogitsHead: Bool {
-        temperature != 0
+        !selectsHeadPerRequest && temperature != 0
     }
 
     /// Point the selected model at a different directory. Any install running
@@ -1736,7 +1740,7 @@ public final class AppModel {
             if let resident = pooled.residentRuntime(forModelDirectory: directory) {
                 loadedRuntimeKey = AppLoadedRuntimeKey(
                     modelDirectory: directory, maxContextTokens: resident.maxContextTokens,
-                    options: resident.options, forceLogitsHead: resident.forceLogitsHead)
+                    options: resident.options, forceLogitsHead: !selectsHeadPerRequest && resident.forceLogitsHead)
                 loadState = .ready(modelDirectory: directory, loadSeconds: 0)
             }
         } else if let lifecycle = client as? AppModelLifecycleClient {
@@ -3382,7 +3386,7 @@ public final class AppModel {
             modelDirectory: request.modelDirectory,
             maxContextTokens: request.maxContextTokens,
             options: request.runtimeOptions,
-            forceLogitsHead: !request.isPureGreedy)
+            forceLogitsHead: !selectsHeadPerRequest && !request.isPureGreedy)
         liveTokenCount = 0
         liveElapsedDecodeSeconds = 0
         livePrefillDone = 0
@@ -3867,7 +3871,7 @@ public final class AppModel {
             diagnostics.runtimeOptions.denseResidencyPolicy, summary: summary) else { return }
         let key = AppAutoPerformanceRecords.workloadKey(promptTokens: diagnostics.promptTokenCount ?? 0,
             reusedPrefix: (diagnostics.cachedPromptTokens ?? 0) > 0, imageInput: !outputImageAttachments.isEmpty,
-            sampled: loadedRuntimeKey?.forceLogitsHead ?? currentForceLogitsHead)
+            sampled: selectsHeadPerRequest ? temperature != 0 : loadedRuntimeKey?.forceLogitsHead ?? currentForceLogitsHead)
         autoWorkloadKey = key
         let start = handlingAnswerRun?.observationStart
         let observedPressure = start?.pressure() ?? AppAutoMemoryPressureMonitor.shared.snapshot.pressure

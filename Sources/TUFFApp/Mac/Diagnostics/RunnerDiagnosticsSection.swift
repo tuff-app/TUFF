@@ -36,7 +36,7 @@ struct RunnerDiagnosticsSection: View {
                     DiagnosticRow(
                         "Prefill rate",
                         "\(MetricFormat.rate(prefillRate)) tok/s",
-                        help: "Prompt tokens divided by prefill time. Compare runs with similar prompt lengths and settings; short prompts include proportionally more fixed overhead.")
+                        help: "Uncached prompt tokens divided by prefill time. Compare runs with similar prompt lengths and settings; short prompts include proportionally more fixed overhead.")
                 }
                 DiagnosticRow("First token wait", MetricFormat.seconds(diagnostics.timeToFirstTokenSeconds))
                 DiagnosticRow("Request TTFT", MetricFormat.seconds(diagnostics.requestStartTimeToFirstTokenSeconds))

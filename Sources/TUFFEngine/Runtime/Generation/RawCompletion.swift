@@ -445,7 +445,9 @@ public func runRawCompletion(producer: any LogitProducer,
         uncommittedBoundaryTokenIDs = [tokenID]
         undeliveredBoundaryTokenIDs.removeAll(keepingCapacity: true)
 
-        if tokenizer.stopTokenIDs.contains(tokenID) || config.extraStopTokens.contains(tokenID) {
+        let modelBoundary = tokenizer.stopTokenIDs.contains(tokenID)
+        let skipModelBoundary = modelBoundary && config.ignoreEOS == true
+        if (modelBoundary && !skipModelBoundary) || config.extraStopTokens.contains(tokenID) {
             // A stop token is never reported as `.token`; record that so a
             // caller can replay exactly this boundary and nothing else.
             undeliveredBoundaryTokenIDs = [tokenID]
@@ -461,7 +463,7 @@ public func runRawCompletion(producer: any LogitProducer,
             return false
         }
 
-        let delta = detok.push(tokenID)
+        let delta = skipModelBoundary ? detok.flush() : detok.push(tokenID)
         let visible = stopMatcher.push(delta)
         onProgress(.token(index: generated - 1, id: tokenID, delta: visible))
 

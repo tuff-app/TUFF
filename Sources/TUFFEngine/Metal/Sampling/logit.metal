@@ -314,10 +314,10 @@ inline float lmhead_gumbel_for(uint64_t seed, uint position, uint row) {
     // splitmix scramble so adjacent rows yield independent draws.
     uint64_t key = seed ^ (uint64_t(position) * 0xD2B74407B1CE6E93ull) ^ uint64_t(row);
     uint64_t r   = lmhead_splitmix64(key);
-    // [0, 1) with 24 mantissa bits; clamp away from zero/one so the double-log
-    // can never overflow. 1/16777216 maps to ~5.96e-8, well above FP32 ULP.
+    // Preserve the existing seeded draws except at the upper endpoint, where
+    // adding 0.5 in Float32 can round the largest draw up to exactly one.
     uint32_t bits = uint32_t(r >> 40);
-    float u = (float(bits) + 0.5f) * (1.0f / 16777216.0f);
+    float u = min((float(bits) + 0.5f) * (1.0f / 16777216.0f), 0x1.fffffep-1f);
     return -log(-log(u));
 }
 
@@ -588,9 +588,8 @@ void sample(
     }
 }
 
-// Specialized Top-64 selection. Each stage reduces sorted
-// 1,024-entry tiles to 64 pairs, so the full 262,144-entry vocabulary reaches
-// one final tile in three dispatches without a full-vocabulary FP32 copy.
+// Hierarchical top-K selection. Each reduction keeps at least K entries
+// from each 1,024-entry tile so the final tile contains the exact top K.
 inline bool sample_topk64_better(float lhs_value, uint lhs_index,
                                  float rhs_value, uint rhs_index) {
     return lhs_value > rhs_value
@@ -635,6 +634,7 @@ void sample_topk64_stage1(
     device float* out_values [[buffer(1)]],
     device uint* out_indices [[buffer(2)]],
     constant uint& V [[buffer(3)]],
+    constant uint& kept_per_tile [[buffer(4)]],
     uint group [[threadgroup_position_in_grid]],
     uint lid [[thread_position_in_threadgroup]]) {
     threadgroup float values[1024];
@@ -653,8 +653,8 @@ void sample_topk64_stage1(
     }
     sample_topk64_sort_tile(values, indices, lid);
 
-    if (lid < 64) {
-        uint destination = group * 64 + lid;
+    if (lid < kept_per_tile) {
+        uint destination = group * kept_per_tile + lid;
         out_values[destination] = values[lid];
         out_indices[destination] = indices[lid];
     }
@@ -667,6 +667,7 @@ void sample_topk64_reduce(
     device float* out_values [[buffer(2)]],
     device uint* out_indices [[buffer(3)]],
     constant uint& count [[buffer(4)]],
+    constant uint& kept_per_tile [[buffer(5)]],
     uint group [[threadgroup_position_in_grid]],
     uint lid [[thread_position_in_threadgroup]]) {
     threadgroup float values[1024];
@@ -681,8 +682,8 @@ void sample_topk64_reduce(
     }
     sample_topk64_sort_tile(values, indices, lid);
 
-    if (lid < 64) {
-        uint destination = group * 64 + lid;
+    if (lid < kept_per_tile) {
+        uint destination = group * kept_per_tile + lid;
         out_values[destination] = values[lid];
         out_indices[destination] = indices[lid];
     }
@@ -711,7 +712,7 @@ void sample_topk64_final(
 
     if (lid == 0) {
         uint kept = 0;
-        while (kept < min(top_k, 64u)
+        while (kept < min(top_k, 256u)
                && indices[kept] != 0xFFFFFFFFu
                && isfinite(values[kept])) {
             kept += 1;

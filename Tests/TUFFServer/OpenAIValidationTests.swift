@@ -103,15 +103,15 @@ struct OpenAIValidationTests {
         #expect(validated.reasoningEffort == .medium)
     }
 
-    @Test func modelSpecificReasoningFieldsFailClosed() throws {
+    @Test func modelSpecificReasoningFieldsResolveByCapability() throws {
         let graded = try JSONDecoder().decode(
             OpenAIChatRequest.self,
             from: Data(#"""
             {"model":"m","messages":[{"role":"user","content":"x"}],"reasoning_effort":"low"}
             """#.utf8))
-        #expect(throws: ServerRequestError.self) {
-            try OpenAIRequestValidator.validate(graded, modelID: "m", dialect: .gemma)
-        }
+        let toggle = try OpenAIRequestValidator.validate(graded, modelID: "m", dialect: .gemma)
+        #expect(toggle.reasoning == .on)
+        #expect(toggle.reasoningEffort == nil)
 
         let binary = try JSONDecoder().decode(
             OpenAIChatRequest.self,

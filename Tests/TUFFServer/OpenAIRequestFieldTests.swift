@@ -230,13 +230,9 @@ struct OpenAIRequestFieldTests {
             harmony, modelID: "m", dialect: .harmony)
         #expect(validated.reasoningEffort == .low)
 
-        // Other families still refuse it through the validator's own message.
-        #expect(throws: ServerRequestError.invalid(
-            message: "reasoning_effort is only supported by GPT-OSS; other models accept none",
-            param: "reasoning_effort",
-            code: "unsupported_parameter")) {
-            try OpenAIRequestValidator.validate(harmony, modelID: "m", dialect: .gemma)
-        }
+        let gemma = try OpenAIRequestValidator.validate(harmony, modelID: "m", dialect: .gemma)
+        #expect(gemma.reasoning == .on)
+        #expect(gemma.reasoningEffort == nil)
 
         let thinking = try Self.decode(#""enable_thinking":true"#)
         #expect(thinking.enableThinking == true)
@@ -294,11 +290,10 @@ struct OpenAIRequestFieldTests {
             try OpenAIRequestValidator.validate(
                 try Self.decode(#""enable_thinking":false"#), modelID: "m", dialect: .harmony)
         }
-        // Graded values stay GPT-OSS only; unknown values are invalid.
-        #expect(throws: ServerRequestError.self) {
-            try OpenAIRequestValidator.validate(
-                try Self.decode(#""reasoning_effort":"high""#), modelID: "m", dialect: .chatml)
-        }
+        let contradictoryEffort = try Self.rejection(
+            #""reasoning_effort":"high","enable_thinking":false"#)
+        #expect(contradictoryEffort.param == "reasoning_effort")
+        #expect(contradictoryEffort.code == "invalid_value")
         for value in [#""minimal""#, "1", "true"] {
             let refused = try Self.rejection(#""reasoning_effort":"# + value)
             #expect(refused.code == "invalid_value")
@@ -307,13 +302,15 @@ struct OpenAIRequestFieldTests {
         #expect(try Self.decode(#""reasoning_effort":null"#).reasoningEffort == nil)
     }
 
-    @Test func ignoreEOSIsAcceptedAndChangesNothing() throws {
+    @Test func ignoreEOSIsForwardedToGeneration() throws {
         let plain = try OpenAIRequestValidator.validate(try Self.decode(""), modelID: "m")
         for value in ["true", "false"] {
             let request = try Self.decode(#""ignore_eos":"# + value)
             #expect(request.ignoreEOS == (value == "true"))
             let validated = try OpenAIRequestValidator.validate(request, modelID: "m")
-            #expect(validated.generationConfig == plain.generationConfig)
+            var expected = plain.generationConfig
+            if value == "true" { expected.ignoreEOS = true }
+            #expect(validated.generationConfig == expected)
             #expect(validated.maximumCompletionTokens == plain.maximumCompletionTokens)
         }
         #expect(throws: (any Error).self) { try Self.decode(#""ignore_eos":"yes""#) }

@@ -115,7 +115,7 @@ import TUFFValidationSupport
             Issue.record("alloc failed"); return nil
         }
         let cb = ctx.queue.makeCommandBuffer()!
-        gdn.encodeInputProjections(commandBuffer: cb, x: xBuf,
+        try gdn.encodeInputProjections(commandBuffer: cb, x: xBuf,
                                    qkv: qkv.view, qkvOut: qkvOut,
                                    z: z.view, zOut: zOut,
                                    a: a.view, aOut: aOut,
@@ -176,7 +176,7 @@ import TUFFValidationSupport
                 Issue.record("alloc failed"); return
             }
             let cb = ctx.queue.makeCommandBuffer()!
-            gdn.encodeInputProjections(commandBuffer: cb, x: xBuf,
+            try gdn.encodeInputProjections(commandBuffer: cb, x: xBuf,
                                        qkv: projection.view, qkvOut: qkvOut,
                                        z: z.view, zOut: zOut,
                                        a: a.view, aOut: aOut,

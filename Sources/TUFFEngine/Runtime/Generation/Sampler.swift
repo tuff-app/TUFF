@@ -47,7 +47,7 @@ final class Sampler {
         self.softcap = try LogitSoftcapSoftmax(context: context, vocab: vocab,
                                                softcap: logitSoftcap)
         self.sampleKernel = try Sample(context: context)
-        self.topK64Kernel = try SampleTopK64(context: context, vocab: vocab)
+        self.topK64Kernel = try SampleTopK64(context: context, vocab: vocab, maxTopK: 256)
         self.vocab = vocab
         self.logitSoftcap = logitSoftcap
         self.penaltySeenWords = [UInt64](repeating: 0, count: (vocab + 63) / 64)
@@ -81,7 +81,7 @@ final class Sampler {
         let isGreedy = config.temperature == 0
         let seed = Self.seedFor(config: config, position: position)
         if config.temperature > 0,
-           let k = config.topK, k == 20 || k == 40 || k == 64 {
+           let k = config.topK, (1...256).contains(k) {
             topK64Kernel.encode(commandBuffer: commandBuffer,
                                 probs: probs,
                                 outToken: outToken,

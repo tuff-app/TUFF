@@ -344,9 +344,7 @@ enum SampleTopK64Error: Error {
 /// Intermediate pairs remain in private GPU memory.
 final class SampleTopK64 {
     private static let tileSize = 1024
-    private static let keptPerTile = 64
-
-    private let ctx: MetalContext
+    private let maxTopK: Int
     private let stage1PSO: MTLComputePipelineState
     private let reducePSO: MTLComputePipelineState
     private let finalPSO: MTLComputePipelineState
@@ -355,27 +353,24 @@ final class SampleTopK64 {
     private let stage2Values: MTLBuffer
     private let stage2Indices: MTLBuffer
     private let stage1Groups: Int
-    private let stage2Groups: Int
-    private let stage1Count: Int
-    private let stage2Count: Int
 
     public let vocab: Int
     public let scratchBytes: Int
 
-    public init(context: MetalContext, vocab: Int) throws {
+    public init(context: MetalContext, vocab: Int, maxTopK: Int = 64) throws {
+        precondition((64...256).contains(maxTopK))
         guard vocab > 0, vocab <= 262_144 else {
             throw SampleTopK64Error.unsupportedVocabulary(vocab)
         }
-        self.ctx = context
+        self.maxTopK = maxTopK
         self.vocab = vocab
         self.stage1PSO = try context.pipeline("sample_topk64_stage1")
         self.reducePSO = try context.pipeline("sample_topk64_reduce")
         self.finalPSO = try context.pipeline("sample_topk64_final")
 
         self.stage1Groups = (vocab + Self.tileSize - 1) / Self.tileSize
-        self.stage1Count = stage1Groups * Self.keptPerTile
-        self.stage2Groups = (stage1Count + Self.tileSize - 1) / Self.tileSize
-        self.stage2Count = stage2Groups * Self.keptPerTile
+        let stage1Count = stage1Groups * maxTopK
+        let stage2Count = ((stage1Count + Self.tileSize - 1) / Self.tileSize) * maxTopK
 
         let stage1ValueBytes = stage1Count * MemoryLayout<Float>.stride
         let stage1IndexBytes = stage1Count * MemoryLayout<UInt32>.stride
@@ -408,7 +403,10 @@ final class SampleTopK64 {
                        topP: Float,
                        seed: UInt64,
                        topK: UInt32 = 64) {
-        precondition((1...64).contains(topK))
+        precondition((1...UInt32(maxTopK)).contains(topK))
+        // Keep the original tile shape for small K and enough ranked entries
+        // per tile to cover the full requested K on each merge.
+        var keptPerTile = max(64, topK)
         let threads = MTLSize(width: 256, height: 1, depth: 1)
 
         if let enc = commandBuffer.makeComputeCommandEncoder() {
@@ -418,30 +416,40 @@ final class SampleTopK64 {
             enc.setBuffer(stage1Indices, offset: 0, index: 2)
             var v = UInt32(vocab)
             enc.setBytes(&v, length: MemoryLayout<UInt32>.size, index: 3)
+            enc.setBytes(&keptPerTile, length: MemoryLayout<UInt32>.size, index: 4)
             enc.dispatchThreadgroups(MTLSize(width: stage1Groups, height: 1, depth: 1),
                                      threadsPerThreadgroup: threads)
             enc.endEncoding()
         }
 
-        if let enc = commandBuffer.makeComputeCommandEncoder() {
+        var count = UInt32(stage1Groups) * keptPerTile
+        var values = stage1Values
+        var indices = stage1Indices
+        var nextValues = stage2Values
+        var nextIndices = stage2Indices
+        while count > UInt32(Self.tileSize) {
+            guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+            let groups = (Int(count) + Self.tileSize - 1) / Self.tileSize
             enc.setComputePipelineState(reducePSO)
-            enc.setBuffer(stage1Values, offset: 0, index: 0)
-            enc.setBuffer(stage1Indices, offset: 0, index: 1)
-            enc.setBuffer(stage2Values, offset: 0, index: 2)
-            enc.setBuffer(stage2Indices, offset: 0, index: 3)
-            var count = UInt32(stage1Count)
+            enc.setBuffer(values, offset: 0, index: 0)
+            enc.setBuffer(indices, offset: 0, index: 1)
+            enc.setBuffer(nextValues, offset: 0, index: 2)
+            enc.setBuffer(nextIndices, offset: 0, index: 3)
             enc.setBytes(&count, length: MemoryLayout<UInt32>.size, index: 4)
-            enc.dispatchThreadgroups(MTLSize(width: stage2Groups, height: 1, depth: 1),
+            enc.setBytes(&keptPerTile, length: MemoryLayout<UInt32>.size, index: 5)
+            enc.dispatchThreadgroups(MTLSize(width: groups, height: 1, depth: 1),
                                      threadsPerThreadgroup: threads)
             enc.endEncoding()
+            count = UInt32(groups) * keptPerTile
+            swap(&values, &nextValues)
+            swap(&indices, &nextIndices)
         }
 
         if let enc = commandBuffer.makeComputeCommandEncoder() {
             enc.setComputePipelineState(finalPSO)
-            enc.setBuffer(stage2Values, offset: 0, index: 0)
-            enc.setBuffer(stage2Indices, offset: 0, index: 1)
+            enc.setBuffer(values, offset: 0, index: 0)
+            enc.setBuffer(indices, offset: 0, index: 1)
             enc.setBuffer(outToken, offset: 0, index: 2)
-            var count = UInt32(stage2Count)
             var temp = temperature
             var p = topP
             var rngSeed = seed

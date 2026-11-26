@@ -482,7 +482,7 @@ import TUFFValidationSupport
                         x: xBuf, y: out,
                         m: UInt32(rows), n: UInt32(hiddenSize))
         }
-        gdn.encodeInputProjections(commandBuffer: cb, x: xBuf,
+        try gdn.encodeInputProjections(commandBuffer: cb, x: xBuf,
                                    qkv: qkv.view, qkvOut: qkvGot,
                                    z: z.view, zOut: zGot,
                                    a: a.view, aOut: aGot,

@@ -10,10 +10,6 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
     /// Rows every prefill buffer is sized for: the configured chunk, never
     /// below the size TUFF shipped with.
     private let prefillQueryCapacity: Int
-    /// The prompt rows one block of `prefillChunked` runs under `config`.
-    func prefillBlockTokens(_ config: PrefillRuntimeConfig) -> Int {
-        max(1, min(config.chunkTokens, prefillQueryCapacity, PrefillRuntimeConfig.maxChunkTokens))
-    }
     private struct LayerViews {
         let inputNorm: TensorView
         let postAttentionNorm: TensorView
@@ -484,9 +480,21 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
 
     func prefillChunked(tokens: ArraySlice<Int32>,
                         startPosition: Int,
+                        outputMode: PrefillOutputMode,
+                        config prefillConfig: PrefillRuntimeConfig,
+                        into logits: MTLBuffer,
+                        onProgress: (Int) -> Void) async throws -> PrefillResult {
+        try await prefillChunked(tokens: tokens, startPosition: startPosition,
+            outputMode: outputMode, config: prefillConfig, into: logits,
+            chunkGate: nil, onProgress: onProgress)
+    }
+
+    func prefillChunked(tokens: ArraySlice<Int32>,
+                        startPosition: Int,
                         outputMode _: PrefillOutputMode,
                         config prefillConfig: PrefillRuntimeConfig,
                         into logits: MTLBuffer,
+                        chunkGate: PrefillChunkGate?,
                         onProgress: (Int) -> Void) async throws -> PrefillResult {
         guard prefillConfig.mode == .chunked else {
             throw PrefillError.chunkedUnsupported(
@@ -516,11 +524,14 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
             let lower = tokens.index(tokens.startIndex,
                                      offsetBy: span.tokenOffset)
             let upper = tokens.index(lower, offsetBy: span.tokenCount)
-            try await executePrefillChunk(
-                tokens: tokens[lower..<upper],
-                startPosition: span.startPosition,
-                emitHead: span.completedCount == tokens.count,
-                logits: logits)
+            func run() async throws {
+                try await executePrefillChunk(
+                    tokens: tokens[lower..<upper],
+                    startPosition: span.startPosition,
+                    emitHead: span.completedCount == tokens.count,
+                    logits: logits)
+            }
+            if let chunkGate { try await chunkGate(run) } else { try await run() }
             let firstCompleted = span.completedCount - span.tokenCount + 1
             for completed in firstCompleted...span.completedCount {
                 onProgress(completed)

@@ -155,7 +155,6 @@ private actor TwoSessionBarrier {
         // More than the runner's blocks hold: the leased path must split at
         // the runner's own blocks (256 rows here), not at the requested size.
         let prefill = PrefillRuntimeConfig.production(chunkTokens: 512)
-        #expect(leased.prefillBlockTokens(prefill) == 256)
         func logitsBuffer() throws -> MTLBuffer {
             try #require(context.device.makeBuffer(
                 length: config.vocabSize * MemoryLayout<Float16>.stride, options: .storageModeShared))
@@ -173,8 +172,13 @@ private actor TwoSessionBarrier {
         #expect(memcmp(expected.contents(), actual.contents(),
                        config.vocabSize * MemoryLayout<Float16>.stride) == 0)
         #expect(leased.continuationPosition == tokens.count)
-        #expect(progress.withLock { $0.last } == tokens.count)
-        #expect(progress.withLock { $0 == $0.sorted() })
+        #expect(progress.withLock { $0 } == [256, 512, tokens.count])
+        let epilogues = Mutex(0)
+        let usedEpilogue = try await leased.produce(token: 7, position: tokens.count, into: actual) { _ in
+            epilogues.withLock { $0 += 1 }
+        }
+        #expect(usedEpilogue)
+        #expect(epilogues.withLock { $0 } == 1)
 
         // Another session queued behind a holder runs before the prompt ends.
         leased.reset()

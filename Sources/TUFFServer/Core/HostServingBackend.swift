@@ -122,12 +122,9 @@ actor HostServingBackend: ServerInferenceBackend {
     /// accepted it.
     private func start(_ request: ValidatedChatRequest, requestID: UUID,
                        correction: String?) async throws {
-        let config = request.generationConfig
-        let force = HostServingTranslation.forceLogitsHead(
-            temperature: config.temperature, repetitionPenalty: config.repetitionPenalty)
         var attempt = 0
         while true {
-            let preparation = try await provider.acquire(descriptor, forceLogitsHead: force)
+            let preparation = try await provider.acquire(descriptor)
             try Task.checkCancellation()
             if staged == nil, !request.imageFiles.isEmpty {
                 staged = try HostServingStagedImages.stage(HostServingTranslation.imageSources(request))
@@ -139,8 +136,14 @@ actor HostServingBackend: ServerInferenceBackend {
                 images: staged?.attachments ?? [:],
                 correction: correction)
             if session == nil {
-                session = await provider.openSession(
-                    model: descriptor.apiModelID, cacheKey: request.promptCacheKey)
+                // Benchmark output may span multiple model turns and cannot
+                // be rendered back as a single assistant turn.
+                if payload.ignoreEOS {
+                    session = (UUID(), false)
+                } else {
+                    session = await provider.openSession(
+                        model: descriptor.apiModelID, cacheKey: request.promptCacheKey)
+                }
             }
             let routed: ServingGenerationRequest
             do {

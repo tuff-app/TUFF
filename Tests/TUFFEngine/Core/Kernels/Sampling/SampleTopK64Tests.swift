@@ -50,10 +50,10 @@ import Testing
         let candidateOutput: MTLBuffer
         let vocab: Int
 
-        init(vocab: Int) throws {
+        init(vocab: Int, maxTopK: Int = 64) throws {
             self.context = try MetalContext()
             self.current = try Sample(context: context)
-            self.candidate = try SampleTopK64(context: context, vocab: vocab)
+            self.candidate = try SampleTopK64(context: context, vocab: vocab, maxTopK: maxTopK)
             self.vocab = vocab
             guard let probs = context.device.makeBuffer(
                       length: vocab * MemoryLayout<Float16>.stride,
@@ -242,6 +242,48 @@ import Testing
                 #expect(result.current == UInt32(expected))
             }
         }
+    }
+
+    @Test func wideTopKMatchesSortedCDFThroughMultipleMerges() throws {
+        let rig = try Rig(vocab: 65_539, maxTopK: 256)
+        // All inputs tie, so the exact surviving IDs are 0 through K-1.
+        // A seed near the end of the CDF exposes a selector capped at 64.
+        rig.write { _ in 1 }
+        for topK: UInt32 in [32, 65, 128, 256] {
+            for seed: UInt64 in [42, 0x1234_5678_9ABC_DEF0, UInt64.max] {
+                var state = seed
+                for _ in 0..<2 {
+                    state ^= state << 13
+                    state ^= state >> 7
+                    state ^= state << 17
+                }
+                let bits = UInt32((state &* 2685821657736338717) >> 40)
+                let threshold = Float(bits) / 16_777_216 * Float(topK)
+                let expected = UInt32(max(0, Int(threshold.rounded(.up)) - 1))
+                let cb = try #require(rig.context.queue.makeCommandBuffer())
+                rig.candidate.encode(commandBuffer: cb, probs: rig.probs, outToken: rig.candidateOutput,
+                                     temperature: 1, topP: 1, seed: seed, topK: topK)
+                cb.commit()
+                cb.waitUntilCompleted()
+                try checkCommandBufferError(cb)
+                #expect(rig.candidateOutput.contents().load(as: UInt32.self) == expected)
+            }
+        }
+    }
+
+    @Test func untruncatedGumbelDrawCannotRoundUpToOne() throws {
+        let rig = try Rig(vocab: 2)
+        rig.write { $0 == 0 ? 1 : 0.000_001 }
+        let cb = try #require(rig.context.queue.makeCommandBuffer())
+        // SplitMix64(seed XOR 1) is UInt64.max. Token 1 used to
+        // receive +infinity and win even at this very low temperature.
+        rig.current.encode(commandBuffer: cb, probs: rig.probs, outToken: rig.currentOutput,
+                           v: 2, temperature: 0.1, topK: 0, topP: 1,
+                           seed: 0x3162_8AF6_7B21_31AA, position: 0)
+        cb.commit()
+        cb.waitUntilCompleted()
+        try checkCommandBufferError(cb)
+        #expect(rig.currentOutput.contents().load(as: UInt32.self) == 0)
     }
 
     @Test func optionalSequentialSamplerTiming() throws {

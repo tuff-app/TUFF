@@ -967,12 +967,12 @@ public actor ServerModelSession: ServerInferenceBackend {
             tokenizer: tokenizer, tools: request.tools,
             reasoning: request.reasoning)
 
-        let checkpointPositions = promptCacheMode == .singlePrefix && multimodalInput == nil
+        let checkpointPositions = config.ignoreEOS != true && promptCacheMode == .singlePrefix && multimodalInput == nil
             ? checkpointPositions(request: request, effectivePromptIDs: effectivePromptIDs)
             : []
         // A system prompt read for the first time is also written to disk,
         // once, so a later process can skip it.
-        let diskSnapshotPosition = prefixSnapshots.flatMap { store in
+        let diskSnapshotPosition = (config.ignoreEOS == true ? nil : prefixSnapshots).flatMap { store in
             instructionPrefixLength(request: request, promptIDs: effectivePromptIDs).flatMap {
                 !store.contains(tokens: Array(effectivePromptIDs.prefix($0)),
                                 domain: promptCacheDomain) ? $0 : nil
@@ -1025,7 +1025,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         // image identity: a later turn whose images differ is refused by
         // `imagesDiverged` rather than resumed onto a KV built from a different
         // picture.
-        if promptCacheMode == .singlePrefix {
+        if config.ignoreEOS != true, promptCacheMode == .singlePrefix {
             conversations.publish(ConversationCache.entry(
                 domain: promptCacheDomain,
                 transcript: request.conversationTranscript,
@@ -1270,7 +1270,7 @@ extension ServerModelSession {
                     case .prefill:
                         break
                     case .token(_, let tokenID, let delta):
-                        let events = try decoder.consume(
+                        let events = config.ignoreEOS == true ? [.content(delta)] : try decoder.consume(
                             tokenID: tokenID, delta: delta)
                         handle(events)
                     case .tail(let text):
@@ -1278,7 +1278,7 @@ extension ServerModelSession {
                         // go through the decoder's channel state explicitly;
                         // appending it directly would leak text held back
                         // inside the thought channel or a tool call.
-                        let events = try decoder.consumeTail(text)
+                        let events = config.ignoreEOS == true ? [.content(text)] : try decoder.consumeTail(text)
                         handle(events)
                     }
                 } catch {
@@ -1294,7 +1294,7 @@ extension ServerModelSession {
         // replayed: a token that ended generation at the length limit, a stop
         // string or a cancellation was already consumed through `.token`, and
         // a second pass would close a Gemma, Qwen or MiniMax call twice.
-        if state.decodingError == nil {
+        if config.ignoreEOS != true, state.decodingError == nil {
             do {
                 for tokenID in result.undeliveredBoundaryTokenIDs {
                     handle(try decoder.consume(tokenID: tokenID, delta: ""))
@@ -1329,7 +1329,7 @@ extension ServerModelSession {
                 cause: .classify(decodingError))
         }
         do {
-            try decoder.finish()
+            if config.ignoreEOS != true { try decoder.finish() }
         } catch {
             throw structuredFailure(
                 kind: .decoderFinish,

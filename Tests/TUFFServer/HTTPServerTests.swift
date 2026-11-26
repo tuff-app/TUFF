@@ -20,11 +20,13 @@ private actor ScriptedServerBackend: ServerInferenceBackend {
             try await Task.sleep(nanoseconds: delayNanoseconds)
         }
         onEvent(.content("hello"))
+        let ignoresEOS = request.generationConfig.ignoreEOS == true
+        let generated = ignoresEOS ? request.maximumCompletionTokens : 1
         return ServerCompletion(
             content: "hello",
             toolCalls: [],
-            finishReason: "stop",
-            usage: OpenAIUsage(promptTokens: 3, completionTokens: 1, totalTokens: 4))
+            finishReason: ignoresEOS ? "length" : "stop",
+            usage: OpenAIUsage(promptTokens: 3, completionTokens: generated, totalTokens: 3 + generated))
     }
 }
 
@@ -369,9 +371,11 @@ struct HTTPServerTests {
         """#.utf8)
         let (data, response) = try await URLSession.shared.data(for: request)
         #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        #expect((response as? HTTPURLResponse)?.value(forHTTPHeaderField: "X-TUFF-Reasoning-Mode") == "off")
         let text = String(decoding: data, as: UTF8.self)
         #expect(text.contains(#""content":"hello""#))
-        #expect(text.contains(#""finish_reason":"stop""#))
+        #expect(text.contains(#""finish_reason":"length""#))
+        #expect(text.contains(#""completion_tokens":64"#))
         #expect(text.hasSuffix("data: [DONE]\n\n"))
 
         try await server.shutdown()

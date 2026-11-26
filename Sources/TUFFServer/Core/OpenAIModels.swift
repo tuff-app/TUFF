@@ -813,6 +813,9 @@ public enum OpenAIRequestValidator {
         }
 
         let isApple = appleModel || ["apple", "apple.on-device"].contains(modelID)
+        if isApple, request.ignoreEOS == true {
+            throw invalid("ignore_eos is unsupported by Apple on-device models", "ignore_eos", "unsupported_parameter")
+        }
         if isApple, request.topK != nil || request.topP != nil || request.seed != nil
             || !(request.stop?.values.isEmpty ?? true) || request.enableThinking == true
             || request.reasoningEffort.map { $0 != OpenAIReasoningEffort.none } == true || !(request.tools?.isEmpty ?? true)
@@ -862,14 +865,15 @@ public enum OpenAIRequestValidator {
             reasoningEffort = thinkingOff ? .low : request.reasoningEffort?.gptOSS ?? .medium
             harmonyCurrentDate = InferenceCalendarDate.calendarDate()
         } else {
-            guard request.reasoningEffort == nil || thinkingOff else {
-                throw invalid(
-                    "reasoning_effort is only supported by GPT-OSS; other models accept none",
-                    "reasoning_effort", "unsupported_parameter")
+            let thinkingRequested = request.reasoningEffort != nil && !thinkingOff
+            if thinkingRequested, request.enableThinking == false {
+                throw invalid("reasoning_effort and enable_thinking false disagree",
+                              "reasoning_effort", "invalid_value")
             }
-            // MiniMax always reasons, and treats thinking off the way it
-            // already treats enable_thinking false.
-            reasoning = dialect == .minimax || request.enableThinking == true ? .on : .off
+            // Other models have a toggle or always reason. They cannot
+            // distinguish the three GPT-OSS effort levels.
+            reasoning = dialect == .minimax || request.enableThinking == true
+                || thinkingRequested ? .on : .off
             reasoningEffort = nil
             harmonyCurrentDate = nil
         }
@@ -896,13 +900,21 @@ public enum OpenAIRequestValidator {
             dialect: dialect,
             preStagedImages: preStagedImages,
             attachmentLease: attachmentLease)
+        if request.ignoreEOS == true,
+           !tools.isEmpty || validatedMessages.messages.contains(where: {
+               $0.role == .tool || !$0.toolCalls.isEmpty
+           }) {
+            throw invalid("ignore_eos requires a request without tools or tool history",
+                          "ignore_eos", "unsupported_parameter")
+        }
         let config = GenerationConfig(maxNewTokens: maximum,
                                       temperature: temperature,
                                       topK: isApple ? nil : topK,
                                       topP: isApple ? nil : topP,
                                       repetitionPenalty: repetitionPenalty,
                                       seed: request.seed,
-                                      stopStrings: request.stop?.values ?? [])
+                                      stopStrings: request.stop?.values ?? [],
+                                      ignoreEOS: request.ignoreEOS == true ? true : nil)
         var validated = ValidatedChatRequest(messages: validatedMessages.messages,
                                     multimodalMessages: validatedMessages.multimodal,
                                     imageFiles: validatedMessages.imageFiles,

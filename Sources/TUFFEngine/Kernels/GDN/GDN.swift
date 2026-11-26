@@ -94,7 +94,7 @@ final class GDN {
                                 z: TensorView, zOut: MTLBuffer,
                                 a: TensorView, aOut: MTLBuffer,
                                 b: TensorView, bOut: MTLBuffer,
-                                hiddenSize: Int) {
+                                hiddenSize: Int) throws {
         precondition(hiddenSize % groupSize == 0,
                      "hiddenSize must be a multiple of \(groupSize)")
         // The row body reads packed weights through a `ushort*`; the repacker
@@ -102,7 +102,9 @@ final class GDN {
         precondition(Int(qkv.offset) % 2 == 0 && Int(z.offset) % 2 == 0 &&
                      Int(a.offset) % 2 == 0 && Int(b.offset) % 2 == 0,
                      "gdn_in_proj_gemv_simd needs 2-aligned weights offsets")
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandBufferFailed("could not encode GDN input projections")
+        }
         encoder.setComputePipelineState(inProjSpecializedPSO ?? inProjPSO)
         for (slot, view) in [qkv, z, a, b].enumerated() {
             encoder.setBuffer(view.buffer, offset: Int(view.offset), index: slot * 3)

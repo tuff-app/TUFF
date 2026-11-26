@@ -2,7 +2,7 @@
 
 ## The local API reads prompts much faster
 
-- Since 10.0, the local API read every prompt one token at a time, as fast as the model writes. Chat and `tuff prompt` read prompts in blocks, so only the API was slow. The API now reads in blocks too. Through `tuff serve` on a 16 GB M2 MacBook Air, a 930-token prompt went from 47 to 51 tokens per second to 438 to 494 on Gemma 4 E2B, and from 8 to 14 to 107 to 168 on Ornith 9B, with the same answers. Flint read at 28 and Inkling 2 Mini at 36.
+- Since 10.0, the local API read every prompt one token at a time, as fast as the model writes. Chat sessions routed through the same shared host were affected too. Standalone `tuff prompt` used batched prefill. The shared host now reads prompts in blocks. Through `tuff serve` on a 16 GB M2 MacBook Air, a 930-token prompt went from 47 to 51 tokens per second to 438 to 494 on Gemma 4 E2B, and from 8 to 14 to 107 to 168 on Ornith 9B, with the same answers. Flint read at 28 and Inkling 2 Mini at 36.
 - The API and Chat can share one loaded model, and a lock keeps them taking turns. Reading a token at a time was how a long prompt avoided holding the lock for its whole length. The lock is now taken once per block, so another request on the same model still gets a turn between blocks. On Inkling 2 Mini a block can take several seconds, so a second request waits that long at most.
 
 ## Repeated conversations are reused again

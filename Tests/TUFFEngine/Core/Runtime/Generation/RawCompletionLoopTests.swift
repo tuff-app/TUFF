@@ -115,6 +115,25 @@ import TUFFValidationSupport
         }
     }
 
+    @Test func benchmarkContinuesAcrossModelBoundaryAndHonorsExplicitStop() async throws {
+        let tokenizer = try await GFTokenizer.load()
+        let boundary = tokenizer.endOfTurnID
+        let word = try #require(tokenizer.encode(" Paris", addBOS: false).first)
+        let config = GenerationConfig(maxNewTokens: 3, temperature: 0, ignoreEOS: true)
+        let (events, result) = try await runLoop(seq: [boundary, word], end: boundary, config: config)
+        #expect(result.reason == .maxTokens)
+        #expect(result.newTokens == 3)
+        #expect(events.tokens.map { $0.1 } == [boundary, word, boundary])
+        #expect(events.tokens.first?.2 == "")
+        #expect(result.undeliveredBoundaryTokenIDs.isEmpty)
+
+        var explicitStop = config
+        explicitStop.extraStopTokens = [boundary]
+        let (_, stopped) = try await runLoop(seq: [boundary, word], end: boundary, config: explicitStop)
+        #expect(stopped.reason == .endOfTurn)
+        #expect(stopped.newTokens == 1)
+    }
+
     func runLoop(seq: [Int32], end: Int32, prompt: String = "go",
                          config: GenerationConfig) async throws -> (Collected, RawDecodeResult) {
         let ctx = try MetalContext()

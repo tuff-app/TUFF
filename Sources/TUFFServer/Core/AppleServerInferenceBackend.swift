@@ -13,6 +13,7 @@ struct AppleServerInferenceBackend: ServerInferenceBackend {
                   message.content.contains { if case .image = $0 { return true }; return false }
               }) != true, request.reasoning == .off, request.reasoningEffort == nil,
               !request.preserveThinking, request.generationConfig.stopStrings.isEmpty,
+              request.generationConfig.ignoreEOS != true,
               request.generationConfig.topK == nil, request.generationConfig.topP == nil,
               request.generationConfig.seed == nil, request.generationConfig.repetitionPenalty == 1 else {
             throw ServerRequestError.invalid(message: "Apple supports text chat, system instructions, temperature and output limits; images, tools, reasoning, stops, seeds and repetition penalties are unsupported.", param: "messages", code: "unsupported_value")

@@ -99,13 +99,14 @@ public struct AppDiagnostics: Equatable, Sendable {
 
     public var prefillTokensPerSecond: Double? {
         guard let promptTokenCount,
-              promptTokenCount > 0,
               let prefillSeconds,
               prefillSeconds.isFinite,
               prefillSeconds > 0 else {
             return nil
         }
-        let rate = Double(promptTokenCount) / prefillSeconds
+        let computedTokens = promptTokenCount - (cachedPromptTokens ?? 0)
+        guard computedTokens > 0 else { return nil }
+        let rate = Double(computedTokens) / prefillSeconds
         return rate.isFinite ? rate : nil
     }
 

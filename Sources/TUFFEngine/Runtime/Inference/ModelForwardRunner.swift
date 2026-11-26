@@ -290,18 +290,15 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         }
     }
 
-    /// The prompt rows one block of `prefillChunked` runs under `config`:
-    /// a caller that splits a prompt there runs the blocks one call would.
-    func prefillBlockTokens(_ config: PrefillRuntimeConfig) -> Int {
-        switch backend {
-        #if !TUFF_ENGINE_GPT_OSS
-        case .affine(let runner): return runner.prefillBlockTokens(config)
-        #endif
-        #if !TUFF_ENGINE_AFFINE_ONLY
-        case .gptOss(let runner): return runner.prefillBlockTokens(config)
-        #endif
-        case .inkling(let runner): return runner.prefillBlockTokens
-        }
+    func prefillChunked(tokens: ArraySlice<Int32>,
+                        startPosition: Int,
+                        outputMode: PrefillOutputMode,
+                        config: PrefillRuntimeConfig,
+                        into logits: MTLBuffer,
+                        onProgress: (Int) -> Void) async throws -> PrefillResult {
+        try await prefillChunked(tokens: tokens, startPosition: startPosition,
+            outputMode: outputMode, config: config, into: logits,
+            chunkGate: nil, onProgress: onProgress)
     }
 
     func prefillChunked(tokens: ArraySlice<Int32>,
@@ -309,6 +306,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
                         outputMode: PrefillOutputMode,
                         config: PrefillRuntimeConfig,
                         into logits: MTLBuffer,
+                        chunkGate: PrefillChunkGate?,
                         onProgress: (Int) -> Void) async throws -> PrefillResult {
         switch backend {
         #if !TUFF_ENGINE_GPT_OSS
@@ -319,6 +317,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
                 outputMode: outputMode,
                 config: config,
                 into: logits,
+                chunkGate: chunkGate,
                 onProgress: onProgress)
         #endif
         #if !TUFF_ENGINE_AFFINE_ONLY
@@ -329,6 +328,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
                 outputMode: outputMode,
                 config: config,
                 into: logits,
+                chunkGate: chunkGate,
                 onProgress: onProgress)
         #endif
         case .inkling(let runner):
@@ -338,6 +338,7 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
                 outputMode: outputMode,
                 config: config,
                 into: logits,
+                chunkGate: chunkGate,
                 onProgress: onProgress)
         }
     }

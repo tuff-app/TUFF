@@ -12,12 +12,6 @@ import TUFFInferenceTypes
 /// `unsupported_value` rather than reshaped into something the model never
 /// saw.
 enum HostServingTranslation {
-    /// Whether the helper needs a real logits head. It is part of the loaded
-    /// model's identity, so a request must be prepared with the same answer.
-    static func forceLogitsHead(temperature: Float, repetitionPenalty: Float) -> Bool {
-        !(temperature == 0 && repetitionPenalty == 1)
-    }
-
     /// One staged image: where its bytes are, and what they hash to.
     struct ImageSource: Equatable {
         let id: UUID
@@ -183,7 +177,7 @@ enum HostServingTranslation {
             conversationKey: request.promptCacheKey,
             // The API refuses an over-long conversation; it never silently
             // drops its oldest turns to make it fit.
-            preservesFullHistory: true)
+            preservesFullHistory: true, ignoreEOS: config.ignoreEOS == true)
     }
 
     /// The error a failed generation maps to.

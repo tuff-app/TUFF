@@ -487,6 +487,7 @@ final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     message: "\(modelID) does not accept images on this Mac",
                     param: "messages", code: "image_input_unavailable")
             }
+            let reasoningMode = request.reasoningEffort?.rawValue ?? request.reasoning.rawValue
             let responseID = (api == .messages ? "msg_" : api == .responses ? "resp_" : "chatcmpl-") + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
             let created = Int(Date().timeIntervalSince1970)
             let adapter = api == .chat ? nil : InferenceAdapterWire(api: api, id: responseID, model: modelID, created: created, dialect: target.dialect)
@@ -507,12 +508,14 @@ final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     // Messages needs the actual prompt count in message_start.
                     // A queued stream can send comments until preparation finishes.
                     future = self.beginAdapterStream(contextBox.value,
-                        frames: api == .messages ? [] : adapter.start())
+                        frames: api == .messages ? [] : adapter.start(),
+                        reasoningMode: reasoningMode)
                 } else {
                     future = self.beginStream(
                         contextBox.value,
                         self.chunk(model: modelID, id: responseID, created: created,
-                                   delta: ["role": "assistant"], finishReason: nil))
+                                   delta: ["role": "assistant"], finishReason: nil),
+                        reasoningMode: reasoningMode)
                 }
                 streamState.setStartFuture(future)
             }
@@ -624,13 +627,15 @@ final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                                               includeUsage: request.includeUsage)
                         }
                     } else if let adapter {
-                        self.writeJSON(contextBox.value, status: .ok, object: try adapter.completed(completion))
+                        self.writeJSON(contextBox.value, status: .ok, object: try adapter.completed(completion),
+                                       reasoningMode: reasoningMode)
                     } else {
                         self.writeCompletion(contextBox.value,
                                              model: modelID,
                                              id: responseID,
                                              created: created,
-                                             completion: completion)
+                                             completion: completion,
+                                             reasoningMode: reasoningMode)
                     }
                 } catch {
                     streamState.stop()
@@ -663,7 +668,8 @@ final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                                  model modelID: String,
                                  id: String,
                                  created: Int,
-                                 completion: ServerCompletion) {
+                                 completion: ServerCompletion,
+                                 reasoningMode: String) {
         let encodedContent: Any =
             completion.content.isEmpty && !completion.toolCalls.isEmpty
                 ? NSNull()
@@ -691,7 +697,7 @@ final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             "usage": usageObject(completion.usage),
             "tuff_timings_seconds": completion.timingSeconds,
         ]
-        writeJSON(context, status: .ok, object: object)
+        writeJSON(context, status: .ok, object: object, reasoningMode: reasoningMode)
     }
 
     private func adapterBytes(_ frames: [AdapterSSEFrame]) -> Data {
@@ -706,12 +712,14 @@ final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     private func beginAdapterStream(_ context: ChannelHandlerContext,
-                                    frames: [AdapterSSEFrame]) -> EventLoopFuture<Void> {
+                                    frames: [AdapterSSEFrame],
+                                    reasoningMode: String) -> EventLoopFuture<Void> {
         let bytes = adapterBytes(frames)
         let box = SendableContext(context)
         let promise = context.eventLoop.makePromise(of: Void.self)
         context.eventLoop.execute {
-            let headers = HTTPHeaders([("content-type", "text/event-stream"), ("cache-control", "no-cache"), ("connection", "keep-alive")])
+            let headers = HTTPHeaders([("content-type", "text/event-stream"), ("cache-control", "no-cache"),
+                                       ("connection", "keep-alive"), ("x-tuff-reasoning-mode", reasoningMode)])
             box.value.write(self.wrapOutboundOut(.head(HTTPResponseHead(version: .http1_1, status: .ok, headers: headers))), promise: nil)
             var buffer = box.value.channel.allocator.buffer(capacity: bytes.count)
             buffer.writeBytes(bytes)
@@ -738,7 +746,8 @@ final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
     private func beginStream(
         _ context: ChannelHandlerContext,
-        _ initialChunk: [String: Any]
+        _ initialChunk: [String: Any],
+        reasoningMode: String
     ) -> EventLoopFuture<Void> {
         guard let data = try? JSONSerialization.data(withJSONObject: initialChunk) else {
             return context.eventLoop.makeFailedFuture(ServerRequestError.invalid(
@@ -750,6 +759,7 @@ final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         headers.add(name: "content-type", value: "text/event-stream")
         headers.add(name: "cache-control", value: "no-cache")
         headers.add(name: "connection", value: "keep-alive")
+        headers.add(name: "x-tuff-reasoning-mode", value: reasoningMode)
         let head = HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)
         let contextBox = SendableContext(context)
         let promise = context.eventLoop.makePromise(of: Void.self)
@@ -947,20 +957,23 @@ final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
     private func writeJSON(_ context: ChannelHandlerContext,
                            status: HTTPResponseStatus,
-                           object: Any) {
+                           object: Any,
+                           reasoningMode: String? = nil) {
         guard let data = try? JSONSerialization.data(withJSONObject: object) else { return }
-        writeData(context, status: status, data: data)
+        writeData(context, status: status, data: data, reasoningMode: reasoningMode)
     }
 
     private func writeData(_ context: ChannelHandlerContext,
                            status: HTTPResponseStatus,
                            data: Data,
-                           closeAfter: Bool = false) {
+                           closeAfter: Bool = false,
+                           reasoningMode: String? = nil) {
         let contextBox = SendableContext(context)
         context.eventLoop.execute {
             var headers = HTTPHeaders()
             headers.add(name: "content-type", value: "application/json")
             headers.add(name: "content-length", value: "\(data.count)")
+            if let reasoningMode { headers.add(name: "x-tuff-reasoning-mode", value: reasoningMode) }
             if closeAfter {
                 headers.add(name: "connection", value: "close")
             }

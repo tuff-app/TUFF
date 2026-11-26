@@ -15,8 +15,7 @@ extension HostRoutedModelProvider {
 
     /// The runtime configuration this adapter would load `descriptor` with:
     /// the same Auto plan `tuff serve` chooses.
-    private func ownPreparation(for descriptor: TUFFModelDescriptor,
-                                forceLogitsHead: Bool) throws
+    private func ownPreparation(for descriptor: TUFFModelDescriptor) throws
         -> (preparation: ServingModelPreparation, plan: AppAutomaticMemoryPlan) {
         guard let automatic = automaticPlan(descriptor) else {
             throw ServerRequestError.modelUnavailable(
@@ -37,7 +36,7 @@ extension HostRoutedModelProvider {
             return (try ServingModelPreparation(
                 modelID: descriptor.apiModelID, maxContextTokens: automatic.contextTokens,
                 runtimeOptions: DecodeServiceInferenceClient.decodeRuntimeOptions(options),
-                forceLogitsHead: forceLogitsHead), automatic)
+                forceLogitsHead: false), automatic)
         } catch let error as ServerRequestError {
             throw error
         } catch {
@@ -57,14 +56,9 @@ extension HostRoutedModelProvider {
     ///
     /// A model the host already holds is used as it is. The API does not
     /// reload a model the app loaded just because its preferred context or
-    /// cache settings differ; the request runs in the resident configuration
-    /// and the host reports a context overflow if it does not fit. The one
-    /// property the helper insists on matching is whether it has a sampling
-    /// logits head (a sampled request needs it, a greedy one must not have
-    /// it). When that differs the model is replaced, keeping the resident
-    /// context and cache settings, but only while the host has no active work.
-    func acquire(_ descriptor: TUFFModelDescriptor,
-                 forceLogitsHead: Bool) async throws -> ServingModelPreparation {
+    /// cache settings differ. Head selection belongs to generation, so both
+    /// greedy and sampled requests can use the same loaded model and sessions.
+    func acquire(_ descriptor: TUFFModelDescriptor) async throws -> ServingModelPreparation {
         let modelID = descriptor.apiModelID
         await retryFailedSessionEnds()
         for attempt in 0..<2 {
@@ -74,38 +68,16 @@ extension HostRoutedModelProvider {
             let loaded = status.loadedModels.first { $0.modelID == modelID }
             var target: ServingModelPreparation
             var plan: AppAutomaticMemoryPlan?
-            var adopted = false
-            var weLoad = false
-            var replacedOwnModel = false
             if let loaded {
-                if loaded.forceLogitsHead == forceLogitsHead {
-                    target = try ServingModelPreparation(
-                        modelID: modelID, maxContextTokens: loaded.maxContextTokens,
-                        runtimeOptions: loaded.runtimeOptions, forceLogitsHead: forceLogitsHead)
-                    adopted = true
-                } else {
-                    guard status.activeRequests == 0 else {
-                        throw ServerRequestError.modelBusy(
-                            "\(descriptor.displayName) is in use by another TUFF client in a mode this request cannot share. Retry when it is idle.")
-                    }
-                    replacedOwnModel = state.withLock { current in
-                        current.apiLoaded[modelID].map { Self.sameConfiguration($0, loaded) } ?? false
-                    }
-                    guard try await link.unload(modelID: modelID) else {
-                        throw ServerRequestError.modelBusy(
-                            "\(descriptor.displayName) is in use by another TUFF client. Retry when it is idle.")
-                    }
-                    ServerLog.modelUnloaded(modelID)
-                    target = try ServingModelPreparation(
-                        modelID: modelID, maxContextTokens: loaded.maxContextTokens,
-                        runtimeOptions: loaded.runtimeOptions, forceLogitsHead: forceLogitsHead)
-                }
+                target = try ServingModelPreparation(
+                    modelID: modelID, maxContextTokens: loaded.maxContextTokens,
+                    runtimeOptions: loaded.runtimeOptions, forceLogitsHead: loaded.forceLogitsHead)
             } else {
-                let own = try ownPreparation(for: descriptor, forceLogitsHead: forceLogitsHead)
+                let own = try ownPreparation(for: descriptor)
                 target = own.preparation
                 plan = own.plan
-                weLoad = true
             }
+            let weLoad = loaded == nil
             state.withLock { $0.transition = weLoad ? "loading \(modelID)" : nil }
             defer { state.withLock { $0.transition = nil } }
             do {
@@ -119,10 +91,7 @@ extension HostRoutedModelProvider {
                 if weLoad {
                     current.apiLoaded[modelID] = target
                     current.ranOwnPlan[modelID] = true
-                } else if replacedOwnModel {
-                    current.apiLoaded[modelID] = target
-                    current.ranOwnPlan[modelID] = false
-                } else if let loaded, adopted,
+                } else if let loaded,
                           let mine = current.apiLoaded[modelID], Self.sameConfiguration(mine, loaded) {
                     current.ranOwnPlan[modelID] = true
                 } else {

@@ -54,6 +54,11 @@ import Testing
 
         #expect(abs((diagnostics.prefillTokensPerSecond ?? 0) - 3.241491) < 0.000001)
 
+        diagnostics.cachedPromptTokens = 10
+        #expect(abs((diagnostics.prefillTokensPerSecond ?? 0) - 1.620746) < 0.000001)
+        diagnostics.cachedPromptTokens = 20
+        #expect(diagnostics.prefillTokensPerSecond == nil)
+        diagnostics.cachedPromptTokens = nil
         diagnostics.promptTokenCount = 0
         #expect(diagnostics.prefillTokensPerSecond == nil)
         diagnostics.promptTokenCount = 20

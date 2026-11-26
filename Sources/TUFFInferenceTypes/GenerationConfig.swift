@@ -7,6 +7,9 @@ public struct GenerationConfig: Codable, Sendable, Equatable {
     public var seed: UInt64? = nil         // nil = nondeterministic
     public var stopStrings: [String] = []
     public var extraStopTokens: Set<Int32> = []
+    /// Plain-text benchmark mode keeps sampling after a model stop marker.
+    /// Optional for compatibility with previously encoded configurations.
+    public var ignoreEOS: Bool?
     public var speculative: SpeculativeDecodeConfig = .off
 
     public init(maxNewTokens: Int = 256,
@@ -17,7 +20,7 @@ public struct GenerationConfig: Codable, Sendable, Equatable {
                 seed: UInt64? = nil,
                 stopStrings: [String] = [],
                 extraStopTokens: Set<Int32> = [],
-                speculative: SpeculativeDecodeConfig = .off) {
+                speculative: SpeculativeDecodeConfig = .off, ignoreEOS: Bool? = nil) {
         self.maxNewTokens = maxNewTokens
         self.temperature = temperature
         self.topK = topK
@@ -27,6 +30,7 @@ public struct GenerationConfig: Codable, Sendable, Equatable {
         self.stopStrings = stopStrings
         self.extraStopTokens = extraStopTokens
         self.speculative = speculative
+        self.ignoreEOS = ignoreEOS
     }
 
     /// Compatibility overload retained for clients built against the

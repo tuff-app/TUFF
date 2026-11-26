@@ -373,11 +373,10 @@ private func post(_ port: Int, _ body: [String: Any], path: String = "/v1/chat/c
         #expect(payload.tools == nil && payload.currentRounds == nil && payload.imageAttachments == nil)
         #expect(payload.preservesFullHistory)
         #expect(payload.generationID == started.requestID)
-        // The model was prepared once, with the plan's configuration and a
-        // sampling logits head because the request samples.
+        // A sampled request uses the same preparation as a greedy request.
         let prepares = h.host.record.withLock { $0.prepares }
         #expect(prepares.count == 1)
-        #expect(prepares[0].maxContextTokens == 8_192 && prepares[0].forceLogitsHead)
+        #expect(prepares[0].maxContextTokens == 8_192 && !prepares[0].forceLogitsHead)
         #expect(prepares[0].runtimeOptions == payload.runtimeOptions)
         try await server.shutdown()
         await h.finish()
@@ -698,34 +697,48 @@ private func post(_ port: Int, _ body: [String: Any], path: String = "/v1/chat/c
         await h.finish()
     }
 
-    @Test func replacingOwnSamplingModelPreservesIdleUnloadOwnership() async throws {
+    @Test func alternatingSamplingKeepsOneLoadAndPreservesIdleUnloadOwnership() async throws {
         let h = try Harness(); defer { Task { await h.finish() } }
         _ = try await h.complete(try h.validated([user("sample")], extra: ["temperature": 0.8]))
         _ = try await h.complete(try h.validated([user("greedy")], extra: ["temperature": 0]))
-        #expect(h.host.record.withLock { $0.loads.count } == 2)
+        #expect(h.host.record.withLock { $0.loads.count } == 1)
         #expect(await h.provider.unloadIfIdle())
         #expect(h.host.record.withLock { $0.resident.isEmpty })
-        #expect(h.host.record.withLock { $0.unloads.count } == 2)
+        #expect(h.host.record.withLock { $0.unloads.count } == 1)
         await h.finish()
     }
 
-    @Test func aGreedyRequestAgainstASamplingModelReplacesItOnlyWhenIdle() async throws {
+    @Test func fixedLengthBenchmarkUsesAPrivateSession() async throws {
+        let h = try Harness(); defer { Task { await h.finish() } }
+        let plain = try h.validated([user("regular chat")], extra: ["prompt_cache_key": "same"])
+        let benchmark = try h.validated([user("benchmark")],
+            extra: ["ignore_eos": true, "prompt_cache_key": "same"])
+        _ = try await h.complete(plain)
+        _ = try await h.complete(benchmark)
+        _ = try await h.complete(plain)
+        let started = h.host.record.withLock { $0.started }
+        try #require(started.count == 3)
+        #expect(started[1].payload.ignoreEOS)
+        #expect(started[1].sessionID != started[0].sessionID)
+        #expect(started[2].sessionID == started[0].sessionID)
+        await h.finish()
+    }
+
+    @Test func aGreedyRequestAdoptsAnExistingLogitsOnlyModel() async throws {
         let h = try Harness(); defer { Task { await h.finish() } }
         let resident = try ServingModelPreparation(
             modelID: model.apiModelID, maxContextTokens: 4_096,
             runtimeOptions: DecodeRuntimeOptions(), forceLogitsHead: true)
-        h.host.record.withLock { $0.resident[model.apiModelID] = resident }
+        h.host.record.withLock {
+            $0.resident[model.apiModelID] = resident
+            $0.active = 1
+        }
         let greedy = try h.validated([user("x")], extra: ["temperature": 0])
-        h.host.record.withLock { $0.active = 1 }
-        await #expect(throws: ServerRequestError.self) { _ = try await h.complete(greedy) }
-        #expect(h.host.record.withLock { $0.unloads.isEmpty })
-        h.host.record.withLock { $0.active = 0 }
         #expect(try await h.complete(greedy).content == "Paris")
         let record = h.host.record.withLock { $0 }
-        #expect(record.unloads == [model.apiModelID] && record.loads == [model.apiModelID])
-        // The resident context and cache settings were kept.
+        #expect(record.unloads.isEmpty && record.loads.isEmpty)
         #expect(record.resident[model.apiModelID]?.maxContextTokens == 4_096)
-        #expect(record.resident[model.apiModelID]?.forceLogitsHead == false)
+        #expect(record.resident[model.apiModelID]?.forceLogitsHead == true)
         await h.finish()
     }
 

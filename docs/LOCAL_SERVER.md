@@ -114,11 +114,12 @@ behavior. `chat_template_kwargs` accepts only `enable_thinking` and
 random seed and the default limit of 4,096 tokens. Other clients for local
 servers send them that way.
 
-`ignore_eos` is accepted and ignored. The reply still ends where the model
-ends its turn, and `usage.completion_tokens` counts the tokens it really
-wrote. Benchmark clients such as gBench always send it, so it is accepted
-rather than refused. With a benchmark, expect replies shorter than
-`max_tokens`, and compare speeds per token, not per reply.
+`ignore_eos: true` runs a plain-text benchmark in a fresh session. Model stop
+markers count toward the output budget without appearing as text. Generation
+keeps going until the requested limit, an explicit stop string, or the context
+limit. The benchmark bypasses structured reply parsing and does not reuse
+conversation state. Requests with tools or tool history and Apple on-device
+requests cannot use this mode.
 
 ### Messages and Responses
 
@@ -149,12 +150,12 @@ Turning thinking on or off:
 | MiniMax | Always thinks. |
 | Every other model | `enable_thinking` (or `chat_template_kwargs.enable_thinking`). Off by default. |
 
-`reasoning_effort: "none"` works with every model and means thinking off.
-GPT-OSS can't skip reasoning, so there it means `low`, and
-`enable_thinking: false` is accepted next to it. MiniMax keeps thinking, as it
-does with `enable_thinking: false`. Sending `"none"` together with
-`enable_thinking: true` is refused with `invalid_value`. The other
-`reasoning_effort` values work only with GPT-OSS.
+`reasoning_effort: "none"` turns thinking off on models with a thinking
+switch. On GPT-OSS it means `low`. MiniMax always reasons. For models with a
+thinking switch, `low`, `medium`, and `high` all turn thinking on. GPT-OSS
+distinguishes those levels. Contradictory thinking settings return
+`invalid_value`. Successful responses report the effective mode in the
+`X-TUFF-Reasoning-Mode` header.
 
 ## Prompt reuse
 
