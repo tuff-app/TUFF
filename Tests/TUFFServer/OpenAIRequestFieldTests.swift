@@ -290,10 +290,13 @@ struct OpenAIRequestFieldTests {
             try OpenAIRequestValidator.validate(
                 try Self.decode(#""enable_thinking":false"#), modelID: "m", dialect: .harmony)
         }
-        let contradictoryEffort = try Self.rejection(
+        let contradictoryEffort = try Self.decode(
             #""reasoning_effort":"high","enable_thinking":false"#)
-        #expect(contradictoryEffort.param == "reasoning_effort")
-        #expect(contradictoryEffort.code == "invalid_value")
+        #expect(throws: ServerRequestError.invalid(
+            message: "reasoning_effort and enable_thinking false disagree",
+            param: "reasoning_effort", code: "invalid_value")) {
+                try OpenAIRequestValidator.validate(contradictoryEffort, modelID: "m", dialect: .chatml)
+        }
         for value in [#""minimal""#, "1", "true"] {
             let refused = try Self.rejection(#""reasoning_effort":"# + value)
             #expect(refused.code == "invalid_value")
