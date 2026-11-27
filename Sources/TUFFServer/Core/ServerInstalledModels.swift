@@ -213,7 +213,8 @@ public struct ServerInstalledModels: Sendable {
 
     /// Adds a finished request to Auto's history under the settings the
     /// server loaded the model with. Nil when Auto did not choose them.
-    public func autoRecorder(for descriptor: TUFFModelDescriptor) -> (@Sendable (ServerCompletion) -> Void)? {
+    func autoRecorder(for descriptor: TUFFModelDescriptor, request: ValidatedChatRequest)
+        -> (@Sendable (ServerCompletion) -> Void)? {
         let directory = directory(for: descriptor)
         guard let summary = AppAutomaticMemoryPlanner.layoutSummary(at: directory),
               let plan = ServerLoadedPlans.plan(for: directory),
@@ -224,12 +225,13 @@ public struct ServerInstalledModels: Sendable {
             residentDenseLayers: layers, prefillChunkTokens: plan.prefillChunkTokens)
         let device = device
         let window = AppAutoObservationWindow.begin()
-        let started = ContinuousClock.now
+        let sampled = request.generationConfig.temperature != 0
+        let imageInput = !request.imageFiles.isEmpty
         return { completion in
-            let elapsed = started.duration(to: .now)
-            let seconds = Double(elapsed.components.seconds)
-                + Double(elapsed.components.attoseconds) / 1e18
-            let firstToken = completion.timingSeconds["generation_to_first_event"] ?? 0
+            let timings = completion.timingSeconds
+            guard let prefill = timings["host_prefill"],
+                  let firstToken = timings["host_first_token"],
+                  let decode = timings["host_decode"] else { return }
             AppAutoPerformanceRecords.record(
                 identity: AppAutoPerformanceRecords.identity(
                     summary: summary, device: device, modelDirectory: directory),
@@ -238,10 +240,10 @@ public struct ServerInstalledModels: Sendable {
                     workloadKey: AppAutoPerformanceRecords.workloadKey(
                         promptTokens: completion.usage.promptTokens,
                         reusedPrefix: completion.usage.promptTokensDetails.cachedTokens > 0,
-                        imageInput: false),
+                        imageInput: imageInput, sampled: sampled),
                     decodeTokens: completion.usage.completionTokens,
-                    decodeSeconds: max(0, seconds - firstToken),
-                    timeToFirstTokenSeconds: firstToken))
+                    decodeSeconds: decode,
+                    timeToFirstTokenSeconds: prefill + firstToken))
         }
     }
 

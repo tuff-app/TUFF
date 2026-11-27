@@ -162,7 +162,7 @@ enum HostServingTranslation {
             maxContextTokens: maxContextTokens,
             reasoning: DecodeChatReasoning(rawValue: request.reasoning.rawValue) ?? .off,
             reasoningEffort: request.reasoningEffort.flatMap {
-                DecodeGPTOSSReasoningEffort(rawValue: $0.rawValue)
+                DecodeModelReasoningEffort(rawValue: $0.rawValue)
             },
             preserveThinking: request.preserveThinking,
             temperature: config.temperature,
@@ -206,14 +206,46 @@ enum HostServingTranslation {
 /// Holds back the tail of streamed text that could still become a stop
 /// string, so a stop sequence split across chunks is found and never emitted.
 struct HostServingStopFilter {
-    private let stops: [String]
-    private let holdScalars: Int
+    private struct Stop {
+        let text: String
+        let scalars: [Unicode.Scalar]
+        let fallback: [Int]
+
+        init(_ text: String) {
+            self.text = text
+            let scalars = Array(text.unicodeScalars)
+            self.scalars = scalars
+            var fallback = Array(repeating: 0, count: scalars.count)
+            var matched = 0
+            for index in scalars.indices.dropFirst() {
+                while matched > 0 && scalars[index] != scalars[matched] {
+                    matched = fallback[matched - 1]
+                }
+                if scalars[index] == scalars[matched] { matched += 1 }
+                fallback[index] = matched
+            }
+            self.fallback = fallback
+        }
+
+        func partialMatch(atEndOf text: String) -> Int {
+            var matched = 0
+            // A future match can only start within the last patternLength - 1 scalars.
+            for scalar in text.unicodeScalars.suffix(scalars.count - 1) {
+                while matched > 0 && scalar != scalars[matched] {
+                    matched = fallback[matched - 1]
+                }
+                if scalar == scalars[matched] { matched += 1 }
+            }
+            return matched
+        }
+    }
+
+    private let stops: [Stop]
     private var buffer = ""
     private(set) var matched = false
 
     init(stops: [String]) {
-        self.stops = stops.filter { !$0.isEmpty }
-        holdScalars = max(0, (self.stops.map { $0.unicodeScalars.count }.max() ?? 1) - 1)
+        self.stops = stops.filter { !$0.isEmpty }.map(Stop.init)
     }
 
     var isActive: Bool { !stops.isEmpty }
@@ -225,21 +257,19 @@ struct HostServingStopFilter {
         buffer += text
         var earliest: Range<String.Index>?
         for stop in stops {
-            if let range = buffer.range(of: stop, options: .literal),
+            if let range = buffer.range(of: stop.text, options: .literal),
                earliest.map({ range.lowerBound < $0.lowerBound }) ?? true {
                 earliest = range
             }
         }
         if let earliest {
             matched = true
-            let output = String(buffer[..<earliest.lowerBound])
+            let output = String(buffer.unicodeScalars[..<earliest.lowerBound])
             buffer = ""
             return output
         }
-        let count = buffer.unicodeScalars.count
-        guard count > holdScalars else { return "" }
-        let split = buffer.unicodeScalars.index(buffer.unicodeScalars.startIndex,
-                                                offsetBy: count - holdScalars)
+        let retained = stops.map { $0.partialMatch(atEndOf: buffer) }.max() ?? 0
+        let split = buffer.unicodeScalars.index(buffer.unicodeScalars.endIndex, offsetBy: -retained)
         let output = String(buffer.unicodeScalars[..<split])
         buffer = String(buffer.unicodeScalars[split...])
         return output

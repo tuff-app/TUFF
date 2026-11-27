@@ -63,3 +63,5 @@ __pycache__/
 !.env.example
 *.pem
 *.key
+credentials.json
+signing-key

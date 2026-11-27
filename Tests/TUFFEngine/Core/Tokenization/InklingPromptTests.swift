@@ -42,6 +42,16 @@ import TUFFInferenceTypes
         #expect(try render([.init(role: .system, content: "Only this.")]) == expected["system_only"])
     }
 
+    @Test(arguments: [(ModelReasoningEffort.low, "0.2"), (.medium, "0.7"), (.high, "0.9")])
+    func explicitReasoningEffortsMatchThePublisherTemplate(level: ModelReasoningEffort, number: String) throws {
+        let expected = try #require(try Self.rendered()["user_thinking"])
+        let messages: [InferenceChatMessage] = [.init(role: .user, content: "Hello")]
+        let rendered = try InklingPrompt.render(messages: messages, tools: [], reasoning: .on,
+                                                reasoningEffort: level)
+        #expect(rendered == expected.replacingOccurrences(of: "Thinking effort level: 0.9",
+                                                          with: "Thinking effort level: \(number)"))
+    }
+
     @Test func toolDeclarationsCallsAndResultsMatchThePublisherTemplate() throws {
         let expected = try Self.rendered()
         #expect(try InklingPrompt.render(

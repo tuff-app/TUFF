@@ -32,7 +32,7 @@ public enum DecodeGenerationTranslation {
             maxContextTokens: request.maxContextTokens,
             reasoning: DecodeChatReasoning(rawValue: request.reasoning.rawValue) ?? .off,
             reasoningEffort: request.reasoningEffort.flatMap {
-                DecodeGPTOSSReasoningEffort(rawValue: $0.rawValue)
+                DecodeModelReasoningEffort(rawValue: $0.rawValue)
             },
             preserveThinking: request.preserveThinking,
             temperature: request.temperature,

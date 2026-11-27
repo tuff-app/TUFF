@@ -656,7 +656,8 @@ public struct GFTokenizer: @unchecked Sendable {
         _ messages: [Message],
         modelVariant: ModelVariant? = nil,
         reasoning: ChatReasoning = .off,
-        preserveThinking: Bool
+        preserveThinking: Bool,
+        reasoningEffort: ModelReasoningEffort? = nil
     ) throws -> String {
         let messages = Self.mergingLeadingSystemMessages(messages)
         switch dialect {
@@ -678,7 +679,8 @@ public struct GFTokenizer: @unchecked Sendable {
             return try FlintPrompt.render(messages: messages, tools: [],
                 preserveThinking: preserveThinking, addGenerationPrompt: true)
         case .inkling:
-            return try InklingPrompt.render(messages: messages, tools: [], reasoning: reasoning)
+            return try InklingPrompt.render(messages: messages, tools: [], reasoning: reasoning,
+                                            reasoningEffort: reasoningEffort)
         }
     }
 
@@ -877,7 +879,8 @@ public struct GFTokenizer: @unchecked Sendable {
                                tools: [FunctionDefinition],
                                reasoning: ChatReasoning = .off,
                                preserveThinking: Bool,
-                               addGenerationPrompt: Bool = true) throws -> [Int32] {
+                               addGenerationPrompt: Bool = true,
+                               reasoningEffort: ModelReasoningEffort? = nil) throws -> [Int32] {
         if dialect == .flint {
             let prompt = try FlintPrompt.render(messages: messages, tools: tools,
                 preserveThinking: preserveThinking, addGenerationPrompt: addGenerationPrompt)
@@ -885,8 +888,8 @@ public struct GFTokenizer: @unchecked Sendable {
         }
         if dialect == .inkling {
             // The template has no generation prompt to add or leave out.
-            return encode(try InklingPrompt.render(messages: messages, tools: tools, reasoning: reasoning),
-                          addBOS: false)
+            return encode(try InklingPrompt.render(messages: messages, tools: tools, reasoning: reasoning,
+                                                   reasoningEffort: reasoningEffort), addBOS: false)
         }
         guard dialect != .harmony else {
             throw GFTokenizerError.unsupportedForDialect(

@@ -384,7 +384,7 @@ final class DecodeService: @unchecked Sendable {
             reasoning: ChatReasoning(
                 rawValue: request.reasoning.rawValue) ?? .off,
             reasoningEffort: request.reasoningEffort.flatMap {
-                GPTOSSReasoningEffort(rawValue: $0.rawValue)
+                ModelReasoningEffort(rawValue: $0.rawValue)
             },
             preserveThinking: request.preserveThinking,
             temperature: request.temperature,

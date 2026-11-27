@@ -118,12 +118,14 @@ import Testing
 
     /// Every block size up to past the largest tile, and a column count that
     /// ends inside a tile.
-    @Test(arguments: [true, false])
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice()?.supportsFamily(.apple8) == true
+                      && ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26,
+                   "Metal tensor operations are unavailable on this device"),
+          arguments: [true, false])
     func expertProductsMatchThePerRowKernels(nvfp4: Bool) throws {
         let context = try MetalContext()
         try context.prepareKernelGroups([.core, .inkling])
-        // Systems without the tensor pipeline read blocks with the per-row kernels.
-        guard let batched = InklingBatchedProducts(context: context) else { return }
+        let batched = try #require(InklingBatchedProducts(context: context))
         let kernels = try InklingKernels(context: context)
         let columns = 256, outRows = 200, maxRows = 70
         var generator = Generator()

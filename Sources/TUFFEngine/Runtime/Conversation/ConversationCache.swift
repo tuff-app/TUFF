@@ -36,7 +36,7 @@ public struct ConversationTranscript: Sendable, Equatable {
     public var imageIdentities: [[String]]?
     public var tools: [GFTokenizer.FunctionDefinition]
     public var reasoning: ChatReasoning
-    public var reasoningEffort: GPTOSSReasoningEffort?
+    public var reasoningEffort: ModelReasoningEffort?
     public var harmonyCurrentDate: String?
     public var preserveThinking: Bool
 
@@ -44,7 +44,7 @@ public struct ConversationTranscript: Sendable, Equatable {
                 imageIdentities: [[String]]? = nil,
                 tools: [GFTokenizer.FunctionDefinition] = [],
                 reasoning: ChatReasoning = .off,
-                reasoningEffort: GPTOSSReasoningEffort? = nil,
+                reasoningEffort: ModelReasoningEffort? = nil,
                 harmonyCurrentDate: String? = nil,
                 preserveThinking: Bool = false) {
         self.messages = messages
@@ -62,7 +62,7 @@ public struct ConversationTranscript: Sendable, Equatable {
         messages: [GFTokenizer.Message],
         tools: [GFTokenizer.FunctionDefinition] = [],
         reasoning: ChatReasoning = .off,
-        reasoningEffort: GPTOSSReasoningEffort? = nil,
+        reasoningEffort: ModelReasoningEffort? = nil,
         harmonyCurrentDate: String? = nil,
         preserveThinking: Bool = false
     ) -> ConversationTranscript {

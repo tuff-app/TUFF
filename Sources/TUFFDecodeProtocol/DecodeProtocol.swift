@@ -132,11 +132,13 @@ public enum DecodeChatReasoning: String, Codable, Sendable, Equatable {
     case on
 }
 
-public enum DecodeGPTOSSReasoningEffort: String, Codable, Sendable, Equatable {
+public enum DecodeModelReasoningEffort: String, Codable, Sendable, Equatable {
     case low
     case medium
     case high
 }
+
+public typealias DecodeGPTOSSReasoningEffort = DecodeModelReasoningEffort
 
 public struct DecodeGenerationRequest: Codable, Sendable {
     public var prompt: String
@@ -154,7 +156,7 @@ public struct DecodeGenerationRequest: Codable, Sendable {
     public var maxContextTokens: Int
     /// Decoded as off for compatibility with v1 app clients.
     public var reasoning: DecodeChatReasoning
-    public var reasoningEffort: DecodeGPTOSSReasoningEffort?
+    public var reasoningEffort: DecodeModelReasoningEffort?
     public var preserveThinking: Bool
     public var temperature: Float
     /// Carried explicitly, and optional because nil means "no cut". Leaving
@@ -192,7 +194,7 @@ public struct DecodeGenerationRequest: Codable, Sendable {
         reasoning = try container.decodeIfPresent(
             DecodeChatReasoning.self, forKey: .reasoning) ?? .off
         reasoningEffort = try container.decodeIfPresent(
-            DecodeGPTOSSReasoningEffort.self, forKey: .reasoningEffort)
+            DecodeModelReasoningEffort.self, forKey: .reasoningEffort)
         preserveThinking = try container.decodeIfPresent(
             Bool.self, forKey: .preserveThinking) ?? false
         temperature = try container.decode(Float.self, forKey: .temperature)
@@ -218,7 +220,7 @@ public struct DecodeGenerationRequest: Codable, Sendable {
                 imageAttachments: [DecodeImageAttachment]? = nil,
                 maxNewTokens: Int, maxContextTokens: Int,
                 reasoning: DecodeChatReasoning = .off,
-                reasoningEffort: DecodeGPTOSSReasoningEffort? = nil,
+                reasoningEffort: DecodeModelReasoningEffort? = nil,
                 preserveThinking: Bool = false,
                 temperature: Float, topK: Int? = nil, topP: Float? = nil,
                 repetitionPenalty: Float = 1,

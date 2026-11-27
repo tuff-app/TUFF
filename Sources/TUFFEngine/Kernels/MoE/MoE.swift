@@ -48,6 +48,17 @@ final class MoE {
     /// Routed experts the streamed kernels can hold blobs for. Matches
     /// `kMaxStreamedExperts` in `quant_group.metal`.
     static let maxStreamedExperts = 16
+
+    enum ConfigurationError: Error, Equatable, LocalizedError {
+        case invalidRoutedExpertCount(Int)
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidRoutedExpertCount(let count):
+                return "Routed expert count \(count) must be between 1 and \(MoE.maxStreamedExperts)."
+            }
+        }
+    }
     /// The count every checkpoint routed until Qwen3.8 Flash Next, which
     /// selects ten of its 512 experts.
     static let defaultStreamedExperts = 8
@@ -110,8 +121,9 @@ final class MoE {
         precondition(Quantization.supportedGroupSizes.contains(groupSize),
                      "unsupported affine group size \(groupSize)")
         precondition(!floatIntermediate || wideIntermediate)
-        precondition(topKExperts > 0 && topKExperts <= Self.maxStreamedExperts,
-                     "routed top-k \(topKExperts) exceeds the streamed blob array")
+        guard (1...Self.maxStreamedExperts).contains(topKExperts) else {
+            throw ConfigurationError.invalidRoutedExpertCount(topKExperts)
+        }
         self.realDecodeD = specializedD
         self.realDecodeF = specializedF
         self.realDecodeNumExperts = specializedNumExperts

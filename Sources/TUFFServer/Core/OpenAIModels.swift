@@ -138,12 +138,11 @@ public struct OpenAIStreamOptions: Codable, Equatable, Sendable {
     }
 }
 
-/// `reasoning_effort` as a request may send it: OpenAI's `none` plus the
-/// three GPT-OSS levels.
+/// `reasoning_effort` as a request may send it: `none` plus three graded levels.
 public enum OpenAIReasoningEffort: String, Codable, Equatable, Sendable {
     case none, low, medium, high
 
-    var gptOSS: GPTOSSReasoningEffort? { GPTOSSReasoningEffort(rawValue: rawValue) }
+    var gradedEffort: ModelReasoningEffort? { ModelReasoningEffort(rawValue: rawValue) }
 }
 
 public struct OpenAIChatRequest: Codable, Equatable, Sendable {
@@ -658,7 +657,7 @@ public struct ValidatedChatRequest: Codable, Sendable {
     public let maximumCompletionTokens: Int
     public let reasoning: ChatReasoning
     public let preserveThinking: Bool
-    public let reasoningEffort: GPTOSSReasoningEffort?
+    public let reasoningEffort: ModelReasoningEffort?
     /// The local calendar day rendered into Harmony's system message. It is
     /// captured during validation so queued requests and cache comparisons do
     /// not change identity across midnight.
@@ -689,7 +688,7 @@ public struct ValidatedChatRequest: Codable, Sendable {
         maximumCompletionTokens: Int,
         reasoning: ChatReasoning = .off,
         preserveThinking: Bool = false,
-        reasoningEffort: GPTOSSReasoningEffort? = nil,
+        reasoningEffort: ModelReasoningEffort? = nil,
         harmonyCurrentDate: String? = nil
     ) {
         self.messages = messages
@@ -720,7 +719,7 @@ public struct ValidatedChatRequest: Codable, Sendable {
         maximumCompletionTokens: Int,
         reasoning: ChatReasoning,
         preserveThinking: Bool,
-        reasoningEffort: GPTOSSReasoningEffort?,
+        reasoningEffort: ModelReasoningEffort?,
         harmonyCurrentDate: String?,
         attachmentLeases: [ServerAttachmentLease]
     ) {
@@ -851,7 +850,7 @@ public enum OpenAIRequestValidator {
                           "invalid_value")
         }
         let reasoning: ChatReasoning
-        let reasoningEffort: GPTOSSReasoningEffort?
+        let reasoningEffort: ModelReasoningEffort?
         let harmonyCurrentDate: String?
         if dialect == .harmony {
             // GPT-OSS always reasons; Low is the least it does. Thinking off
@@ -862,7 +861,7 @@ public enum OpenAIRequestValidator {
                     "enable_thinking", "unsupported_parameter")
             }
             reasoning = .off
-            reasoningEffort = thinkingOff ? .low : request.reasoningEffort?.gptOSS ?? .medium
+            reasoningEffort = thinkingOff ? .low : request.reasoningEffort?.gradedEffort ?? .medium
             harmonyCurrentDate = InferenceCalendarDate.calendarDate()
         } else {
             let thinkingRequested = request.reasoningEffort != nil && !thinkingOff
@@ -870,11 +869,12 @@ public enum OpenAIRequestValidator {
                 throw invalid("reasoning_effort and enable_thinking false disagree",
                               "reasoning_effort", "invalid_value")
             }
-            // Other models have a toggle or always reason. They cannot
-            // distinguish the three GPT-OSS effort levels.
+            // Inkling supports graded effort. Other dialects here expose
+            // a switch or always reason.
             reasoning = dialect == .minimax || request.enableThinking == true
                 || thinkingRequested ? .on : .off
-            reasoningEffort = nil
+            reasoningEffort = dialect == .inkling && reasoning == .on
+                ? request.reasoningEffort?.gradedEffort ?? .high : nil
             harmonyCurrentDate = nil
         }
 

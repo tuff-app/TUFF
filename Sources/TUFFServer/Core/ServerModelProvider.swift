@@ -43,13 +43,15 @@ public protocol ServerModelProvider: Sendable {
     var queuedCount: Int { get async }
     var isActive: Bool { get async }
     func shutdown() async
-    /// Called once the request's model is ready. The returned closure gets
-    /// the finished completion, so a provider can learn from the run.
-    func completionRecorder(for model: ServerRoutedModel) -> (@Sendable (ServerCompletion) -> Void)?
+    /// The returned closure receives the finished completion so the provider
+    /// can learn from the run.
+    func completionRecorder(for model: ServerRoutedModel, request: ValidatedChatRequest)
+        -> (@Sendable (ServerCompletion) -> Void)?
 }
 
 extension ServerModelProvider {
-    public func completionRecorder(for model: ServerRoutedModel) -> (@Sendable (ServerCompletion) -> Void)? { nil }
+    public func completionRecorder(for model: ServerRoutedModel, request: ValidatedChatRequest)
+        -> (@Sendable (ServerCompletion) -> Void)? { nil }
 }
 
 /// What `GET /health` reports. A client can tell a running server from a

@@ -68,11 +68,9 @@ Balanced. Changes apply the next time the server loads the model.
 The API and Chat share one inference host per user, and with it one loaded
 copy of each model. If Chat already has a model loaded, an API request uses it
 as it is: the request runs with Chat's context and memory settings, and
-answers `context_length_exceeded` if it does not fit. The one difference that
-forces a reload is greedy (`temperature` 0) versus sampled generation; the API
-then reloads the model with Chat's context kept, but only while the host is
-idle, and answers 503 `model_busy` otherwise. A model the API loaded itself is
-unloaded again after the idle time you chose.
+answers `context_length_exceeded` if it does not fit. Greedy and sampled
+requests reuse the same loaded model. A model the API loaded itself is unloaded
+again after the idle time you chose.
 Image processing needs exclusive model memory. The host releases idle sessions
 and idle models when possible, without interrupting active turns. If memory is
 still held, the API answers 503 `model_memory_busy`; retry after the other work
@@ -147,15 +145,17 @@ Turning thinking on or off:
 | Model | Switch |
 | --- | --- |
 | GPT-OSS | `reasoning_effort`: `low`, `medium` (default) or `high`. |
+| Inkling 2 Mini | `reasoning_effort`: `none` (default), `low`, `medium` or `high`. `enable_thinking: true` uses `high` by default. |
 | MiniMax | Always thinks. |
 | Every other model | `enable_thinking` (or `chat_template_kwargs.enable_thinking`). Off by default. |
 
 `reasoning_effort: "none"` turns thinking off on models with a thinking
-switch. On GPT-OSS it means `low`. MiniMax always reasons. For models with a
-thinking switch, `low`, `medium`, and `high` all turn thinking on. GPT-OSS
-distinguishes those levels. Contradictory thinking settings return
-`invalid_value`. Successful responses report the effective mode in the
-`X-TUFF-Reasoning-Mode` header.
+switch. On GPT-OSS it means `low`. MiniMax always reasons. Inkling uses its
+native effort levels of 0, 0.2, 0.7, and 0.9. At zero effort (`none`), it can
+still produce reasoning, which counts toward the completion token limit.
+On models with a binary thinking switch, `low`, `medium`, and `high` all turn
+thinking on. Contradictory thinking settings return `invalid_value`. The
+`X-TUFF-Reasoning-Mode` header reports the setting sent to the model.
 
 ## Prompt reuse
 

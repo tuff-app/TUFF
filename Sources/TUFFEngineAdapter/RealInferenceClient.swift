@@ -591,7 +591,8 @@ actor RealInferenceSession {
         if request.usesToolTemplate {
             return try tokenizer.encodeToolChat(
                 messages: messages, tools: request.tools,
-                reasoning: request.reasoning, preserveThinking: preservesChatMLThinking)
+                reasoning: request.reasoning, preserveThinking: preservesChatMLThinking,
+                reasoningEffort: request.reasoningEffort)
                 + (request.assistantPrefix.isEmpty
                     ? [] : tokenizer.encode(request.assistantPrefix, addBOS: false))
         }
@@ -599,7 +600,8 @@ actor RealInferenceSession {
             messages,
             modelVariant: modelVariant,
             reasoning: request.reasoning,
-            preserveThinking: preservesChatMLThinking)
+            preserveThinking: preservesChatMLThinking,
+            reasoningEffort: request.reasoningEffort)
         return tokenizer.encode(rendered + request.assistantPrefix, addBOS: false)
     }
 

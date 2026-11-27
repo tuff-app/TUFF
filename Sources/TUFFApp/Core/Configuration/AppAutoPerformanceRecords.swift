@@ -42,7 +42,7 @@ public enum AppAutoPerformanceRecords {
         }
         let switches = ["TUFF_CONVERSATION_CACHE_MB", "TUFF_EXPERT_LOOKAHEAD", "TUFF_SMALL_BLOCK_PREFILL", "TUFF_SHARED_EXPERT_OVERLAP"]
             .map { ProcessInfo.processInfo.environment[$0] ?? "default" }.joined(separator: ":")
-        let source = "auto-v2:\(TUFFVersion.current):\(summary.manifestSHA256):\(summary.weightsSHA256):\(engine):\(volume):\(switches):\(systemString("hw.model")):\(systemString("machdep.cpu.brand_string")):\(device.unifiedMemoryBytes):\(ProcessInfo.processInfo.operatingSystemVersionString)"
+        let source = "auto-v3:\(TUFFVersion.current):\(summary.manifestSHA256):\(summary.weightsSHA256):\(engine):\(volume):\(switches):\(systemString("hw.model")):\(systemString("machdep.cpu.brand_string")):\(device.unifiedMemoryBytes):\(ProcessInfo.processInfo.operatingSystemVersionString)"
         return Sha256Verifier.hashData(Data(source.utf8))
     }
 

@@ -172,7 +172,7 @@ private final class ScriptedAPIHost: @unchecked Sendable {
             return
         }
         let prefill = DecodeServiceEvent(kind: .prefill, generationID: id, sequence: 1,
-                                         prefillDone: 1, prefillTotal: 1)
+                                         prefillDone: script.promptTokens, prefillTotal: script.promptTokens)
         send(prefill)
         var sequence: UInt64 = 2
         for piece in script.thinking {
@@ -312,6 +312,42 @@ private func post(_ port: Int, _ body: [String: Any], path: String = "/v1/chat/c
     request.httpBody = try JSONSerialization.data(withJSONObject: body)
     let (data, response) = try await URLSession.shared.data(for: request)
     return Reply(status: (response as? HTTPURLResponse)?.statusCode ?? 0, data: data)
+}
+
+@Suite struct HostServingStopFilterTests {
+    @Test func aLongNonmatchingStopLetsSafeTextThrough() {
+        var filter = HostServingStopFilter(stops: [String(repeating: "§", count: 200)])
+        #expect(filter.push("First piece. ") == "First piece. ")
+        #expect(filter.push("Second piece.") == "Second piece.")
+        #expect(filter.flush().isEmpty)
+        #expect(!filter.matched)
+    }
+
+    @Test func splitAndOverlappingStopsMatchAcrossChunks() {
+        var overlapping = HostServingStopFilter(stops: ["ab", "bc"])
+        #expect(overlapping.push("x") == "x")
+        #expect(overlapping.push("b").isEmpty)
+        #expect(overlapping.push("c and more").isEmpty)
+        #expect(overlapping.matched)
+
+        var selfOverlapping = HostServingStopFilter(stops: ["aab"])
+        #expect(selfOverlapping.push("xaa") == "x")
+        #expect(selfOverlapping.push("a") == "a")
+        #expect(selfOverlapping.push("b!").isEmpty)
+        #expect(selfOverlapping.matched)
+    }
+
+    @Test func matchingUsesLiteralUnicodeScalars() {
+        var filter = HostServingStopFilter(stops: ["🦊e"])
+        #expect(filter.push("go 🦊") == "go ")
+        #expect(filter.push("e\u{301}!").isEmpty)
+        #expect(filter.matched)
+
+        var literal = HostServingStopFilter(stops: ["é"])
+        let decomposed = "e\u{301}"
+        #expect(Array(literal.push(decomposed).unicodeScalars) == Array(decomposed.unicodeScalars))
+        #expect(!literal.matched)
+    }
 }
 
 // MARK: - Tests
@@ -498,6 +534,29 @@ private func post(_ port: Int, _ body: [String: Any], path: String = "/v1/chat/c
         let started = try #require(h.host.record.withLock { $0.started.first })
         #expect(started.payload.assistantPrefix == "Well,")
         #expect(h.host.record.withLock { $0.cancelled.contains(started.requestID) })
+        await h.finish()
+    }
+
+    @Test func messagesStreamReportsThePreparedPromptCount() async throws {
+        let h = try Harness(); defer { Task { await h.finish() } }
+        h.host.record.withLock { $0.defaultScript = Script(promptTokens: 22) }
+        let server = TUFFHTTPServer(provider: h.provider)
+        let port = try #require(try await server.start(port: 0).localAddress?.port)
+        let reply = try await post(port, ["model": "default", "stream": true, "max_tokens": 10,
+                                          "messages": [user("say something")]], path: "/v1/messages")
+        #expect(reply.status == 200)
+        let events = try reply.text.split(whereSeparator: \.isNewline).compactMap { line in
+            guard line.hasPrefix("data: ") else { return nil as [String: Any]? }
+            return try JSONSerialization.jsonObject(with: Data(line.dropFirst(6).utf8)) as? [String: Any]
+        }
+        let start = try #require(events.first { $0["type"] as? String == "message_start" })
+        let message = try #require(start["message"] as? [String: Any])
+        let initialUsage = try #require(message["usage"] as? [String: Int])
+        let end = try #require(events.first { $0["type"] as? String == "message_delta" })
+        let finalUsage = try #require(end["usage"] as? [String: Int])
+        #expect(initialUsage["input_tokens"] == 22)
+        #expect(finalUsage["input_tokens"] == 22)
+        try await server.shutdown()
         await h.finish()
     }
 

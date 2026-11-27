@@ -196,9 +196,10 @@ public final class HostRoutedModelProvider: ServerModelProvider {
         }
     }
 
-    public func completionRecorder(for model: ServerRoutedModel) -> (@Sendable (ServerCompletion) -> Void)? {
+    public func completionRecorder(for model: ServerRoutedModel, request: ValidatedChatRequest)
+        -> (@Sendable (ServerCompletion) -> Void)? {
         guard let descriptor = installed.descriptor(named: model.id),
-              let record = installed.autoRecorder(for: descriptor) else { return nil }
+              let record = installed.autoRecorder(for: descriptor, request: request) else { return nil }
         return { [self] completion in
             // Auto learns only from runs in the configuration it chose; a run
             // that adopted the app's settings says nothing about them.

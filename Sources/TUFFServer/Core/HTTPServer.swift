@@ -487,7 +487,8 @@ final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     message: "\(modelID) does not accept images on this Mac",
                     param: "messages", code: "image_input_unavailable")
             }
-            let reasoningMode = request.reasoningEffort?.rawValue ?? request.reasoning.rawValue
+            let reasoningMode = request.reasoningEffort?.rawValue
+                ?? (target.dialect == .inkling ? "none" : request.reasoning.rawValue)
             let responseID = (api == .messages ? "msg_" : api == .responses ? "resp_" : "chatcmpl-") + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
             let created = Int(Date().timeIntervalSince1970)
             let adapter = api == .chat ? nil : InferenceAdapterWire(api: api, id: responseID, model: modelID, created: created, dialect: target.dialect)
@@ -544,9 +545,9 @@ final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         target,
                         onQueued: onQueued,
                         prepare: { backend in
-                            // The model is loaded by now, so its load is not
-                            // counted as part of the run.
-                            recorder.withLock { $0 = self.provider.completionRecorder(for: target) }
+                            recorder.withLock {
+                                $0 = self.provider.completionRecorder(for: target, request: request)
+                            }
                             timings.preparing()
                             let prepared = try await backend.prepare(request)
                             timings.prepared()

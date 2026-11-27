@@ -32,12 +32,17 @@ enum InklingPrompt {
 
     /// The effort the template writes for each reasoning setting. Off is the
     /// template's "none"; on is the value it uses when nothing is asked for.
-    static func effort(_ reasoning: ChatReasoning) -> String {
-        reasoning == .on ? "0.9" : "0"
+    static func effort(_ reasoning: ChatReasoning, level: ModelReasoningEffort? = nil) -> String {
+        guard reasoning == .on else { return "0" }
+        switch level ?? .high {
+        case .low: return "0.2"
+        case .medium: return "0.7"
+        case .high: return "0.9"
+        }
     }
 
-    static func effortMessage(_ reasoning: ChatReasoning) -> String {
-        systemMark + textMark + "Thinking effort level: " + effort(reasoning) + endMessageMark
+    static func effortMessage(_ reasoning: ChatReasoning, level: ModelReasoningEffort?) -> String {
+        systemMark + textMark + "Thinking effort level: " + effort(reasoning, level: level) + endMessageMark
     }
 
     /// Text from a user, a tool or a system prompt must not be able to close
@@ -69,7 +74,7 @@ enum InklingPrompt {
     }
 
     static func render(messages: [InferenceChatMessage], tools: [InferenceFunctionDefinition],
-                       reasoning: ChatReasoning) throws -> String {
+                       reasoning: ChatReasoning, reasoningEffort: ModelReasoningEffort? = nil) throws -> String {
         var text = ""
         if !tools.isEmpty {
             let specs: [JSONValue] = tools.map { tool in
@@ -83,7 +88,7 @@ enum InklingPrompt {
         for (index, message) in messages.enumerated() {
             let isSystem = message.role == .system || message.role == .developer
             if !effortWritten && !isSystem {
-                text += effortMessage(reasoning)
+                text += effortMessage(reasoning, level: reasoningEffort)
                 effortWritten = true
             }
             switch message.role {
@@ -119,7 +124,7 @@ enum InklingPrompt {
                 text += endTurnMark
             }
         }
-        if !effortWritten { text += effortMessage(reasoning) }
+        if !effortWritten { text += effortMessage(reasoning, level: reasoningEffort) }
         return text
     }
 

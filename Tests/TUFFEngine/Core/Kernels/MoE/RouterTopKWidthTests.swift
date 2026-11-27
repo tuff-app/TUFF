@@ -142,8 +142,11 @@ import TUFFValidationSupport
 
     /// A count past the blob array has to be refused rather than corrupting
     /// memory.
-    @Test func aCountBeyondTheBlobArrayIsRejected() throws {
-        #expect(MoE.maxStreamedExperts >= 10)
-        #expect(MoE.defaultStreamedExperts == 8)
+    @Test(arguments: [0, MoE.maxStreamedExperts + 1])
+    func invalidRoutedExpertCountsAreRejected(count: Int) throws {
+        let context = try MetalContext()
+        #expect(throws: MoE.ConfigurationError.invalidRoutedExpertCount(count)) {
+            try MoE(context: context, topKExperts: count)
+        }
     }
 }

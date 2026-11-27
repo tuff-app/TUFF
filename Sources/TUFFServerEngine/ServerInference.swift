@@ -1166,13 +1166,15 @@ public actor ServerModelSession: ServerInferenceBackend {
                 messages: messages,
                 tools: request.tools,
                 reasoning: request.reasoning,
-                preserveThinking: request.preserveThinking)
+                preserveThinking: request.preserveThinking,
+                reasoningEffort: request.reasoningEffort)
         } else {
             let rendered = try tokenizer.applyChatTemplate(
                 messages,
                 modelVariant: model.config.variant,
                 reasoning: request.reasoning,
-                preserveThinking: request.preserveThinking)
+                preserveThinking: request.preserveThinking,
+                reasoningEffort: request.reasoningEffort)
             promptIDs = tokenizer.encode(rendered, addBOS: false)
         }
         return promptIDs

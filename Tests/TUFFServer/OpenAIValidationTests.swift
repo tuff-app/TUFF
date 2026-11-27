@@ -123,6 +123,16 @@ struct OpenAIValidationTests {
         }
     }
 
+    @Test(arguments: ["none", "low", "medium", "high"])
+    func inklingRetainsItsNativeEffort(setting: String) throws {
+        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: Data("""
+            {"model":"m","messages":[{"role":"user","content":"x"}],"reasoning_effort":"\(setting)"}
+            """.utf8))
+        let validated = try OpenAIRequestValidator.validate(request, modelID: "m", dialect: .inkling)
+        #expect(validated.reasoning == (setting == "none" ? .off : .on))
+        #expect(validated.reasoningEffort?.rawValue == (setting == "none" ? nil : setting))
+    }
+
     @Test func capturedOpenCodeToolResultValidates() throws {
         let request = try fixture("opencode-1.15.11-tool-result.json")
         let validated = try OpenAIRequestValidator.validate(

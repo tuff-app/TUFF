@@ -20,7 +20,7 @@ public struct AppGenerationRequest: Equatable, Sendable {
     public var maxNewTokens: Int
     public var maxContextTokens: Int
     public var reasoning: ChatReasoning
-    public var reasoningEffort: GPTOSSReasoningEffort?
+    public var reasoningEffort: ModelReasoningEffort?
     public var preserveThinking: Bool
     public var temperature: Float
     public var topK: Int?
@@ -49,7 +49,7 @@ public struct AppGenerationRequest: Equatable, Sendable {
                 maxNewTokens: Int = 4_096,
                 maxContextTokens: Int = 4096,
                 reasoning: ChatReasoning = .off,
-                reasoningEffort: GPTOSSReasoningEffort? = nil,
+                reasoningEffort: ModelReasoningEffort? = nil,
                 preserveThinking: Bool = false,
                 temperature: Float = 0.2,
                 topK: Int? = 64,
@@ -181,16 +181,16 @@ public struct AppGenerationRequest: Equatable, Sendable {
     static func validateReasoning(
         family: ModelFamily,
         reasoning: ChatReasoning,
-        reasoningEffort: GPTOSSReasoningEffort?
+        reasoningEffort: ModelReasoningEffort?
     ) throws {
         if family == .gptOss {
             guard reasoning == .off else {
                 throw AppInferenceError.invalidRequest(
                     "GPT-OSS uses graded reasoning effort, not an on/off switch.")
             }
-        } else if reasoningEffort != nil {
+        } else if family != .inkling2 && reasoningEffort != nil {
             throw AppInferenceError.invalidRequest(
-                "Reasoning effort is only supported by GPT-OSS.")
+                "Graded reasoning effort is supported by GPT-OSS and Inkling 2.")
         }
     }
 

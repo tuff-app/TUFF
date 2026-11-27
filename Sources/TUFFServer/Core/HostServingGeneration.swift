@@ -100,7 +100,7 @@ actor HostServingGeneration {
     /// arrives as the terminal event before any of that and is thrown here, so
     /// the HTTP layer can answer it with a real status instead of a stream
     /// that opened and then failed.
-    func awaitStart() async throws {
+    func awaitStart() async throws -> Int? {
         while true {
             guard let event = try await next() else {
                 try Task.checkCancellation()
@@ -117,10 +117,10 @@ actor HostServingGeneration {
             case .finished, .cancelled:
                 sawTerminal = true
                 queue.insert(event, at: 0)
-                return
+                return event.promptTokenCount
             case .prefill, .snapshot:
                 queue.insert(event, at: 0)
-                return
+                return event.prefillTotal ?? event.promptTokenCount
             }
         }
     }

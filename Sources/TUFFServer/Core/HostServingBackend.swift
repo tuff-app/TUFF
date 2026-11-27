@@ -88,21 +88,23 @@ actor HostServingBackend: ServerInferenceBackend {
                 message: "The loaded model cannot accept images on this Mac",
                 param: "messages", code: "image_input_unavailable")
         }
+        let promptTokens: Int?
         do {
-            try await start(request, requestID: UUID(), correction: nil)
+            promptTokens = try await start(request, requestID: UUID(), correction: nil)
         } catch ServerRequestError.malformedToolCall where !retriedMalformedToolCall {
             // The whole generation failed before the host reported progress.
-            try await retryWithCorrection(request)
+            promptTokens = try await retryWithCorrection(request)
         }
         guard let started = generation else {
             throw HostServingError("the host generation did not start")
         }
-        return ServerPreparedRequest(request: request, remotePreparationID: started.requestID)
+        return ServerPreparedRequest(request: request, remotePreparationID: started.requestID,
+                                     remotePromptTokenCount: promptTokens)
     }
 
     /// Ends the failed attempt and starts the one corrective retry, in a
     /// fresh session so none of the failed attempt's state is reused.
-    private func retryWithCorrection(_ request: ValidatedChatRequest) async throws {
+    private func retryWithCorrection(_ request: ValidatedChatRequest) async throws -> Int? {
         retriedMalformedToolCall = true
         ServerLog.malformedToolCallRetry(model: descriptor.apiModelID)
         if let running = generation {
@@ -115,13 +117,13 @@ actor HostServingBackend: ServerInferenceBackend {
         }
         session = nil
         try Task.checkCancellation()
-        try await start(request, requestID: UUID(), correction: Self.malformedToolCallCorrection)
+        return try await start(request, requestID: UUID(), correction: Self.malformedToolCallCorrection)
     }
 
     /// Starts one host generation for the request and waits until the host
     /// accepted it.
     private func start(_ request: ValidatedChatRequest, requestID: UUID,
-                       correction: String?) async throws {
+                       correction: String?) async throws -> Int? {
         var attempt = 0
         while true {
             let preparation = try await provider.acquire(descriptor)
@@ -159,8 +161,7 @@ actor HostServingBackend: ServerInferenceBackend {
                 link: provider.link, client: client, request: routed)
             generation = started
             do {
-                try await started.awaitStart()
-                return
+                return try await started.awaitStart()
             } catch ServerRequestError.hostUnavailable where attempt == 0 {
                 // The host went away between the model check and the start
                 // (it may have idled out or restarted). Reconnect, re-prepare
@@ -202,7 +203,7 @@ actor HostServingBackend: ServerInferenceBackend {
                     throw failure.error
                 }
                 prepared.onDiscardedAttempt?()
-                try await retryWithCorrection(prepared.request)
+                _ = try await retryWithCorrection(prepared.request)
             }
         }
     }
